@@ -64,6 +64,9 @@ type RestoredTab = (
 type RestoreFailures<T> = (T, usize);
 
 /// Restore workspaces from a snapshot. Each pane gets a fresh shell in its saved cwd.
+// resume_agent_args is a new per-agent arg map; allowing extra args avoids a larger
+// refactor into a builder/options struct at this call depth.
+#[allow(clippy::too_many_arguments)]
 pub fn restore(
     snapshot: &SessionSnapshot,
     history: Option<&SessionHistorySnapshot>,
@@ -192,6 +195,9 @@ fn collect_layout_snapshot_pane_ids(node: &LayoutSnapshot, ids: &mut Vec<u32>) {
     }
 }
 
+// resume_agent_args added one argument past the clippy limit; a refactor into an
+// options struct is deferred until the broader restore API is stabilised.
+#[allow(clippy::too_many_arguments)]
 #[cfg(unix)]
 fn restore_with_imports_strict(
     snapshot: &SessionSnapshot,
@@ -235,6 +241,8 @@ fn restore_with_imports_strict(
     Ok(restored)
 }
 
+// See allow note on restore_with_imports_strict above.
+#[allow(clippy::too_many_arguments)]
 fn restore_with_imports(
     snapshot: &SessionSnapshot,
     history: Option<&SessionHistorySnapshot>,
@@ -266,6 +274,8 @@ fn restore_with_imports(
     .0
 }
 
+// See allow note on restore_with_imports_strict above.
+#[allow(clippy::too_many_arguments)]
 fn restore_with_imports_and_failures(
     snapshot: &SessionSnapshot,
     history: Option<&SessionHistorySnapshot>,
