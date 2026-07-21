@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, num::NonZeroUsize};
+use std::{collections::{BTreeMap, BTreeSet}, num::NonZeroUsize};
 
 use crossterm::event::KeyModifiers;
 use serde::{de, Deserialize, Deserializer, Serialize};
@@ -247,12 +247,37 @@ pub struct SessionConfig {
     /// Resume supported AI-agent panes into their native conversation sessions
     /// when restoring a Herdr session. Default: true.
     pub resume_agents_on_restore: bool,
+    /// Extra arguments appended to an agent's native resume command, keyed by
+    /// canonical agent id (for example `claude`). Empty by default.
+    #[serde(default, deserialize_with = "deserialize_resume_agent_args")]
+    pub resume_agent_args: BTreeMap<String, Vec<String>>,
+}
+
+/// Deserialize `[session.resume_agent_args]`, rejecting keys that are not
+/// canonical agent ids. Mirrors `deserialize_rows_by_agent` in
+/// `src/config/sidebar.rs`.
+fn deserialize_resume_agent_args<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let map = BTreeMap::<String, Vec<String>>::deserialize(deserializer)?;
+    for id in map.keys() {
+        if crate::detect::parse_canonical_agent_label(id).is_none() {
+            return Err(de::Error::custom(format!(
+                "unknown canonical agent id `{id}` in resume_agent_args"
+            )));
+        }
+    }
+    Ok(map)
 }
 
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             resume_agents_on_restore: true,
+            resume_agent_args: BTreeMap::new(),
         }
     }
 }
@@ -1737,5 +1762,39 @@ scrollback_lines = 12345
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.advanced.scrollback_limit_bytes, 12345);
+    }
+
+    #[test]
+    fn resume_agent_args_parses_and_defaults() {
+        let default_config = Config::default();
+        assert!(default_config.session.resume_agent_args.is_empty());
+
+        let toml = r#"
+[session.resume_agent_args]
+claude = ["--dangerously-skip-permissions"]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config
+                .session
+                .resume_agent_args
+                .get("claude")
+                .map(Vec::as_slice),
+            Some(["--dangerously-skip-permissions".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn resume_agent_args_rejects_unknown_agent_id() {
+        let toml = r#"
+[session.resume_agent_args]
+notanagent = ["--x"]
+"#;
+        let err = toml::from_str::<Config>(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown canonical agent id `notanagent` in resume_agent_args"),
+            "unexpected error: {err}"
+        );
     }
 }
