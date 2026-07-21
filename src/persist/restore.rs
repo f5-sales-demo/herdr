@@ -758,7 +758,11 @@ fn pane_restore_startup<'a>(
     // presentation history into that terminal, even when this pane is a
     // duplicate suppressed by session de-duplication.
     let restore_plan = session.and_then(|session| {
-        restore_plan_for_snapshot(session, agent_restore.enabled, agent_restore.resume_agent_args)
+        restore_plan_for_snapshot(
+            session,
+            agent_restore.enabled,
+            agent_restore.resume_agent_args,
+        )
     });
     let has_native_agent_restore = restore_plan.is_some();
     // Reserve before spawning so later panes in the same restore pass cannot
@@ -1073,9 +1077,8 @@ mod tests {
         );
         assert!(resumed.is_empty());
 
-        let first =
-            take_restore_plan_for_snapshot(&session, true, &BTreeMap::new(), &mut resumed)
-                .expect("first restore should get a plan");
+        let first = take_restore_plan_for_snapshot(&session, true, &BTreeMap::new(), &mut resumed)
+            .expect("first restore should get a plan");
         assert_eq!(
             first.argv,
             vec!["pi", "--session", pi_session_path.as_str()]
