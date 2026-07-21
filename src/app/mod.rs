@@ -402,6 +402,7 @@ impl App {
                 &config.terminal.default_shell,
                 config.terminal.shell_mode,
                 config.session.resume_agents_on_restore,
+                &config.session.resume_agent_args,
                 event_tx.clone(),
                 render_notify.clone(),
                 render_dirty.clone(),
