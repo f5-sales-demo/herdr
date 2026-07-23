@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added first-class recognition of the `xcsh` coding agent (a fork of Pi): process and screen detection, lifecycle-authority state from xcsh's bundled herdr reporter (`source: "herdr:xcsh"`), and native session resume with `xcsh --resume=<session>`. xcsh ships its own reporter, so no `herdr integration install` step is required.
+
 ## [0.7.5] - 2026-07-21
 
 ### Breaking Changes

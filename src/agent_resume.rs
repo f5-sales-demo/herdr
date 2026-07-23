@@ -60,7 +60,7 @@ pub fn session_ref_from_report(
         return None;
     }
 
-    if agent == "pi" || agent == "omp" {
+    if agent == "pi" || agent == "xcsh" || agent == "omp" {
         return _agent_session_path
             .and_then(AgentSessionRef::path)
             .or_else(|| agent_session_id.and_then(AgentSessionRef::id));
@@ -101,7 +101,7 @@ pub fn session_ref_from_snapshot(
         return None;
     }
     let session_ref = match (agent, kind) {
-        ("pi" | "omp", AgentSessionRefKind::Path) => AgentSessionRef::path(value)?,
+        ("pi" | "xcsh" | "omp", AgentSessionRefKind::Path) => AgentSessionRef::path(value)?,
         (_, AgentSessionRefKind::Id) => AgentSessionRef::id(value)?,
         _ => return None,
     };
@@ -149,6 +149,11 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
         }
         ("herdr:pi", "pi", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
             vec!["pi".into(), "--session".into(), session_ref.value.clone()]
+        }
+        ("herdr:xcsh", "xcsh", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
+            // xcsh (a pi fork) resume is `-r, --resume=<value>` (ID prefix or path);
+            // like omp it has no `--session` flag, unlike pi.
+            vec!["xcsh".into(), format!("--resume={}", session_ref.value)]
         }
         ("herdr:omp", "omp", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
             // omp resume is `-r, --resume=<value>` (ID prefix or path); it has no
@@ -215,6 +220,7 @@ fn is_official_agent_source(source: &str, agent: &str) -> bool {
             | ("herdr:omp", "omp")
             | ("herdr:mastracode", "mastracode")
             | ("herdr:pi", "pi")
+            | ("herdr:xcsh", "xcsh")
             | ("herdr:hermes", "hermes")
             | ("herdr:opencode", "opencode")
             | ("herdr:qodercli", "qodercli")
@@ -262,6 +268,7 @@ mod tests {
     fn planner_allows_supported_agents() {
         let pi_session = absolute_test_path("pi-session.jsonl");
         let omp_session = absolute_test_path("omp-session.jsonl");
+        let xcsh_session = absolute_test_path("xcsh-session.jsonl");
         assert_eq!(
             plan(
                 "herdr:claude",
@@ -352,6 +359,27 @@ mod tests {
             .argv,
             vec!["omp", format!("--resume={omp_session}").as_str()]
         );
+        // xcsh (pi fork) resumes like omp: `--resume=<path|id>`, accepting both kinds.
+        assert_eq!(
+            plan(
+                "herdr:xcsh",
+                "xcsh",
+                &AgentSessionRef::path(&xcsh_session).unwrap()
+            )
+            .unwrap()
+            .argv,
+            vec!["xcsh", format!("--resume={xcsh_session}").as_str()]
+        );
+        assert_eq!(
+            plan(
+                "herdr:xcsh",
+                "xcsh",
+                &AgentSessionRef::id("xcsh-id").unwrap()
+            )
+            .unwrap()
+            .argv,
+            vec!["xcsh", "--resume=xcsh-id"]
+        );
         assert_eq!(
             plan(
                 "herdr:hermes",
@@ -425,8 +453,24 @@ mod tests {
     fn report_ref_prefers_pi_and_omp_paths_and_validates_values() {
         let pi_session = absolute_test_path("pi-session.jsonl");
         let omp_session = absolute_test_path("omp-session.jsonl");
+        let xcsh_session = absolute_test_path("xcsh-session.jsonl");
         let claude_session = absolute_test_path("claude-session");
         let copilot_session = absolute_test_path("copilot-session");
+
+        // xcsh (pi fork) prefers a filesystem session path over id, like pi/omp.
+        let session_ref = session_ref_from_report(
+            "herdr:xcsh",
+            "xcsh",
+            Some("xcsh-id".into()),
+            Some(xcsh_session.clone()),
+        )
+        .unwrap();
+        assert_eq!(session_ref.kind, AgentSessionRefKind::Path);
+        assert_eq!(session_ref.value, xcsh_session);
+        let session_ref =
+            session_ref_from_report("herdr:xcsh", "xcsh", Some("xcsh-id".into()), None).unwrap();
+        assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
+        assert_eq!(session_ref.value, "xcsh-id");
         let session_ref = session_ref_from_report(
             "herdr:pi",
             "pi",
