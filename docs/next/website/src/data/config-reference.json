@@ -814,6 +814,17 @@
           ]
         },
         {
+          "key": "ui.sound.agents.xcsh",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected xcsh agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
           "key": "ui.sound.agents.claude",
           "type": "enum",
           "default": "\"default\"",
@@ -1022,6 +1033,12 @@
           "type": "boolean",
           "default": "true",
           "description": "Resume supported AI-agent panes into their native conversation sessions when restoring a Herdr session."
+        },
+        {
+          "key": "session.resume_agent_args",
+          "type": "table",
+          "default": "{}",
+          "description": "Extra CLI arguments appended to an agent's native resume command on restore, keyed by canonical agent id (e.g. claude = [\"--dangerously-skip-permissions\"])."
         }
       ]
     },

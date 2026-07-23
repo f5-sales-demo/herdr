@@ -1,0 +1,20 @@
+id = "xcsh"
+version = "2026.07.22.1"
+min_engine_version = 1
+updated_at = "2026-07-22T00:00:00Z"
+aliases = ["herdr:xcsh"]
+
+# xcsh is a fork of pi and shares pi's TUI, so this mirrors pi.toml as the
+# screen-detection fallback. The xcsh reporter extension
+# (assets/xcsh/herdr-agent-state.ts) is the live authority; when it is
+# connected, full_lifecycle_hook_authority disables screen scraping. These
+# rules only matter when the reporter is not installed/connected. Enrich with
+# evidence-based rules (herdr agent read/explain against a live xcsh pane) as
+# needed; do not guess.
+[[rules]]
+id = "working_literal"
+state = "working"
+priority = 100
+region = "whole_recent"
+visible_working = true
+contains = ["Working..."]

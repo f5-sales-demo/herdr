@@ -26,6 +26,7 @@ pub struct SoundConfig {
 #[serde(default)]
 pub struct AgentSoundOverrides {
     pub pi: AgentSoundSetting,
+    pub xcsh: AgentSoundSetting,
     pub claude: AgentSoundSetting,
     pub codex: AgentSoundSetting,
     pub gemini: AgentSoundSetting,
@@ -120,6 +121,7 @@ impl AgentSoundOverrides {
     pub fn for_agent(&self, agent: Option<Agent>) -> AgentSoundSetting {
         match agent {
             Some(Agent::Pi) => self.pi,
+            Some(Agent::Xcsh) => self.xcsh,
             Some(Agent::Claude) => self.claude,
             Some(Agent::Codex) => self.codex,
             Some(Agent::Gemini) => self.gemini,
@@ -161,6 +163,7 @@ impl Default for AgentSoundOverrides {
     fn default() -> Self {
         Self {
             pi: AgentSoundSetting::Default,
+            xcsh: AgentSoundSetting::Default,
             claude: AgentSoundSetting::Default,
             codex: AgentSoundSetting::Default,
             gemini: AgentSoundSetting::Default,

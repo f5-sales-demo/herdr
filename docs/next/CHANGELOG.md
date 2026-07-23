@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added first-class recognition of the `xcsh` coding agent (a fork of Pi): process and screen detection, lifecycle-authority state from xcsh's bundled herdr reporter (`source: "herdr:xcsh"`), and native session resume with `xcsh --resume=<session>`. xcsh ships its own reporter, so no `herdr integration install` step is required.
+
 ### Changed
 - Agent status indicators now use the same static workspace marks across the sidebar, navigator, and mobile views, eliminating continuous spinner rendering while agents work.
 - Relicensed Herdr from AGPL-3.0-or-later to Apache-2.0.
