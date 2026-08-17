@@ -110,9 +110,13 @@ impl PaneLaunchEnv {
 
 fn apply_pane_launch_env(cmd: &mut CommandBuilder, launch_env: &PaneLaunchEnv) {
     for (key, value) in &launch_env.extra {
+        if key == crate::HERDR_KITTY_GRAPHICS_ENV_VAR {
+            continue;
+        }
         cmd.env(key, value);
     }
     cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
+    apply_kitty_graphics_capability_env(cmd, crate::kitty_graphics::is_enabled());
     crate::integration::apply_pane_base_env(cmd);
     match &launch_env.identity {
         PaneLaunchIdentity::Inherit => {}
@@ -128,6 +132,14 @@ fn apply_pane_launch_env(cmd: &mut CommandBuilder, launch_env: &PaneLaunchEnv) {
         PaneLaunchIdentity::OmitPane => {
             cmd.env_remove(crate::integration::HERDR_PANE_ID_ENV_VAR);
         }
+    }
+}
+
+fn apply_kitty_graphics_capability_env(cmd: &mut CommandBuilder, enabled: bool) {
+    if enabled {
+        cmd.env(crate::HERDR_KITTY_GRAPHICS_ENV_VAR, crate::HERDR_ENV_VALUE);
+    } else {
+        cmd.env_remove(crate::HERDR_KITTY_GRAPHICS_ENV_VAR);
     }
 }
 
@@ -3197,6 +3209,48 @@ mod tests {
     fn pane_terminal_identity_overrides_outer_terminal_env() {
         let output = capture_shell_output("printf '%s\\n%s\\n' \"$TERM\" \"$COLORTERM\"", &[]);
         assert_eq!(output, "xterm-256color\ntruecolor\n");
+    }
+
+    #[test]
+    fn kitty_graphics_capability_is_enabled_only_when_configured() {
+        let mut enabled = CommandBuilder::new("/bin/sh");
+        apply_kitty_graphics_capability_env(&mut enabled, true);
+        assert_eq!(
+            enabled
+                .get_env(crate::HERDR_KITTY_GRAPHICS_ENV_VAR)
+                .and_then(std::ffi::OsStr::to_str),
+            Some(crate::HERDR_ENV_VALUE)
+        );
+
+        let mut disabled = CommandBuilder::new("/bin/sh");
+        disabled.env(crate::HERDR_KITTY_GRAPHICS_ENV_VAR, "hostile");
+        apply_kitty_graphics_capability_env(&mut disabled, false);
+        assert!(disabled
+            .get_env(crate::HERDR_KITTY_GRAPHICS_ENV_VAR)
+            .is_none());
+    }
+
+    #[test]
+    fn pane_launch_env_reserves_kitty_graphics_capability() {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        let launch_env = PaneLaunchEnv::from_extra(vec![
+            (
+                crate::HERDR_KITTY_GRAPHICS_ENV_VAR.to_string(),
+                "hostile".to_string(),
+            ),
+            ("UNRELATED".to_string(), "kept".to_string()),
+        ]);
+        apply_pane_launch_env(&mut cmd, &launch_env);
+
+        assert_ne!(
+            cmd.get_env(crate::HERDR_KITTY_GRAPHICS_ENV_VAR)
+                .and_then(std::ffi::OsStr::to_str),
+            Some("hostile")
+        );
+        assert_eq!(
+            cmd.get_env("UNRELATED").and_then(std::ffi::OsStr::to_str),
+            Some("kept")
+        );
     }
 
     #[cfg(unix)]
