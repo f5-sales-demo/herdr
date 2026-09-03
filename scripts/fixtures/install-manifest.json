@@ -8,6 +8,18 @@
     "linux-x86_64": {
       "binary": {"url": "FIXTURE_URL", "sha256": "FIXTURE_SHA"},
       "archive": {"url": "unused", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    },
+    "linux-aarch64": {
+      "binary": {"url": "FIXTURE_URL", "sha256": "FIXTURE_SHA"},
+      "archive": {"url": "unused", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    },
+    "macos-x86_64": {
+      "binary": {"url": "FIXTURE_URL", "sha256": "FIXTURE_SHA"},
+      "archive": {"url": "unused", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    },
+    "macos-aarch64": {
+      "binary": {"url": "FIXTURE_URL", "sha256": "FIXTURE_SHA"},
+      "archive": {"url": "unused", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
     }
   }
 }
