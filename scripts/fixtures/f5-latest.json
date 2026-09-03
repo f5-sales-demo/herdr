@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "tag": "v0.7.5-xcsh3",
+  "base_version": "0.7.5",
+  "binary_version": "0.7.5",
+  "revision": 3,
+  "platforms": {
+    "macos-aarch64": {"binary": {"url": "https://github.com/f5-sales-demo/herdr/releases/download/v0.7.5-xcsh3/herdr-macos-aarch64", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "archive": {"url": "https://github.com/f5-sales-demo/herdr/releases/download/v0.7.5-xcsh3/herdr-macos-aarch64.tar.gz", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}},
+    "macos-x86_64": {"binary": {"url": "https://github.com/f5-sales-demo/herdr/releases/download/v0.7.5-xcsh3/herdr-macos-x86_64", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}, "archive": {"url": "https://github.com/f5-sales-demo/herdr/releases/download/v0.7.5-xcsh3/herdr-macos-x86_64.tar.gz", "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}
+  }
+}
