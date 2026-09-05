@@ -1543,6 +1543,7 @@ impl App {
                 "closing this pane would close a worktree group",
             ));
         }
+        self.cancel_agent_admission_for_panes(std::slice::from_ref(&public_pane_id));
         let workspace_snapshot = self.workspace_info(ws_idx);
         let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
         let should_close_workspace = {

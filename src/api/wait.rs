@@ -317,7 +317,11 @@ fn agent_prompt_success(
 ) -> std::io::Result<String> {
     serde_json::to_string(&SuccessResponse {
         id: request_id,
-        result: ResponseResult::AgentPrompted { agent },
+        result: ResponseResult::AgentPrompted {
+            agent,
+            queued: false,
+            queue_position: None,
+        },
     })
     .map_err(std::io::Error::other)
 }
@@ -499,6 +503,7 @@ fn wait_for_resolved_agent(
 fn all_agent_statuses() -> Vec<crate::api::schema::AgentStatus> {
     // Keep this exhaustive: every status is evidence that the sequence advanced.
     vec![
+        crate::api::schema::AgentStatus::Queued,
         crate::api::schema::AgentStatus::Idle,
         crate::api::schema::AgentStatus::Working,
         crate::api::schema::AgentStatus::Blocked,

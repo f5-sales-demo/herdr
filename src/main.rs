@@ -54,6 +54,7 @@ fn set_host_color_scheme_reports(enabled: bool) -> io::Result<()> {
     io::stdout().flush()
 }
 
+mod agent_admission;
 mod agent_resume;
 mod api;
 mod app;
@@ -371,6 +372,15 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # By default, droid is muted.
 # [ui.sound.agents]
 # droid = "off"
+
+[agent_admission]
+# Maximum number of coding-agent prompts dispatched concurrently.
+# Further prompts remain queued until an active agent returns to idle.
+# max_in_flight = 3
+# Optional lower caps keyed by provider. `herdr agent prompt --provider KEY`
+# chooses a key explicitly; otherwise the detected agent label is used.
+# [agent_admission.provider_limits]
+# openai = 2
 
 [session]
 # Resume supported AI-agent panes into their native conversation sessions after

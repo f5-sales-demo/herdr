@@ -831,6 +831,7 @@ pub(super) fn parse_read_format(value: &str) -> std::io::Result<ReadFormat> {
 
 fn parse_agent_status(value: &str) -> std::io::Result<AgentStatus> {
     match value {
+        "queued" => Ok(AgentStatus::Queued),
         "idle" => Ok(AgentStatus::Idle),
         "working" => Ok(AgentStatus::Working),
         "blocked" => Ok(AgentStatus::Blocked),

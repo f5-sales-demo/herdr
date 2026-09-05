@@ -6,6 +6,7 @@ use super::{model::LoadedConfig, Config, CONFIG_PATH_ENV_VAR};
 
 const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "advanced",
+    "agent_admission",
     "experimental",
     "keys",
     "onboarding",
@@ -291,6 +292,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut diagnostics,
         &mut invalid_sections,
         |section| config.session = section,
+    );
+    load_live_section(
+        table,
+        "agent_admission",
+        "agent admission config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.agent_admission = section,
     );
     load_live_section(
         table,
@@ -861,6 +870,24 @@ resume_agents_on_restore = true
         assert!(loaded.config.session.resume_agents_on_restore);
         assert!(loaded.diagnostics.is_empty());
         assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
+    fn load_live_config_parses_agent_admission_section() {
+        let loaded = load_live_config_from_str(
+            r#"
+[agent_admission]
+max_in_flight = 4
+
+[agent_admission.provider_limits]
+openai = 2
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(loaded.config.agent_admission.max_in_flight, 4);
+        assert_eq!(loaded.config.agent_admission.provider_limits["openai"], 2);
+        assert!(loaded.diagnostics.is_empty());
     }
 
     #[test]

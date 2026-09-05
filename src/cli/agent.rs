@@ -638,7 +638,7 @@ fn agent_rename(args: &[String]) -> std::io::Result<i32> {
 fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
     let Some(target) = args.first() else {
         eprintln!(
-            "usage: herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]"
+            "usage: herdr agent prompt <target> <text> [--provider KEY] [--wait] [--until STATUS]... [--timeout MS]"
         );
         return Ok(2);
     };
@@ -649,6 +649,7 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
     let mut wait = false;
     let mut until = Vec::new();
     let mut timeout_ms = None;
+    let mut provider = None;
     let mut index = 2;
     while index < args.len() {
         match args[index].as_str() {
@@ -682,6 +683,18 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
                 };
                 index += 2;
             }
+            "--provider" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --provider");
+                    return Ok(2);
+                };
+                if value.is_empty() {
+                    eprintln!("--provider must not be empty");
+                    return Ok(2);
+                }
+                provider = Some(value.clone());
+                index += 2;
+            }
             option => {
                 eprintln!("unknown option: {option}");
                 return Ok(2);
@@ -701,6 +714,7 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
         method: Method::AgentPrompt(AgentPromptParams {
             target: target.clone(),
             text: text.clone(),
+            provider,
             wait: wait.then_some(AgentPromptWaitOptions { until, timeout_ms }),
         }),
     })?;

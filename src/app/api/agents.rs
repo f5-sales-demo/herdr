@@ -85,10 +85,12 @@ impl App {
         if terminal.managed_agent_launch_pending() {
             return agent_not_ready(id, &params.target);
         }
-        let Some(runtime) = self.lookup_runtime_sender(resolved.ws_idx, resolved.pane_id) else {
-            return agent_not_found(id, &params.target);
-        };
-        if !super::super::agents::runtime_hosts_agent(runtime, expected_agent) {
+        let runtime_hosts_agent = self
+            .lookup_runtime_sender(resolved.ws_idx, resolved.pane_id)
+            .is_some_and(|runtime| {
+                super::super::agents::runtime_hosts_agent(runtime, expected_agent)
+            });
+        if !runtime_hosts_agent {
             return encode_error(
                 id,
                 "agent_not_ready",
@@ -98,16 +100,67 @@ impl App {
                 ),
             );
         }
-        let (text, enter) =
-            crate::app::api_helpers::encode_api_submission_parts(runtime, &params.text);
-        if let Err(err) = runtime.try_send_bytes(Bytes::from(text)) {
-            return encode_error(id, "agent_prompt_failed", err.to_string());
+        let admission_id = format!("agent-prompt:{}", self.next_agent_admission_id);
+        self.next_agent_admission_id = self.next_agent_admission_id.saturating_add(1);
+        let provider = params
+            .provider
+            .clone()
+            .unwrap_or_else(|| crate::detect::agent_label(expected_agent).to_string());
+        let Some(pane_id) = self.public_pane_id(resolved.ws_idx, resolved.pane_id) else {
+            return agent_not_found(id, &params.target);
+        };
+        if let crate::agent_admission::AdmissionDecision::Queued { position } = self
+            .agent_admission
+            .submit(crate::agent_admission::AdmissionRequest {
+                id: admission_id.clone(),
+                provider,
+                pane_id,
+            })
+        {
+            let target = params.target.clone();
+            self.queued_agent_prompts.insert(admission_id, params);
+            let Some(agent) = self.agent_info(resolved.ws_idx, resolved.pane_id) else {
+                return agent_not_found(id, &target);
+            };
+            return encode_success(
+                id,
+                ResponseResult::AgentPrompted {
+                    agent,
+                    queued: true,
+                    queue_position: Some(position),
+                },
+            );
         }
-        runtime.send_bytes_after(Bytes::from(enter), AGENT_PROMPT_SUBMIT_DELAY);
+        let write_error = match self.lookup_runtime_sender(resolved.ws_idx, resolved.pane_id) {
+            Some(runtime) => {
+                let (text, enter) =
+                    crate::app::api_helpers::encode_api_submission_parts(runtime, &params.text);
+                match runtime.try_send_bytes(Bytes::from(text)) {
+                    Ok(()) => {
+                        runtime.send_bytes_after(Bytes::from(enter), AGENT_PROMPT_SUBMIT_DELAY);
+                        None
+                    }
+                    Err(err) => Some(err.to_string()),
+                }
+            }
+            None => Some("agent terminal is no longer available".into()),
+        };
+        if let Some(message) = write_error {
+            let requests = self.agent_admission.cancel(&admission_id);
+            self.dispatch_released_agent_prompts(requests);
+            return encode_error(id, "agent_prompt_failed", message);
+        }
         let Some(agent) = self.agent_info(resolved.ws_idx, resolved.pane_id) else {
             return agent_not_found(id, &params.target);
         };
-        encode_success(id, ResponseResult::AgentPrompted { agent })
+        encode_success(
+            id,
+            ResponseResult::AgentPrompted {
+                agent,
+                queued: false,
+                queue_position: None,
+            },
+        )
     }
 
     pub(super) fn handle_agent_read(
@@ -286,6 +339,8 @@ fn agent_not_found(id: String, target: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::{
         api::schema::{AgentStatus, SuccessResponse},
@@ -336,6 +391,7 @@ mod tests {
             AgentPromptParams {
                 target: public_pane_id,
                 text: "A != B".into(),
+                provider: None,
                 wait: None,
             },
         );
@@ -367,6 +423,7 @@ mod tests {
             AgentPromptParams {
                 target: "reviewer".into(),
                 text: "A != B".into(),
+                provider: None,
                 wait: None,
             },
         );
@@ -388,12 +445,102 @@ mod tests {
             AgentPromptParams {
                 target: "opencode".into(),
                 text: "wrong target".into(),
+                provider: None,
                 wait: None,
             },
         );
         let error: crate::api::schema::ErrorResponse = serde_json::from_str(&rejected).unwrap();
         assert_eq!(error.error.code, "agent_not_found");
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_reports_queued_without_writing_to_the_terminal() {
+        let mut app = app_with_agent();
+        app.agent_admission = crate::agent_admission::AdmissionController::new(1, HashMap::new());
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::OpenCode), AgentState::Working);
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        let admitted = app.handle_agent_prompt(
+            "admitted".into(),
+            AgentPromptParams {
+                target: "reviewer".into(),
+                text: "first".into(),
+                provider: None,
+                wait: None,
+            },
+        );
+        let admitted: SuccessResponse = serde_json::from_str(&admitted).unwrap();
+        assert!(matches!(
+            admitted.result,
+            ResponseResult::AgentPrompted { queued: false, .. }
+        ));
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"first"));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            Bytes::from_static(b"\r")
+        );
+
+        let queued = app.handle_agent_prompt(
+            "queued".into(),
+            AgentPromptParams {
+                target: "reviewer".into(),
+                text: "second".into(),
+                provider: None,
+                wait: None,
+            },
+        );
+        let queued: SuccessResponse = serde_json::from_str(&queued).unwrap();
+        assert!(matches!(
+            queued.result,
+            ResponseResult::AgentPrompted {
+                queued: true,
+                queue_position: Some(1),
+                ..
+            }
+        ));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            app.agent_info(0, pane_id).unwrap().agent_status,
+            AgentStatus::Queued
+        );
+
+        app.handle_internal_event(crate::events::AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::OpenCode),
+            state: AgentState::Blocked,
+            visible_blocker: true,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        assert!(rx.try_recv().is_err());
+        app.handle_internal_event(crate::events::AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::OpenCode),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            Bytes::from_static(b"second")
+        );
     }
 
     #[tokio::test]
@@ -458,6 +605,7 @@ mod tests {
             AgentPromptParams {
                 target: "reviewer".into(),
                 text: "A != B".into(),
+                provider: None,
                 wait: None,
             },
         );

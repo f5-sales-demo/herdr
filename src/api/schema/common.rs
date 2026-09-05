@@ -142,6 +142,7 @@ pub enum PaneAgentState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
+    Queued,
     Idle,
     Working,
     Blocked,

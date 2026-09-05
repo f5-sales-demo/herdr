@@ -240,6 +240,10 @@ impl App {
             .get(tab_idx)
             .map(|tab| tab.layout.pane_ids())
             .unwrap_or_default();
+        let admission_pane_ids = pane_ids
+            .iter()
+            .filter_map(|pane_id| self.public_pane_id(ws_idx, *pane_id))
+            .collect::<Vec<_>>();
 
         if closes_workspace {
             if self.state.confirm_implicit_worktree_group_close(ws_idx) {
@@ -249,6 +253,7 @@ impl App {
                     "closing this tab would close a worktree group",
                 );
             }
+            self.cancel_agent_admission_for_panes(&admission_pane_ids);
             let workspace = self.workspace_info(ws_idx);
             self.state.selected = ws_idx;
             self.state.close_selected_workspace();
@@ -271,6 +276,7 @@ impl App {
             return encode_success(id, ResponseResult::Ok {});
         }
 
+        self.cancel_agent_admission_for_panes(&admission_pane_ids);
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return tab_not_found(id, &target.tab_id);
         };

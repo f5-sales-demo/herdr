@@ -256,6 +256,27 @@ pub struct SessionConfig {
     pub resume_agent_args: BTreeMap<String, Vec<String>>,
 }
 
+/// Server-side admission policy for queued coding-agent prompts.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AgentAdmissionConfig {
+    /// Maximum number of agent prompts that may be executing at once.
+    pub max_in_flight: usize,
+    /// Optional lower limits by provider key (for example `openai = 2`).
+    /// Agent prompts use their detected agent label unless the caller supplies
+    /// an explicit `provider` key.
+    pub provider_limits: BTreeMap<String, usize>,
+}
+
+impl Default for AgentAdmissionConfig {
+    fn default() -> Self {
+        Self {
+            max_in_flight: 3,
+            provider_limits: BTreeMap::new(),
+        }
+    }
+}
+
 /// Deserialize `[session.resume_agent_args]`, rejecting keys that are not
 /// canonical agent ids. Mirrors `deserialize_rows_by_agent` in
 /// `src/config/sidebar.rs`.
@@ -319,6 +340,7 @@ pub struct Config {
     pub theme: ThemeConfig,
     pub terminal: TerminalConfig,
     pub session: SessionConfig,
+    pub agent_admission: AgentAdmissionConfig,
     pub update: UpdateConfig,
     pub keys: KeysConfig,
     pub ui: UiConfig,

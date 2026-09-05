@@ -71,6 +71,7 @@
         },
         "AgentStatus": {
           "enum": [
+            "queued",
             "idle",
             "working",
             "blocked",
@@ -1224,6 +1225,13 @@
       "$defs": {
         "AgentPromptParams": {
           "properties": {
+            "provider": {
+              "description": "Optional provider budget key. When omitted, Herdr uses the detected\nagent label (for example `xcsh` or `codex`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "target": {
               "type": "string"
             },
@@ -1368,6 +1376,7 @@
         },
         "AgentStatus": {
           "enum": [
+            "queued",
             "idle",
             "working",
             "blocked",
@@ -5837,6 +5846,7 @@
       "$defs": {
         "AgentStatus": {
           "enum": [
+            "queued",
             "idle",
             "working",
             "blocked",
@@ -6267,6 +6277,7 @@
         },
         "AgentStatus": {
           "enum": [
+            "queued",
             "idle",
             "working",
             "blocked",
@@ -8872,6 +8883,17 @@
               "properties": {
                 "agent": {
                   "$ref": "#/schemas/success_response/$defs/AgentInfo"
+                },
+                "queue_position": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "queued": {
+                  "type": "boolean"
                 },
                 "type": {
                   "const": "agent_prompted",
