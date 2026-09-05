@@ -1,0 +1,177 @@
+name: Downstream release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [build-xcsh]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: downstream-release-build-xcsh
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  RUST_TOOLCHAIN_VERSION: 1.96.1
+
+jobs:
+  prepare:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.plan.outputs.release }}
+      version: ${{ steps.plan.outputs.version }}
+      release_sha: ${{ steps.publish.outputs.release_sha }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - id: plan
+        name: Derive the next fork version
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin build-xcsh --tags --force
+          if [ "$(git rev-parse origin/build-xcsh)" != "$EXPECTED_SHA" ]; then
+            echo "The branch moved after this CI run; a newer run will plan the release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git log -1 --format=%s | grep -Eq '^chore\(release\): v'; then
+            echo "Release commit detected; it does not create another release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base_tag="$(git describe --first-parent --tags --match 'v[0-9]*' --abbrev=0 HEAD)"
+          current="$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' Cargo.toml | head -1)"
+          test -n "$base_tag"
+          test -n "$current"
+          python3 scripts/downstream_release_plan.py \
+            --base "$base_tag" --head HEAD --current "$current" \
+            | tee release-plan.txt
+          cat release-plan.txt >> "$GITHUB_OUTPUT"
+
+      - id: publish
+        if: steps.plan.outputs.release == 'true'
+        name: Commit and tag the fork release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.plan.outputs.version }}"
+          python3 scripts/downstream_release_plan.py --write-version "$version"
+          cargo metadata --locked --no-deps --format-version 1 >/dev/null
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore(release): v${version}"
+          git tag -a "v${version}" -m "v${version}"
+          git push origin HEAD:build-xcsh --follow-tags
+          echo "release_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.release == 'true'
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: herdr-linux-x86_64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: herdr-linux-aarch64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact: herdr-macos-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: herdr-macos-aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: ${{ matrix.target }}
+
+      - name: Install Zig
+        if: runner.os != 'macOS'
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build musl-tools gcc-aarch64-linux-gnu crossbuild-essential-arm64
+
+      - name: Install macOS build tools
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja
+
+      - name: Configure Linux cross linker
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build a verified binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package binary and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "target/${{ matrix.target }}/release/herdr" "${{ matrix.artifact }}"
+          python3 -c "import hashlib, pathlib; path = pathlib.Path('${{ matrix.artifact }}'); print(f'{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}')" > "${{ matrix.artifact }}.sha256"
+
+      - name: Upload release asset
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}
+            ${{ matrix.artifact }}.sha256
+
+  publish:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+
+      - name: Create the fork-owned GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            herdr-linux-x86_64/herdr-linux-x86_64 \
+            herdr-linux-x86_64/herdr-linux-x86_64.sha256 \
+            herdr-linux-aarch64/herdr-linux-aarch64 \
+            herdr-linux-aarch64/herdr-linux-aarch64.sha256 \
+            herdr-macos-x86_64/herdr-macos-x86_64 \
+            herdr-macos-x86_64/herdr-macos-x86_64.sha256 \
+            herdr-macos-aarch64/herdr-macos-aarch64 \
+            herdr-macos-aarch64/herdr-macos-aarch64.sha256 \
+            --title "$TAG" --generate-notes

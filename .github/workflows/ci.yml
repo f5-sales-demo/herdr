@@ -4,7 +4,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
   push:
-    branches: [master, windows]
+    branches: [build-xcsh, master, windows]
     paths-ignore:
       - "website/**"
       - ".github/APPROVED_CONTRIBUTORS"
@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   conventional-commits:
-    if: github.event_name != 'push' || github.ref_name == 'master'
+    if: github.event_name != 'push' || github.ref_name == 'master' || github.ref_name == 'build-xcsh'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
