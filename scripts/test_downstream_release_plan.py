@@ -25,6 +25,9 @@ class ReleasePlanTests(unittest.TestCase):
     def test_non_conventional_commit_does_not_release(self) -> None:
         self.assertIsNone(release_level(["miscellaneous cleanup"]))
 
+    def test_automation_only_commits_do_not_release(self) -> None:
+        self.assertIsNone(release_level(["ci: update fork workflow", "test: cover release planner", "docs: clarify runbook"]))
+
     def test_version_write_updates_only_the_root_package_entries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

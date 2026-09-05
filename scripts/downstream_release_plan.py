@@ -31,7 +31,7 @@ def release_level(messages: list[str]) -> str | None:
             return "major"
         if match.group("kind") == "feat":
             level = "minor"
-        elif level is None:
+        elif match.group("kind") in {"fix", "perf", "refactor"} and level is None:
             level = "patch"
     return level
 
