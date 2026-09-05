@@ -4,7 +4,7 @@
 //! use its decisions to release queued dispatches, while the model remains
 //! deterministic and unit-testable.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AdmissionRequest {
@@ -17,6 +17,14 @@ pub(crate) struct AdmissionRequest {
 pub(crate) enum AdmissionDecision {
     Admitted,
     Queued { position: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AdmissionCleanup {
+    /// Requests that lost their running slot and can now be dispatched.
+    pub(crate) released: Vec<AdmissionRequest>,
+    /// Queued requests whose target pane disappeared and must not be retried.
+    pub(crate) dropped: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -72,6 +80,42 @@ impl AdmissionController {
             return Vec::new();
         };
         self.queued.remove(index).into_iter().collect()
+    }
+
+    /// Forget all admission state for panes that were explicitly closed.
+    ///
+    /// Closing a pane is terminal for both a running prompt and a queued
+    /// prompt targeting it. Remove queued requests first, then release each
+    /// running slot so a surviving request can be admitted immediately.
+    pub(crate) fn close_panes<'a, I>(&mut self, pane_ids: I) -> AdmissionCleanup
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let pane_ids = pane_ids
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
+        let mut dropped = Vec::new();
+        self.queued.retain(|request| {
+            if pane_ids.contains(&request.pane_id) {
+                dropped.push(request.id.clone());
+                false
+            } else {
+                true
+            }
+        });
+        let running_ids = self
+            .running
+            .values()
+            .filter(|request| pane_ids.contains(&request.pane_id))
+            .map(|request| request.id.clone())
+            .collect::<Vec<_>>();
+        let released = running_ids
+            .into_iter()
+            .flat_map(|id| self.cancel(&id))
+            .collect();
+
+        AdmissionCleanup { released, dropped }
     }
 
     /// Preserve a prompt whose target disappeared during dispatch. It stays
@@ -159,5 +203,29 @@ mod tests {
         );
 
         assert_eq!(admission.cancel("a"), vec![request("b", "openai")]);
+    }
+
+    #[test]
+    fn closing_panes_releases_capacity_and_discards_dead_targets() {
+        let mut admission = AdmissionController::new(1, HashMap::new());
+        let running = request("running", "openai");
+        let mut closing_queued = request("closing", "openai");
+        closing_queued.pane_id = "pane-running".into();
+        let surviving = request("surviving", "openai");
+
+        assert_eq!(admission.submit(running), AdmissionDecision::Admitted);
+        assert_eq!(
+            admission.submit(closing_queued),
+            AdmissionDecision::Queued { position: 1 }
+        );
+        assert_eq!(
+            admission.submit(surviving.clone()),
+            AdmissionDecision::Queued { position: 2 }
+        );
+
+        let cleanup = admission.close_panes(["pane-running"]);
+
+        assert_eq!(cleanup.dropped, vec!["closing"]);
+        assert_eq!(cleanup.released, vec![surviving]);
     }
 }

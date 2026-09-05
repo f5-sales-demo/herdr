@@ -375,6 +375,22 @@ impl App {
         }
     }
 
+    /// A closed pane cannot complete or receive a prompt. Drop any queued
+    /// request aimed at it, release its running permit, and dispatch only
+    /// work whose target is still present.
+    pub(crate) fn cancel_agent_admission_for_panes(&mut self, pane_ids: &[String]) {
+        if pane_ids.is_empty() {
+            return;
+        }
+        let cleanup = self
+            .agent_admission
+            .close_panes(pane_ids.iter().map(String::as_str));
+        for admission_id in cleanup.dropped {
+            self.queued_agent_prompts.remove(&admission_id);
+        }
+        self.dispatch_released_agent_prompts(cleanup.released);
+    }
+
     fn reset_agent_detection_for_agents(&self, agents: &[crate::detect::Agent]) {
         if agents.is_empty() {
             return;
