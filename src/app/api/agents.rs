@@ -541,6 +541,13 @@ mod tests {
                 .unwrap(),
             Bytes::from_static(b"second")
         );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            Bytes::from_static(b"\r")
+        );
     }
 
     #[tokio::test]
