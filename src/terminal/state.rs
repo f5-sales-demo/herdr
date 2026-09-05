@@ -615,6 +615,24 @@ impl TerminalState {
         {
             return None;
         }
+        // Lifecycle reporters anchor a session once, then commonly emit
+        // state-only frames for each turn. Carry that same-owner anchor into
+        // routing and storage so `working` cannot make the later `idle` frame
+        // appear untrusted.
+        let session_ref = session_ref.or_else(|| {
+            self.hook_authority
+                .as_ref()
+                .filter(|authority| {
+                    authority.source == source && authority.agent_label == agent_label
+                })
+                .and_then(|authority| authority.session_ref.clone())
+                .or_else(|| {
+                    self.persisted_agent_session
+                        .as_ref()
+                        .filter(|session| session.source == source && session.agent == agent_label)
+                        .map(|session| session.session_ref.clone())
+                })
+        });
         let reanchor_sequence = match self.route_full_lifecycle_hook_report(
             &source,
             &agent_label,
@@ -4182,6 +4200,45 @@ mod tests {
     }
 
     #[test]
+    fn state_only_full_lifecycle_reports_retain_the_anchored_session() {
+        let mut terminal = test_terminal();
+        let session_path = test_session_path("xcsh.jsonl");
+        anchor_full_lifecycle_session(
+            &mut terminal,
+            Agent::Xcsh,
+            "herdr:xcsh",
+            "xcsh",
+            crate::agent_resume::AgentSessionRef::path(session_path.clone()).unwrap(),
+        );
+
+        terminal.set_hook_authority(
+            "herdr:xcsh".into(),
+            "xcsh".into(),
+            AgentState::Working,
+            None,
+            None,
+        );
+        let settled = terminal.set_hook_authority(
+            "herdr:xcsh".into(),
+            "xcsh".into(),
+            AgentState::Idle,
+            None,
+            None,
+        );
+
+        assert!(settled.is_some());
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(
+            terminal
+                .hook_authority
+                .as_ref()
+                .and_then(|authority| authority.session_ref.as_ref())
+                .map(|session_ref| session_ref.value.as_str()),
+            Some(session_path.as_str())
+        );
+    }
+
+    #[test]
     fn stale_hook_report_cannot_overwrite_session_ref() {
         let mut terminal = test_terminal();
         let session_path = test_session_path("pi.jsonl");
@@ -4223,7 +4280,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_hook_report_without_session_ref_clears_previous_ref() {
+    fn accepted_hook_report_without_session_ref_retains_previous_ref() {
         let mut terminal = test_terminal();
         let session_path = test_session_path("pi.jsonl");
         anchor_full_lifecycle_session(
@@ -4238,7 +4295,7 @@ mod tests {
             "pi".into(),
             AgentState::Working,
             None,
-            crate::agent_resume::AgentSessionRef::path(session_path),
+            crate::agent_resume::AgentSessionRef::path(session_path.clone()),
             Some(20),
         );
 
@@ -4253,14 +4310,16 @@ mod tests {
             )
             .expect("accepted report");
 
-        assert!(mutation.session_ref_changed);
+        assert!(!mutation.session_ref_changed);
         assert!(mutation.effective_state_change.is_none());
-        assert!(terminal
-            .hook_authority
-            .as_ref()
-            .unwrap()
-            .session_ref
-            .is_none());
+        assert_eq!(
+            terminal
+                .hook_authority
+                .as_ref()
+                .and_then(|authority| authority.session_ref.as_ref())
+                .map(|session_ref| session_ref.value.as_str()),
+            Some(session_path.as_str())
+        );
     }
 
     #[test]
