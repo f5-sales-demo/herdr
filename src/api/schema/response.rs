@@ -103,6 +103,10 @@ pub enum ResponseResult {
     },
     AgentPrompted {
         agent: AgentInfo,
+        #[serde(default, skip_serializing_if = "super::is_false")]
+        queued: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queue_position: Option<usize>,
     },
     AgentList {
         agents: Vec<AgentInfo>,

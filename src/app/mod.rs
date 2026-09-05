@@ -95,6 +95,10 @@ impl PaneClickState {
 
 pub struct App {
     pub state: AppState,
+    pub(crate) agent_admission: crate::agent_admission::AdmissionController,
+    /// Prompt payloads retained by the server until admission releases them.
+    pub(crate) queued_agent_prompts: HashMap<String, crate::api::schema::AgentPromptParams>,
+    pub(crate) next_agent_admission_id: u64,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
     pub event_tx: mpsc::Sender<AppEvent>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
@@ -732,6 +736,17 @@ impl App {
             copy_feedback_deadline: None,
             last_api_notification_at: None,
             state,
+            agent_admission: crate::agent_admission::AdmissionController::new(
+                config.agent_admission.max_in_flight,
+                config
+                    .agent_admission
+                    .provider_limits
+                    .iter()
+                    .map(|(provider, limit)| (provider.clone(), *limit))
+                    .collect(),
+            ),
+            queued_agent_prompts: HashMap::new(),
+            next_agent_admission_id: 1,
             terminal_runtimes: restored_terminal_runtimes,
             event_tx,
             event_rx,

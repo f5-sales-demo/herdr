@@ -274,6 +274,21 @@ impl App {
         let terminal_cwd_reported = matches!(ev, AppEvent::TerminalCwdReported { .. });
         let previous_toast = self.state.toast.clone();
         let pane_updates = self.state.handle_app_event(ev);
+        // An admitted prompt frees its slot only when that pane settles to
+        // idle. The controller itself confirms that the pane owns a running
+        // admission, so unrelated idle updates are harmless. Re-enter the
+        // normal prompt handler so a released item is still checked against
+        // the live pane/runtime before bytes are written.
+        for update in &pane_updates {
+            if update.state != crate::detect::AgentState::Idle {
+                continue;
+            }
+            let Some(pane_id) = self.public_pane_id(update.ws_idx, update.pane_id) else {
+                continue;
+            };
+            let requests = self.agent_admission.release_for_pane(&pane_id);
+            self.dispatch_released_agent_prompts(requests);
+        }
         if let Some(agents) = manifest_update_agents {
             self.reset_agent_detection_for_agents(&agents);
         }
@@ -341,6 +356,23 @@ impl App {
 
         self.sync_toast_deadline(previous_toast);
         self.shutdown_detached_terminal_runtimes();
+    }
+
+    fn dispatch_released_agent_prompts(
+        &mut self,
+        requests: Vec<crate::agent_admission::AdmissionRequest>,
+    ) {
+        for request in requests {
+            let Some(prompt) = self.queued_agent_prompts.remove(&request.id) else {
+                continue;
+            };
+            let response =
+                self.handle_agent_prompt("agent-admission-release".to_string(), prompt.clone());
+            if serde_json::from_str::<crate::api::schema::SuccessResponse>(&response).is_err() {
+                self.queued_agent_prompts.insert(request.id.clone(), prompt);
+                self.agent_admission.requeue_front(request);
+            }
+        }
     }
 
     fn reset_agent_detection_for_agents(&self, agents: &[crate::detect::Agent]) {

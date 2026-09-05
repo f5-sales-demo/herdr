@@ -176,6 +176,10 @@ pub struct AgentStartParams {
 pub struct AgentPromptParams {
     pub target: String,
     pub text: String,
+    /// Optional provider budget key. When omitted, Herdr uses the detected
+    /// agent label (for example `xcsh` or `codex`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<AgentPromptWaitOptions>,
 }

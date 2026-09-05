@@ -369,7 +369,7 @@ impl App {
             return None;
         }
         let pane = self.pane_info(ws_idx, pane_id)?;
-        Some(crate::api::schema::AgentInfo {
+        let mut info = crate::api::schema::AgentInfo {
             terminal_id: pane.terminal_id,
             name: terminal.agent_name.clone(),
             agent: pane.agent,
@@ -392,7 +392,17 @@ impl App {
             cwd: pane.cwd,
             foreground_cwd: pane.foreground_cwd,
             revision: pane.revision,
-        })
+        };
+        if self.queued_agent_prompts.values().any(|prompt| {
+            prompt.target == info.pane_id
+                || info
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| prompt.target == name)
+        }) {
+            info.agent_status = crate::api::schema::AgentStatus::Queued;
+        }
+        Some(info)
     }
 
     fn agent_name_conflicts(

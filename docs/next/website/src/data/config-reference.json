@@ -1043,6 +1043,24 @@
       ]
     },
     {
+      "id": "agent_admission",
+      "title": "Agent admission",
+      "keys": [
+        {
+          "key": "agent_admission.max_in_flight",
+          "type": "integer",
+          "default": "3",
+          "description": "Maximum number of agent prompts Herdr may dispatch concurrently; further prompts remain queued until an active agent settles."
+        },
+        {
+          "key": "agent_admission.provider_limits",
+          "type": "table",
+          "default": "{}",
+          "description": "Optional per-provider concurrency caps. Prompts use their detected agent label (such as `xcsh` or `codex`) unless the caller supplies an explicit provider key."
+        }
+      ]
+    },
+    {
       "id": "worktrees",
       "title": "Worktrees",
       "keys": [
