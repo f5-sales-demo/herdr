@@ -14,7 +14,7 @@ from pathlib import Path
 
 HEADER = re.compile(
     r"^(?P<kind>feat|fix|perf|docs|ci|test|refactor|chore|release)"
-    r"(?:\([^)]+\))?(?P<breaking>!)?:\s+\S",
+    r"(?:\((?P<scope>[^)]+)\))?(?P<breaking>!)?:\s+\S",
     re.MULTILINE,
 )
 VERSION = re.compile(r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)$")
@@ -26,6 +26,8 @@ def release_level(messages: list[str]) -> str | None:
     for message in messages:
         match = HEADER.search(message)
         if not match:
+            continue
+        if match.group("scope") in {"downstream", "release"}:
             continue
         if match.group("breaking") or re.search(r"^BREAKING[ -]CHANGE:", message, re.MULTILINE | re.IGNORECASE):
             return "major"

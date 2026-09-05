@@ -5,6 +5,12 @@ on:
     workflows: [CI]
     types: [completed]
     branches: [build-xcsh]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing fork tag whose failed asset build should be retried
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -20,20 +26,22 @@ env:
 jobs:
   prepare:
     if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push'
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
     outputs:
-      release: ${{ steps.plan.outputs.release }}
-      version: ${{ steps.plan.outputs.version }}
-      release_sha: ${{ steps.publish.outputs.release_sha }}
+      release: ${{ steps.plan.outputs.release || steps.retry.outputs.release }}
+      version: ${{ steps.plan.outputs.version || steps.retry.outputs.version }}
+      release_sha: ${{ steps.publish.outputs.release_sha || steps.retry.outputs.release_sha }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ inputs.tag || github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
       - id: plan
+        if: github.event_name == 'workflow_run'
         name: Derive the next fork version
         shell: bash
         env:
@@ -59,6 +67,27 @@ jobs:
             --base "$base_tag" --head HEAD --current "$current" \
             | tee release-plan.txt
           cat release-plan.txt >> "$GITHUB_OUTPUT"
+
+      - id: retry
+        if: github.event_name == 'workflow_dispatch'
+        name: Validate an existing fork tag for rebuild
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch origin --tags --force
+          git rev-parse "${TAG}^{commit}" >/dev/null
+          version="${TAG#v}"
+          test "$TAG" = "v${version}"
+          current="$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' Cargo.toml | head -1)"
+          test "$current" = "$version"
+          release_sha="$(git rev-parse "${TAG}^{commit}")"
+          {
+            echo "release=true"
+            echo "version=$version"
+            echo "release_sha=$release_sha"
+          } >> "$GITHUB_OUTPUT"
 
       - id: publish
         if: steps.plan.outputs.release == 'true'
@@ -99,6 +128,9 @@ jobs:
             os: macos-latest
             artifact: herdr-macos-aarch64
     runs-on: ${{ matrix.os }}
+    env:
+      LIBGHOSTTY_VT_OPTIMIZE: ReleaseFast
+      LIBGHOSTTY_VT_SIMD: 'true'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
