@@ -66,6 +66,13 @@ impl AdmissionController {
         completed.map(|id| self.cancel(&id)).unwrap_or_default()
     }
 
+    pub(crate) fn queue_position_for_pane(&self, pane_id: &str) -> Option<usize> {
+        self.queued
+            .iter()
+            .position(|request| request.pane_id == pane_id)
+            .map(|index| index + 1)
+    }
+
     /// Releases a prompt that could not be written to its terminal and makes
     /// the next eligible queued prompt available for dispatch.
     pub(crate) fn cancel(&mut self, id: &str) -> Vec<AdmissionRequest> {

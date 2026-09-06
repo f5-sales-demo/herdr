@@ -775,6 +775,11 @@ impl TerminalState {
             reported_at: now,
             session_ref,
         });
+        if state == AgentState::Idle
+            && crate::detect::full_lifecycle_hook_authority(&source, &agent_label)
+        {
+            self.clear_state_labels_from_source(&source);
+        }
         self.record_authoritative_report_at(&source, &agent_label, state, now);
         let current_session = self.current_session_identity_for_persistence();
         Some(TerminalStateMutation {

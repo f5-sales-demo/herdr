@@ -54,6 +54,14 @@ impl EffectivePresentation {
 }
 
 impl TerminalState {
+    pub(super) fn clear_state_labels_from_source(&mut self, source: &str) {
+        let Some(metadata) = self.agent_metadata.get_mut(source) else {
+            return;
+        };
+        metadata.state_labels.clear();
+        metadata.state_label_reported_at.clear();
+    }
+
     pub(crate) fn metadata_report_sequence_is_fresh(&self, source: &str, seq: Option<u64>) -> bool {
         crate::metadata_tokens::sequence_is_fresh(&self.metadata_report_sequences, source, seq)
     }
