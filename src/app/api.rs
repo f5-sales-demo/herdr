@@ -247,11 +247,15 @@ impl App {
 
         let released_agent = if let AppEvent::HookAgentReleased {
             pane_id,
+            source,
+            agent_label,
             known_agent,
             ..
         } = &ev
         {
-            known_agent.map(|agent| (*pane_id, agent))
+            (!crate::agent_resume::is_official_agent_source(source, agent_label))
+                .then(|| known_agent.map(|agent| (*pane_id, agent)))
+                .flatten()
         } else {
             None
         };

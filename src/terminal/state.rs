@@ -336,6 +336,38 @@ impl TerminalState {
             {
                 self.detected_agent = agent;
             }
+            if process_exited {
+                self.recent_agent_process_exit = agent.map(|agent| RecentAgentProcessExit {
+                    agent,
+                    observed_at: now,
+                });
+                // Keep the reporter presentation while it is fresh, but make
+                // the detector fallback unknown so expiry cannot look idle or
+                // working after the stopped process disappears.
+                self.fallback_state = AgentState::Unknown;
+                self.fallback_visible_blocker = false;
+                self.fallback_observed_at = Some(now);
+                if let Some((source, agent_label)) = self
+                    .hook_authority
+                    .as_ref()
+                    .map(|authority| (authority.source.clone(), authority.agent_label.clone()))
+                {
+                    // A later startup frame is a new process generation, so
+                    // it must not be ordered behind the stopped generation.
+                    self.hook_report_sequences.remove(&source);
+                    // Hold any late state frames from the old process until a
+                    // fresh generation establishes its own session identity.
+                    self.suppress_full_lifecycle_hook_report_with_session_ref(
+                        source,
+                        agent_label,
+                        self.hook_authority
+                            .as_ref()
+                            .and_then(|authority| authority.session_ref.clone()),
+                        FullLifecycleHookSuppressionReason::ProcessExit,
+                        now,
+                    );
+                }
+            }
             return TerminalStateMutation {
                 effective_state_change: self.recompute_effective_state(
                     previous_agent_label,
@@ -788,7 +820,7 @@ impl TerminalState {
         process_exited: bool,
     ) -> bool {
         self.live_full_lifecycle_hook_authority()
-            && !process_exited
+            && (process_exited || self.recent_agent_process_exit.is_none())
             && !self.hook_authority_conflicts_with_detected_agent(detected_agent)
     }
 
@@ -1434,11 +1466,35 @@ impl TerminalState {
                 {
                     suppressed.pending_replacement_report = None;
                 }
-                suppressed.replacement_session_ref = Some(session_ref);
+                suppressed.replacement_session_ref = Some(session_ref.clone());
             }
             self.hook_report_sequences.insert(source.clone(), seq);
 
             if process_present {
+                if generation_gated {
+                    if let Some(previous_session) = self
+                        .hook_authority
+                        .as_ref()
+                        .filter(|authority| {
+                            authority.source == source && authority.agent_label == agent_label
+                        })
+                        .and_then(|authority| authority.session_ref.clone())
+                    {
+                        self.remember_stale_full_lifecycle_hook_session(
+                            source.clone(),
+                            agent_label.clone(),
+                            previous_session,
+                        );
+                    }
+                    self.hook_authority = None;
+                    self.reporter_liveness = None;
+                    self.persisted_agent_session =
+                        Some(crate::agent_resume::PersistedAgentSession {
+                            source: source.clone(),
+                            agent: agent_label.clone(),
+                            session_ref,
+                        });
+                }
                 self.clear_full_lifecycle_hook_suppression_for_detected_agent(None, known_agent);
                 let current_session = self.current_session_identity_for_persistence();
                 return Some(TerminalStateMutation {
@@ -1466,7 +1522,18 @@ impl TerminalState {
             &source,
             &agent_label,
             session_start_source.as_deref(),
-        );
+        ) || ((
+            source.as_str(),
+            agent_label.as_str(),
+            session_start_source.as_deref(),
+        ) == ("herdr:pi", "pi", Some("startup"))
+            && self
+                .suppressed_full_lifecycle_hook_reports
+                .get(&source)
+                .is_some_and(|suppressed| {
+                    suppressed.agent_label == agent_label
+                        && suppressed.reason == FullLifecycleHookSuppressionReason::ProcessExit
+                }));
         let replacing_hermes_session =
             crate::detect::session_identity_only_integration(&source, &agent_label)
                 && session_replacement_allowed
@@ -1692,7 +1759,10 @@ impl TerminalState {
         if !matches_current_agent && !matches_persisted_session {
             return None;
         }
-        if !self.accept_hook_report(source, seq) {
+        // Release is a terminal control frame. Older reporters do not attach a
+        // sequence to it, so accept an unsequenced release from the current
+        // owner rather than letting an earlier state frame strand authority.
+        if seq.is_some_and(|seq| !self.accept_hook_report(source, Some(seq))) {
             return None;
         }
         let preserve_foreign_persisted_session = self
@@ -1723,6 +1793,7 @@ impl TerminalState {
             self.clear_agent_name();
         }
         self.hook_authority = None;
+        self.reporter_liveness = None;
         if !preserve_foreign_persisted_session {
             self.persisted_agent_session = None;
         }
@@ -1737,6 +1808,7 @@ impl TerminalState {
             ),
             session_ref_changed: previous_session != current_session,
             agent_released: !process_owns_agent,
+            liveness_changed: true,
             ..Default::default()
         })
     }
@@ -1744,7 +1816,13 @@ impl TerminalState {
     fn hook_authority_is_effective(&self, authority: &HookAuthority) -> bool {
         !crate::detect::full_lifecycle_hook_authority(&authority.source, &authority.agent_label)
             || crate::detect::parse_agent_label(&authority.agent_label).is_none_or(|agent| {
-                self.detected_agent == Some(agent) && self.recent_agent_process_exit.is_none()
+                self.detected_agent == Some(agent)
+                    && (self.recent_agent_process_exit.is_none()
+                        || self.reporter_liveness.as_ref().is_some_and(|liveness| {
+                            liveness.source == authority.source
+                                && liveness.agent_label == authority.agent_label
+                                && !liveness.stale
+                        }))
             })
     }
 
@@ -2372,6 +2450,66 @@ mod tests {
         assert!(
             !terminal
                 .reporter_liveness_info_at(Instant::now())
+                .expect("reporter liveness")
+                .stale
+        );
+    }
+
+    #[test]
+    fn authoritative_reporter_defers_ambiguous_process_exit_to_heartbeat_expiry() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        let session =
+            crate::agent_resume::AgentSessionRef::id("stopped-session").expect("valid session id");
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Working,
+            false,
+            false,
+            false,
+            false,
+            now,
+        );
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:pi".into(),
+            agent: "pi".into(),
+            session_ref: session.clone(),
+        });
+        terminal
+            .set_hook_authority_at(
+                "herdr:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                Some(session),
+                Some(1),
+                now,
+            )
+            .expect("authoritative lifecycle report");
+
+        // A stopped foreground job returns control to the shell, which the
+        // process probe can report as an exit. The reporter remains the
+        // authority until it explicitly releases or its heartbeat expires.
+        let mutation = terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Unknown,
+            false,
+            false,
+            false,
+            true,
+            now + Duration::from_secs(1),
+        );
+        assert!(!mutation.agent_released);
+        assert_eq!(terminal.effective_agent_label(), Some("pi"));
+        assert!(terminal.next_reporter_liveness_deadline().is_some());
+
+        terminal
+            .expire_reporter_liveness_at(now + REPORTER_HEARTBEAT_TIMEOUT)
+            .expect("heartbeat expiry should own the transition");
+        assert_eq!(terminal.state, AgentState::Unknown);
+        assert!(
+            terminal
+                .reporter_liveness_info_at(now + REPORTER_HEARTBEAT_TIMEOUT)
                 .expect("reporter liveness")
                 .stale
         );

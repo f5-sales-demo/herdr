@@ -2897,17 +2897,12 @@ impl AppState {
                 agent_label,
                 seq,
                 ..
-            } => {
-                if crate::agent_resume::is_official_agent_source(&source, &agent_label) {
-                    Vec::new()
-                } else {
-                    self.update_terminal_state(pane_id, |terminal| {
-                        terminal.release_agent_with_mutation(&source, &agent_label, seq)
-                    })
-                    .into_iter()
-                    .collect()
-                }
-            }
+            } => self
+                .update_terminal_state(pane_id, |terminal| {
+                    terminal.release_agent_with_mutation(&source, &agent_label, seq)
+                })
+                .into_iter()
+                .collect(),
             // Both intercepted before this dispatch — in App::handle_internal_event (monolithic)
             // or via HeadlessServer forwarding to the foreground client (server); never touch
             // AppState. Kept for AppEvent exhaustiveness.
@@ -5340,7 +5335,7 @@ mod tests {
     }
 
     #[test]
-    fn official_release_preserves_process_owned_agent_identity() {
+    fn official_release_revokes_authority_but_preserves_process_owned_identity() {
         let mut state = app_with_workspaces(&["active"]);
         let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
         let terminal_id = state.workspaces[0]
@@ -5390,13 +5385,13 @@ mod tests {
             seq: Some(2),
         });
 
-        assert!(updates.is_empty());
+        assert_eq!(updates.len(), 1);
         let terminal = &state.terminals[&terminal_id];
         assert_eq!(terminal.state, AgentState::Working);
         assert_eq!(terminal.detected_agent, Some(Agent::Pi));
         assert_eq!(terminal.agent_name.as_deref(), Some("reviewer"));
-        assert!(terminal.full_lifecycle_hook_authority_active());
-        assert!(!state.session_dirty);
+        assert!(!terminal.full_lifecycle_hook_authority_active());
+        assert!(state.session_dirty);
     }
 
     #[test]

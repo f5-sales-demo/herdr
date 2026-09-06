@@ -2011,7 +2011,10 @@ fn official_release_waits_for_confirmed_process_exit() {
             pane["result"]["pane"]["agent"], "pi",
             "official release hid the live Pi process: {pane}"
         );
-        assert_eq!(pane["result"]["pane"]["agent_status"], "working");
+        assert_ne!(
+            pane["result"]["pane"]["agent_status"], "unknown",
+            "official release hid the live Pi process: {pane}"
+        );
         thread::sleep(Duration::from_millis(50));
     }
 
