@@ -371,6 +371,64 @@ mod tests {
         app
     }
 
+    fn queue_xcsh_prompt(app: &mut App, pane_id: crate::layout::PaneId) {
+        app.agent_admission = crate::agent_admission::AdmissionController::new(0, HashMap::new());
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("worker".into());
+        terminal.set_detected_state(Some(Agent::Xcsh), AgentState::Idle);
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:xcsh".into(),
+            agent: "xcsh".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("xcsh-session").unwrap(),
+        });
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        let queued = app.handle_agent_prompt(
+            "queued".into(),
+            AgentPromptParams {
+                target: "worker".into(),
+                text: "follow-up".into(),
+                provider: None,
+                wait: None,
+            },
+        );
+        let queued: SuccessResponse = serde_json::from_str(&queued).unwrap();
+        assert!(matches!(
+            queued.result,
+            ResponseResult::AgentPrompted {
+                queued: true,
+                queue_position: Some(1),
+                ..
+            }
+        ));
+        assert_eq!(
+            app.agent_info(0, pane_id).unwrap().agent_status,
+            AgentStatus::Queued
+        );
+    }
+
+    fn report_xcsh_state(
+        app: &mut App,
+        pane_id: crate::layout::PaneId,
+        state: AgentState,
+        message: &str,
+        seq: u64,
+    ) {
+        app.handle_internal_event(crate::events::AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:xcsh".into(),
+            agent_label: "xcsh".into(),
+            state,
+            message: Some(message.into()),
+            seq: Some(seq),
+            session_ref: None,
+        });
+    }
+
     #[tokio::test]
     async fn agent_prompt_sends_text_then_delays_enter() {
         let mut app = app_with_agent();
@@ -552,6 +610,65 @@ mod tests {
                 .unwrap(),
             Bytes::from_static(b"\r")
         );
+    }
+
+    #[tokio::test]
+    async fn fresh_xcsh_working_then_idle_is_not_masked_by_queued_admission() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        queue_xcsh_prompt(&mut app, pane_id);
+
+        report_xcsh_state(&mut app, pane_id, AgentState::Working, "thinking", 1);
+        let working = app.agent_info(0, pane_id).unwrap();
+        assert_eq!(working.agent_status, AgentStatus::Working);
+        assert!(working.queued);
+        assert_eq!(working.queue_position, Some(1));
+
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .unwrap()
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_agent_metadata(crate::terminal::AgentMetadataReport {
+                source: "herdr:xcsh".into(),
+                agent_label: Some("xcsh".into()),
+                applies_to_source: None,
+                title: None,
+                display_agent: None,
+                state_labels: HashMap::from([("working".into(), "thinking".into())]),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_state_labels: false,
+                ttl: None,
+                seq: Some(1),
+            });
+        assert_eq!(
+            app.agent_info(0, pane_id).unwrap().state_labels["working"],
+            "thinking"
+        );
+
+        report_xcsh_state(&mut app, pane_id, AgentState::Idle, "idle", 2);
+        let idle = app.agent_info(0, pane_id).unwrap();
+        assert_eq!(idle.agent_status, AgentStatus::Idle);
+        assert!(idle.queued);
+        assert_eq!(idle.queue_position, Some(1));
+        assert!(!idle.state_labels.values().any(|label| label == "thinking"));
+    }
+
+    #[tokio::test]
+    async fn fresh_xcsh_blocked_is_not_masked_by_queued_admission() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        queue_xcsh_prompt(&mut app, pane_id);
+
+        report_xcsh_state(&mut app, pane_id, AgentState::Blocked, "approval", 1);
+        let blocked = app.agent_info(0, pane_id).unwrap();
+        assert_eq!(blocked.agent_status, AgentStatus::Blocked);
+        assert!(blocked.queued);
+        assert_eq!(blocked.queue_position, Some(1));
     }
 
     #[tokio::test]

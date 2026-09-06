@@ -219,6 +219,10 @@ pub struct AgentInfo {
     pub interactive_ready: bool,
     #[serde(default)]
     pub state_change_seq: u64,
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub queued: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_position: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reporter_liveness: Option<ReporterLivenessInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
