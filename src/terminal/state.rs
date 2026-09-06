@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 use crate::detect::{Agent, AgentState};
 use crate::terminal::TerminalId;
 
+pub const REPORTER_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[path = "metadata.rs"]
 mod metadata;
 pub use metadata::{AgentMetadata, AgentMetadataReport, EffectivePresentation};
@@ -22,6 +24,25 @@ pub struct HookAuthority {
     pub message: Option<String>,
     pub reported_at: Instant,
     pub session_ref: Option<crate::agent_resume::AgentSessionRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReporterLiveness {
+    source: String,
+    agent_label: String,
+    last_seen_at: Instant,
+    last_seen_unix_ms: u64,
+    last_known_lifecycle: AgentState,
+    stale: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReporterLivenessInfo {
+    pub source: String,
+    pub last_seen_unix_ms: u64,
+    pub age_ms: u64,
+    pub last_known_lifecycle: AgentState,
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +118,8 @@ pub struct TerminalStateMutation {
     pub effective_state_change: Option<EffectiveStateChange>,
     pub session_ref_changed: bool,
     pub agent_released: bool,
+    pub liveness_changed: bool,
+    pub suppress_state_change_seq: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +156,7 @@ pub struct TerminalState {
     agent_name_owner: Option<AgentNameOwner>,
     managed_agent: Option<ManagedAgent>,
     hook_report_sequences: HashMap<String, u64>,
+    reporter_liveness: Option<ReporterLiveness>,
     suppressed_full_lifecycle_hook_reports: HashMap<String, SuppressedFullLifecycleHookReport>,
     stale_full_lifecycle_hook_sessions: HashMap<String, Vec<StaleFullLifecycleHookSession>>,
     metadata_report_sequences: HashMap<String, u64>,
@@ -166,6 +190,7 @@ impl TerminalState {
             agent_name_owner: None,
             managed_agent: None,
             hook_report_sequences: HashMap::new(),
+            reporter_liveness: None,
             suppressed_full_lifecycle_hook_reports: HashMap::new(),
             stale_full_lifecycle_hook_sessions: HashMap::new(),
             metadata_report_sequences: HashMap::new(),
@@ -322,6 +347,7 @@ impl TerminalState {
                 session_ref_changed: previous_session
                     != self.current_session_identity_for_persistence(),
                 agent_released: false,
+                ..Default::default()
             };
         }
         let replacement_process_detected = !process_exited
@@ -341,6 +367,7 @@ impl TerminalState {
                 session_ref_changed: previous_session
                     != self.current_session_identity_for_persistence(),
                 agent_released: false,
+                ..Default::default()
             };
         }
         self.detected_agent = agent;
@@ -551,6 +578,7 @@ impl TerminalState {
             session_ref_changed: previous_session
                 != self.current_session_identity_for_persistence(),
             agent_released,
+            ..Default::default()
         }
     }
 
@@ -708,13 +736,14 @@ impl TerminalState {
         }
         self.persisted_agent_session = None;
         self.hook_authority = Some(HookAuthority {
-            source,
-            agent_label,
+            source: source.clone(),
+            agent_label: agent_label.clone(),
             state,
             message,
             reported_at: now,
             session_ref,
         });
+        self.record_authoritative_report_at(&source, &agent_label, state, now);
         let current_session = self.current_session_identity_for_persistence();
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
@@ -726,6 +755,7 @@ impl TerminalState {
             ),
             session_ref_changed: previous_session != current_session,
             agent_released: false,
+            ..Default::default()
         })
     }
 
@@ -1421,6 +1451,7 @@ impl TerminalState {
                     ),
                     session_ref_changed: previous_session != current_session,
                     agent_released: false,
+                    ..Default::default()
                 });
             }
             return None;
@@ -1506,10 +1537,11 @@ impl TerminalState {
         }
         self.reconcile_agent_name_owner(&agent_label, Some(&session_ref));
         self.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
-            source,
-            agent: agent_label,
+            source: source.clone(),
+            agent: agent_label.clone(),
             session_ref,
         });
+        self.refresh_authoritative_report_at(&source, &agent_label, now);
         let current_session = self.current_session_identity_for_persistence();
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
@@ -1521,6 +1553,7 @@ impl TerminalState {
             ),
             session_ref_changed: previous_session != current_session,
             agent_released: false,
+            ..Default::default()
         })
     }
 
@@ -1638,6 +1671,7 @@ impl TerminalState {
             ),
             session_ref_changed: previous_session.is_some(),
             agent_released: false,
+            ..Default::default()
         })
     }
 
@@ -1703,6 +1737,7 @@ impl TerminalState {
             ),
             session_ref_changed: previous_session != current_session,
             agent_released: !process_owns_agent,
+            ..Default::default()
         })
     }
 
@@ -1750,6 +1785,155 @@ impl TerminalState {
 
     pub fn full_lifecycle_hook_authority_active(&self) -> bool {
         self.live_full_lifecycle_hook_authority()
+    }
+
+    pub fn reporter_liveness_info_at(&self, now: Instant) -> Option<ReporterLivenessInfo> {
+        let liveness = self.reporter_liveness.as_ref()?;
+        Some(ReporterLivenessInfo {
+            source: liveness.source.clone(),
+            last_seen_unix_ms: liveness.last_seen_unix_ms,
+            age_ms: now
+                .saturating_duration_since(liveness.last_seen_at)
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64,
+            last_known_lifecycle: liveness.last_known_lifecycle,
+            stale: liveness.stale,
+        })
+    }
+
+    pub fn reporter_liveness_is_stale_at(&self, now: Instant) -> bool {
+        self.reporter_liveness
+            .as_ref()
+            .is_some_and(|liveness| self.reporter_liveness_is_active(liveness) && liveness.stale)
+            || self.reporter_liveness.as_ref().is_some_and(|liveness| {
+                self.reporter_liveness_is_active(liveness)
+                    && now.saturating_duration_since(liveness.last_seen_at)
+                        >= REPORTER_HEARTBEAT_TIMEOUT
+            })
+    }
+
+    pub fn next_reporter_liveness_deadline(&self) -> Option<Instant> {
+        let liveness = self.reporter_liveness.as_ref()?;
+        (!liveness.stale && self.reporter_liveness_is_active(liveness))
+            .then(|| liveness.last_seen_at + REPORTER_HEARTBEAT_TIMEOUT)
+    }
+
+    pub fn report_agent_heartbeat(
+        &mut self,
+        source: String,
+        agent_label: String,
+        seq: Option<u64>,
+        now: Instant,
+    ) -> Option<TerminalStateMutation> {
+        if !self.hook_authority.as_ref().is_some_and(|authority| {
+            authority.source == source
+                && authority.agent_label == agent_label
+                && self.hook_authority_is_effective(authority)
+                && crate::detect::full_lifecycle_hook_authority(
+                    &authority.source,
+                    &authority.agent_label,
+                )
+        }) {
+            return None;
+        }
+        if !self.accept_hook_report(&source, seq) {
+            return None;
+        }
+
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
+        let previous_state = self.state;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
+        self.refresh_authoritative_report_at(&source, &agent_label, now);
+        Some(TerminalStateMutation {
+            effective_state_change: self.recompute_effective_state(
+                previous_agent_label,
+                previous_known_agent,
+                previous_state,
+                previous_presentation,
+                now,
+            ),
+            session_ref_changed: false,
+            agent_released: false,
+            liveness_changed: true,
+            suppress_state_change_seq: true,
+        })
+    }
+
+    pub fn expire_reporter_liveness_at(&mut self, now: Instant) -> Option<TerminalStateMutation> {
+        if !self.reporter_liveness_is_stale_at(now) {
+            return None;
+        }
+        if self.reporter_liveness.as_ref()?.stale {
+            return None;
+        }
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
+        let previous_state = self.state;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
+        self.reporter_liveness.as_mut()?.stale = true;
+        Some(TerminalStateMutation {
+            effective_state_change: self.recompute_effective_state(
+                previous_agent_label,
+                previous_known_agent,
+                previous_state,
+                previous_presentation,
+                now,
+            ),
+            session_ref_changed: false,
+            agent_released: false,
+            liveness_changed: true,
+            suppress_state_change_seq: false,
+        })
+    }
+
+    fn reporter_liveness_is_active(&self, liveness: &ReporterLiveness) -> bool {
+        self.hook_authority.as_ref().is_some_and(|authority| {
+            authority.source == liveness.source
+                && authority.agent_label == liveness.agent_label
+                && self.hook_authority_is_effective(authority)
+                && crate::detect::full_lifecycle_hook_authority(
+                    &authority.source,
+                    &authority.agent_label,
+                )
+        })
+    }
+
+    fn refresh_authoritative_report_at(&mut self, source: &str, agent_label: &str, now: Instant) {
+        let lifecycle = self.hook_authority.as_ref().and_then(|authority| {
+            (authority.source == source
+                && authority.agent_label == agent_label
+                && crate::detect::full_lifecycle_hook_authority(source, agent_label))
+            .then_some(authority.state)
+        });
+        if let Some(lifecycle) = lifecycle {
+            self.record_authoritative_report_at(source, agent_label, lifecycle, now);
+        }
+    }
+
+    fn record_authoritative_report_at(
+        &mut self,
+        source: &str,
+        agent_label: &str,
+        lifecycle: AgentState,
+        now: Instant,
+    ) {
+        if !crate::detect::full_lifecycle_hook_authority(source, agent_label) {
+            return;
+        }
+        let last_seen_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        self.reporter_liveness = Some(ReporterLiveness {
+            source: source.to_string(),
+            agent_label: agent_label.to_string(),
+            last_seen_at: now,
+            last_seen_unix_ms,
+            last_known_lifecycle: lifecycle,
+            stale: false,
+        });
     }
 
     fn visible_blocker_overrides_hook(&self) -> bool {
@@ -1951,6 +2135,7 @@ impl TerminalState {
         self.fallback_visible_blocker = false;
         self.fallback_observed_at = None;
         self.hook_authority = None;
+        self.reporter_liveness = None;
         self.persisted_agent_session = None;
         self.agent_metadata.clear();
         self.metadata_report_agents.clear();
@@ -2028,7 +2213,9 @@ impl TerminalState {
         previous_presentation: EffectivePresentation,
         now: Instant,
     ) -> Option<EffectiveStateChange> {
-        let state = if self.visible_blocker_overrides_hook() {
+        let state = if self.reporter_liveness_is_stale_at(now) {
+            AgentState::Unknown
+        } else if self.visible_blocker_overrides_hook() {
             AgentState::Blocked
         } else {
             self.hook_authority
@@ -2083,6 +2270,111 @@ mod tests {
             .join(name)
             .display()
             .to_string()
+    }
+
+    #[test]
+    fn authoritative_reporter_liveness_expires_and_fresh_reports_restore_lifecycle() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Working,
+            false,
+            false,
+            false,
+            false,
+            now,
+        );
+        let session =
+            crate::agent_resume::AgentSessionRef::id("liveness-session").expect("valid session id");
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:pi".into(),
+            agent: "pi".into(),
+            session_ref: session.clone(),
+        });
+        terminal
+            .set_hook_authority_at(
+                "herdr:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                Some(session.clone()),
+                Some(1),
+                now,
+            )
+            .expect("authoritative lifecycle report");
+        assert_eq!(
+            terminal
+                .reporter_liveness_info_at(now)
+                .expect("reporter liveness")
+                .source,
+            "herdr:pi"
+        );
+
+        terminal
+            .expire_reporter_liveness_at(now + REPORTER_HEARTBEAT_TIMEOUT)
+            .expect("liveness expires");
+        assert_eq!(terminal.state, AgentState::Unknown);
+        assert!(
+            terminal
+                .reporter_liveness_info_at(now + REPORTER_HEARTBEAT_TIMEOUT)
+                .expect("reporter liveness")
+                .stale
+        );
+
+        let heartbeat = terminal
+            .report_agent_heartbeat(
+                "herdr:pi".into(),
+                "pi".into(),
+                Some(2),
+                now + REPORTER_HEARTBEAT_TIMEOUT + Duration::from_secs(1),
+            )
+            .expect("fresh heartbeat");
+        assert!(heartbeat.suppress_state_change_seq);
+        assert_eq!(terminal.state, AgentState::Working);
+
+        let stale_again = now + REPORTER_HEARTBEAT_TIMEOUT * 2 + Duration::from_secs(1);
+        terminal
+            .expire_reporter_liveness_at(stale_again)
+            .expect("liveness expires again");
+        terminal
+            .set_hook_authority_at(
+                "herdr:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                Some(session.clone()),
+                Some(3),
+                stale_again + Duration::from_secs(1),
+            )
+            .expect("fresh state report");
+        assert!(
+            !terminal
+                .reporter_liveness_info_at(stale_again + Duration::from_secs(1))
+                .expect("reporter liveness")
+                .stale
+        );
+
+        terminal
+            .expire_reporter_liveness_at(
+                stale_again + REPORTER_HEARTBEAT_TIMEOUT + Duration::from_secs(1),
+            )
+            .expect("liveness expires after state refresh");
+        terminal
+            .set_agent_session_ref_for_session_start(
+                "herdr:pi".into(),
+                "pi".into(),
+                Some(session),
+                Some(4),
+                Some("resume".into()),
+            )
+            .expect("fresh session report");
+        assert!(
+            !terminal
+                .reporter_liveness_info_at(Instant::now())
+                .expect("reporter liveness")
+                .stale
+        );
     }
 
     fn anchor_full_lifecycle_session(

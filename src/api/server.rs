@@ -416,6 +416,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneGraphicsStreamClose(_) => "pane.graphics.stream.close",
         Method::PaneReportAgent(_) => "pane.report_agent",
         Method::PaneReportAgentSession(_) => "pane.report_agent_session",
+        Method::PaneReportAgentHeartbeat(_) => "pane.report_agent_heartbeat",
         Method::PaneReportMetadata(_) => "pane.report_metadata",
         Method::PaneClearAgentAuthority(_) => "pane.clear_agent_authority",
         Method::PaneReleaseAgent(_) => "pane.release_agent",

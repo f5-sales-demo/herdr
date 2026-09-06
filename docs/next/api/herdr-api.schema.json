@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 18,
+  "protocol": 19,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -2773,6 +2773,34 @@
           ],
           "type": "object"
         },
+        "PaneReportAgentHeartbeatParams": {
+          "description": "Refreshes liveness for the authoritative lifecycle reporter already\nattached to this pane. It deliberately carries no lifecycle state.",
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "source",
+            "agent"
+          ],
+          "type": "object"
+        },
         "PaneReportAgentParams": {
           "properties": {
             "agent": {
@@ -5497,6 +5525,22 @@
         {
           "properties": {
             "method": {
+              "const": "pane.report_agent_heartbeat",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneReportAgentHeartbeatParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.report_metadata",
               "type": "string"
             },
@@ -6114,6 +6158,16 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "reporter_liveness": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/ReporterLivenessInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "revision": {
               "format": "uint64",
@@ -7254,6 +7308,15 @@
             "rate_limited",
             "no_foreground_client",
             "busy"
+          ],
+          "type": "string"
+        },
+        "PaneAgentState": {
+          "enum": [
+            "idle",
+            "working",
+            "blocked",
+            "unknown"
           ],
           "type": "string"
         },
@@ -8568,6 +8631,37 @@
           ],
           "type": "string"
         },
+        "ReporterLivenessInfo": {
+          "properties": {
+            "age_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "last_known_lifecycle": {
+              "$ref": "#/schemas/success_response/$defs/PaneAgentState"
+            },
+            "last_seen_unix_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "type": "string"
+            },
+            "stale": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "source",
+            "last_seen_unix_ms",
+            "age_ms",
+            "last_known_lifecycle",
+            "stale"
+          ],
+          "type": "object"
+        },
         "ResponseResult": {
           "oneOf": [
             {
@@ -8881,8 +8975,16 @@
             },
             {
               "properties": {
+                "accepted": {
+                  "description": "Herdr accepted the prompt for delivery to the terminal.",
+                  "type": "boolean"
+                },
                 "agent": {
                   "$ref": "#/schemas/success_response/$defs/AgentInfo"
+                },
+                "observed": {
+                  "description": "A lifecycle transition was observed while honoring `wait`.",
+                  "type": "boolean"
                 },
                 "queue_position": {
                   "format": "uint",
@@ -8902,7 +9004,9 @@
               },
               "required": [
                 "type",
-                "agent"
+                "agent",
+                "accepted",
+                "observed"
               ],
               "type": "object"
             },
