@@ -9,6 +9,7 @@ jobs:
     if: ${{ !github.event.issue.pull_request && github.event.comment.user.login != 'kangal-bot' }}
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
       issues: write
     steps:
@@ -97,6 +98,12 @@ jobs:
           git add .github/APPROVED_CONTRIBUTORS
           git diff --staged --quiet || git commit -m "chore: approve contributor ${{ steps.update.outputs.approved_user }}"
           git push origin HEAD:${{ github.event.repository.default_branch }}
+
+      - name: Run CI for approval commit
+        if: steps.update.outputs.status == 'added'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run ci.yml --ref "${{ github.event.repository.default_branch }}"
 
       - name: Comment on issue
         if: steps.update.outputs.status == 'added'
