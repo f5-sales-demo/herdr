@@ -389,6 +389,26 @@ impl App {
             launch_pending: terminal.managed_agent_launch_pending(),
             interactive_ready: terminal.managed_agent_interactive_ready(),
             state_change_seq: terminal.last_agent_state_change_seq.unwrap_or(0),
+            reporter_liveness: terminal
+                .reporter_liveness_info_at(Instant::now())
+                .map(|reporter| crate::api::schema::ReporterLivenessInfo {
+                    source: reporter.source,
+                    last_seen_unix_ms: reporter.last_seen_unix_ms,
+                    age_ms: reporter.age_ms,
+                    last_known_lifecycle: match reporter.last_known_lifecycle {
+                        crate::detect::AgentState::Idle => crate::api::schema::PaneAgentState::Idle,
+                        crate::detect::AgentState::Working => {
+                            crate::api::schema::PaneAgentState::Working
+                        }
+                        crate::detect::AgentState::Blocked => {
+                            crate::api::schema::PaneAgentState::Blocked
+                        }
+                        crate::detect::AgentState::Unknown => {
+                            crate::api::schema::PaneAgentState::Unknown
+                        }
+                    },
+                    stale: reporter.stale,
+                }),
             cwd: pane.cwd,
             foreground_cwd: pane.foreground_cwd,
             revision: pane.revision,

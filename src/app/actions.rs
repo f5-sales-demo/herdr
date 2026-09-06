@@ -2839,6 +2839,17 @@ impl AppState {
                 })
                 .into_iter()
                 .collect(),
+            AppEvent::AgentHeartbeatReported {
+                pane_id,
+                source,
+                agent_label,
+                seq,
+            } => self
+                .update_terminal_state(pane_id, |terminal| {
+                    terminal.report_agent_heartbeat(source, agent_label, seq, Instant::now())
+                })
+                .into_iter()
+                .collect(),
             AppEvent::HookMetadataReported {
                 pane_id,
                 source,
@@ -2886,17 +2897,12 @@ impl AppState {
                 agent_label,
                 seq,
                 ..
-            } => {
-                if crate::agent_resume::is_official_agent_source(&source, &agent_label) {
-                    Vec::new()
-                } else {
-                    self.update_terminal_state(pane_id, |terminal| {
-                        terminal.release_agent_with_mutation(&source, &agent_label, seq)
-                    })
-                    .into_iter()
-                    .collect()
-                }
-            }
+            } => self
+                .update_terminal_state(pane_id, |terminal| {
+                    terminal.release_agent_with_mutation(&source, &agent_label, seq)
+                })
+                .into_iter()
+                .collect(),
             // Both intercepted before this dispatch — in App::handle_internal_event (monolithic)
             // or via HeadlessServer forwarding to the foreground client (server); never touch
             // AppState. Kept for AppEvent exhaustiveness.
@@ -2955,8 +2961,9 @@ impl AppState {
             let mutation = update(terminal)?;
             let managed_changed = terminal.reconcile_managed_agent_at(now, false);
             let agent_name_changed = terminal.agent_name != previous_agent_name;
-            let unchanged_change = (mutation.agent_released || agent_name_changed)
-                .then(|| terminal.unchanged_effective_state_change_at(now));
+            let unchanged_change =
+                (mutation.agent_released || mutation.liveness_changed || agent_name_changed)
+                    .then(|| terminal.unchanged_effective_state_change_at(now));
             (
                 mutation,
                 managed_changed,
@@ -2969,7 +2976,7 @@ impl AppState {
         }
         let agent_released = mutation.agent_released;
         let change = mutation.effective_state_change.or(unchanged_change)?;
-        if change.previous_state != change.state {
+        if change.previous_state != change.state && !mutation.suppress_state_change_seq {
             self.next_agent_state_change_seq += 1;
             if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
                 terminal.last_agent_state_change_seq = Some(self.next_agent_state_change_seq);
@@ -3011,6 +3018,13 @@ impl AppState {
             .min()
     }
 
+    pub(crate) fn next_reporter_liveness_deadline(&self) -> Option<Instant> {
+        self.terminals
+            .values()
+            .filter_map(crate::terminal::TerminalState::next_reporter_liveness_deadline)
+            .min()
+    }
+
     pub(crate) fn reconcile_managed_agents_at(&mut self, now: Instant) -> Vec<(usize, PaneId)> {
         let mut changed_terminals = std::collections::HashSet::new();
         for (terminal_id, terminal) in &mut self.terminals {
@@ -3033,6 +3047,23 @@ impl AppState {
                             .contains(&pane.attached_terminal_id)
                             .then_some((ws_idx, pane_id))
                     })
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn expire_reporter_liveness_at(&mut self, now: Instant) -> Vec<PaneStateUpdate> {
+        let pane_ids: Vec<_> = self
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.tabs.iter())
+            .flat_map(|tab| tab.panes.keys().copied())
+            .collect();
+        pane_ids
+            .into_iter()
+            .filter_map(|pane_id| {
+                self.update_terminal_state(pane_id, |terminal| {
+                    terminal.expire_reporter_liveness_at(now)
                 })
             })
             .collect()
@@ -5012,6 +5043,63 @@ mod tests {
     }
 
     #[test]
+    fn reporter_heartbeat_does_not_advance_state_change_sequence() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let now = Instant::now();
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Working,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: now,
+        });
+        let heartbeat_session = crate::agent_resume::AgentSessionRef::id("heartbeat-session")
+            .expect("valid session id");
+        let terminal_id = state.workspaces[0].terminal_id(pane_id).unwrap().clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "herdr:pi".into(),
+                agent: "pi".into(),
+                session_ref: heartbeat_session.clone(),
+            });
+        state.handle_app_event(AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:pi".into(),
+            agent_label: "pi".into(),
+            state: AgentState::Working,
+            message: None,
+            seq: Some(1),
+            session_ref: Some(heartbeat_session),
+        });
+        let before = state.terminals[&terminal_id].last_agent_state_change_seq;
+
+        state.handle_app_event(AppEvent::AgentHeartbeatReported {
+            pane_id,
+            source: "herdr:pi".into(),
+            agent_label: "pi".into(),
+            seq: Some(2),
+        });
+
+        assert_eq!(
+            state.terminals[&terminal_id].last_agent_state_change_seq,
+            before
+        );
+        assert_eq!(
+            state.terminals[&terminal_id]
+                .reporter_liveness_info_at(Instant::now())
+                .expect("heartbeat should refresh reporter liveness")
+                .source,
+            "herdr:pi"
+        );
+    }
+
+    #[test]
     fn delayed_background_waiting_cancels_when_agent_resumes_working() {
         let mut state = app_with_workspaces(&["active", "background"]);
         state.active = Some(0);
@@ -5247,7 +5335,7 @@ mod tests {
     }
 
     #[test]
-    fn official_release_preserves_process_owned_agent_identity() {
+    fn official_release_revokes_authority_but_preserves_process_owned_identity() {
         let mut state = app_with_workspaces(&["active"]);
         let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
         let terminal_id = state.workspaces[0]
@@ -5297,13 +5385,13 @@ mod tests {
             seq: Some(2),
         });
 
-        assert!(updates.is_empty());
+        assert_eq!(updates.len(), 1);
         let terminal = &state.terminals[&terminal_id];
         assert_eq!(terminal.state, AgentState::Working);
         assert_eq!(terminal.detected_agent, Some(Agent::Pi));
         assert_eq!(terminal.agent_name.as_deref(), Some("reviewer"));
-        assert!(terminal.full_lifecycle_hook_authority_active());
-        assert!(!state.session_dirty);
+        assert!(!terminal.full_lifecycle_hook_authority_active());
+        assert!(state.session_dirty);
     }
 
     #[test]

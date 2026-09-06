@@ -7,11 +7,11 @@ use crate::api::schema::{
     PaneLayoutRect, PaneLayoutSnapshot, PaneLayoutSplit, PaneListParams, PaneMoveDestination,
     PaneMoveParams, PaneMoveReason, PaneMoveResult, PaneNeighborParams, PaneNeighborResult,
     PaneProcessInfo, PaneProcessInfoParams, PaneProcessInfoProcess, PaneReadParams, PaneReadResult,
-    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
-    PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
-    PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams,
-    PaneSwapReason, PaneSwapResult, PaneTarget, PaneZoomMode, PaneZoomParams, PaneZoomReason,
-    PaneZoomResult, ResponseResult,
+    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentHeartbeatParams,
+    PaneReportAgentParams, PaneReportAgentSessionParams, PaneReportMetadataParams,
+    PaneResizeParams, PaneResizeReason, PaneResizeResult, PaneSendInputParams, PaneSendKeysParams,
+    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
+    PaneTarget, PaneZoomMode, PaneZoomParams, PaneZoomReason, PaneZoomResult, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -1257,6 +1257,27 @@ impl App {
             session_start_source: crate::agent_resume::normalize_session_start_source(
                 params.session_start_source,
             ),
+        });
+
+        encode_success(id, ResponseResult::Ok {})
+    }
+
+    pub(super) fn handle_pane_report_agent_heartbeat(
+        &mut self,
+        id: String,
+        params: PaneReportAgentHeartbeatParams,
+    ) -> String {
+        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
+            return invalid_agent(id);
+        };
+        self.handle_internal_event(crate::events::AppEvent::AgentHeartbeatReported {
+            pane_id,
+            source: params.source,
+            agent_label,
+            seq: params.seq,
         });
 
         encode_success(id, ResponseResult::Ok {})
