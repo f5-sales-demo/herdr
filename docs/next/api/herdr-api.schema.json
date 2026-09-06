@@ -6159,6 +6159,17 @@
             "pane_id": {
               "type": "string"
             },
+            "queue_position": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "queued": {
+              "type": "boolean"
+            },
             "reporter_liveness": {
               "anyOf": [
                 {

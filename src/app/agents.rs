@@ -389,6 +389,8 @@ impl App {
             launch_pending: terminal.managed_agent_launch_pending(),
             interactive_ready: terminal.managed_agent_interactive_ready(),
             state_change_seq: terminal.last_agent_state_change_seq.unwrap_or(0),
+            queued: false,
+            queue_position: None,
             reporter_liveness: terminal
                 .reporter_liveness_info_at(Instant::now())
                 .map(|reporter| crate::api::schema::ReporterLivenessInfo {
@@ -413,13 +415,21 @@ impl App {
             foreground_cwd: pane.foreground_cwd,
             revision: pane.revision,
         };
-        if self.queued_agent_prompts.values().any(|prompt| {
-            prompt.target == info.pane_id
-                || info
-                    .name
-                    .as_deref()
-                    .is_some_and(|name| prompt.target == name)
-        }) {
+        info.queue_position = self.agent_admission.queue_position_for_pane(&info.pane_id);
+        info.queued = info.queue_position.is_some();
+        let now = Instant::now();
+        let has_fresh_authoritative_lifecycle = terminal
+            .reporter_liveness_info_at(now)
+            .is_some_and(|reporter| {
+                !terminal.reporter_liveness_is_stale_at(now)
+                    && matches!(
+                        reporter.last_known_lifecycle,
+                        crate::detect::AgentState::Idle
+                            | crate::detect::AgentState::Working
+                            | crate::detect::AgentState::Blocked
+                    )
+            });
+        if info.queued && !has_fresh_authoritative_lifecycle {
             info.agent_status = crate::api::schema::AgentStatus::Queued;
         }
         Some(info)
