@@ -1969,7 +1969,6 @@ impl TerminalState {
         self.hook_authority.as_ref().is_some_and(|authority| {
             authority.source == liveness.source
                 && authority.agent_label == liveness.agent_label
-                && self.hook_authority_is_effective(authority)
                 && crate::detect::full_lifecycle_hook_authority(
                     &authority.source,
                     &authority.agent_label,
