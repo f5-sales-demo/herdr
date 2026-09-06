@@ -103,6 +103,10 @@ pub enum ResponseResult {
     },
     AgentPrompted {
         agent: AgentInfo,
+        /// Herdr accepted the prompt for delivery to the terminal.
+        accepted: bool,
+        /// A lifecycle transition was observed while honoring `wait`.
+        observed: bool,
         #[serde(default, skip_serializing_if = "super::is_false")]
         queued: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -35,6 +35,7 @@ pub(crate) struct AgentPanelEntry {
     pub state: AgentState,
     pub seen: bool,
     pub last_agent_state_change_seq: Option<u64>,
+    pub reporter_stale: bool,
     pub state_labels: std::collections::HashMap<String, String>,
     pub tokens: std::collections::HashMap<String, String>,
 }
@@ -175,6 +176,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         state: detail.state,
                         seen: detail.seen,
                         last_agent_state_change_seq: detail.last_agent_state_change_seq,
+                        reporter_stale: detail.reporter_stale,
                         state_labels: detail.state_labels,
                         tokens: detail.tokens,
                     }
@@ -550,11 +552,15 @@ pub(crate) fn agent_panel_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
 }
 
 fn resolved_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
-    let label = entry
-        .state_labels
-        .get(agent_panel_status_key(entry.state, entry.seen))
-        .map(String::as_str)
-        .unwrap_or_else(|| state_label(entry.state, entry.seen));
+    let label = if entry.reporter_stale {
+        "stale"
+    } else {
+        entry
+            .state_labels
+            .get(agent_panel_status_key(entry.state, entry.seen))
+            .map(String::as_str)
+            .unwrap_or_else(|| state_label(entry.state, entry.seen))
+    };
     tokens::agent_rows(&app.sidebar_agents, entry, label)
 }
 
@@ -1496,7 +1502,11 @@ fn render_agent_detail(
             Style::default().fg(label_color).add_modifier(Modifier::DIM)
         };
         let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
-        let state_icon = state_dot(detail.state, detail.seen, p);
+        let state_icon = if detail.reporter_stale {
+            ("!", Style::default().fg(p.red))
+        } else {
+            state_dot(detail.state, detail.seen, p)
+        };
 
         for (row_index, resolved) in rows.iter().take(height as usize).enumerate() {
             let mut spans = vec![Span::raw(if row_index == 0 { " " } else { "   " })];
