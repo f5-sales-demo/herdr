@@ -1966,14 +1966,7 @@ impl TerminalState {
     }
 
     fn reporter_liveness_is_active(&self, liveness: &ReporterLiveness) -> bool {
-        self.hook_authority.as_ref().is_some_and(|authority| {
-            authority.source == liveness.source
-                && authority.agent_label == liveness.agent_label
-                && crate::detect::full_lifecycle_hook_authority(
-                    &authority.source,
-                    &authority.agent_label,
-                )
-        })
+        crate::detect::full_lifecycle_hook_authority(&liveness.source, &liveness.agent_label)
     }
 
     fn refresh_authoritative_report_at(&mut self, source: &str, agent_label: &str, now: Instant) {
