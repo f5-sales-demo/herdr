@@ -3939,6 +3939,22 @@ impl HeadlessServer {
 
         if self
             .app
+            .state
+            .next_reporter_liveness_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            let previous_toast = self.app.state.toast.clone();
+            for update in self.app.state.expire_reporter_liveness_at(now) {
+                self.app
+                    .refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
+                self.app.emit_pane_state_update(&update);
+                self.forward_pane_state_update_notifications_to_clients(&update);
+                changed = true;
+            }
+        }
+
+        if self
+            .app
             .copy_feedback_deadline
             .is_some_and(|deadline| now >= deadline)
         {
@@ -5968,6 +5984,72 @@ next_tab = ""
                         } if title.is_none()
                     )
             }));
+    }
+
+    #[test]
+    fn headless_scheduled_tasks_expire_reporter_liveness() {
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("liveness");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.terminal_id(pane_id).expect("terminal").clone();
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+
+        let now = Instant::now();
+        let terminal = server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state");
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(crate::detect::Agent::Pi),
+            crate::detect::AgentState::Working,
+            false,
+            false,
+            false,
+            false,
+            now,
+        );
+        let session = crate::agent_resume::AgentSessionRef::id("headless-liveness")
+            .expect("valid session id");
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:pi".into(),
+            agent: "pi".into(),
+            session_ref: session.clone(),
+        });
+        terminal
+            .set_hook_authority_at(
+                "herdr:pi".into(),
+                "pi".into(),
+                crate::detect::AgentState::Working,
+                None,
+                Some(session),
+                Some(1),
+                now,
+            )
+            .expect("authoritative report");
+        // This models terminal detection returning control to the shell while
+        // the accepted reporter record still owns the heartbeat deadline.
+        terminal.hook_authority = None;
+        let deadline = terminal
+            .next_reporter_liveness_deadline()
+            .expect("reporter deadline");
+
+        assert!(server.handle_scheduled_tasks_headless(deadline, false));
+        let terminal = server
+            .app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .expect("terminal state");
+        assert_eq!(terminal.state, crate::detect::AgentState::Unknown);
+        assert!(
+            terminal
+                .reporter_liveness_info_at(deadline)
+                .expect("reporter liveness")
+                .stale
+        );
     }
 
     #[test]
