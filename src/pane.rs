@@ -300,6 +300,7 @@ fn foreground_shell_agent_action(
     new_agent: Option<Agent>,
     foreground_is_pane_shell: bool,
     process_exit_reported: bool,
+    full_lifecycle_authority_active: bool,
 ) -> ForegroundShellAgentAction {
     let Some(previous_agent) = previous_agent else {
         return ForegroundShellAgentAction::ObserveProbe;
@@ -318,6 +319,13 @@ fn foreground_shell_agent_action(
     }
 
     if foreground_is_pane_shell {
+        // A first-class reporter is the lifecycle authority. A shell handoff
+        // alone is ambiguous: the agent may have exited, or it may be a stopped
+        // job that will resume and resume reporting. Preserve that authority and
+        // let an explicit release or heartbeat expiry make the state visible.
+        if full_lifecycle_authority_active {
+            return ForegroundShellAgentAction::ObserveProbe;
+        }
         // Do not clear identity immediately. First publish an idle process-exit
         // transition for the previous agent so notifications and wait-agent callers
         // observe completion before the pane becomes unknown.
@@ -727,6 +735,7 @@ fn spawn_basic_detection_task(
                     new_agent,
                     foreground_is_pane_shell,
                     foreground_shell_exit_reported,
+                    lifecycle_authority_active,
                 );
                 let changed = apply_foreground_shell_agent_action(
                     &mut agent_presence,
@@ -2169,6 +2178,7 @@ impl PaneRuntime {
                                 new_agent,
                                 foreground_is_pane_shell,
                                 foreground_shell_exit_reported,
+                                lifecycle_authority_active,
                             );
                             let changed = apply_foreground_shell_agent_action(
                                 &mut agent_presence,
@@ -3437,11 +3447,11 @@ mod tests {
     #[test]
     fn foreground_shell_reports_process_exit_before_clearing_agent() {
         assert_eq!(
-            foreground_shell_agent_action(Some(Agent::Codex), None, true, false),
+            foreground_shell_agent_action(Some(Agent::Codex), None, true, false, false),
             ForegroundShellAgentAction::ReportProcessExit
         );
         assert_eq!(
-            foreground_shell_agent_action(Some(Agent::Codex), None, true, true),
+            foreground_shell_agent_action(Some(Agent::Codex), None, true, true, false),
             ForegroundShellAgentAction::ClearAgent
         );
     }
@@ -3449,7 +3459,7 @@ mod tests {
     #[test]
     fn same_agent_after_reported_exit_is_a_replacement_process() {
         assert_eq!(
-            foreground_shell_agent_action(Some(Agent::Pi), Some(Agent::Pi), false, true),
+            foreground_shell_agent_action(Some(Agent::Pi), Some(Agent::Pi), false, true, false),
             ForegroundShellAgentAction::ReportReplacementProcess
         );
     }
@@ -3457,7 +3467,7 @@ mod tests {
     #[test]
     fn unknown_non_shell_foreground_job_is_not_immediate_clear_signal() {
         assert_eq!(
-            foreground_shell_agent_action(Some(Agent::Claude), None, false, false),
+            foreground_shell_agent_action(Some(Agent::Claude), None, false, false, false),
             ForegroundShellAgentAction::ObserveProbe
         );
     }
@@ -3465,7 +3475,7 @@ mod tests {
     #[test]
     fn reported_process_exit_clears_before_unknown_foreground_probe() {
         assert_eq!(
-            foreground_shell_agent_action(Some(Agent::Claude), None, false, true),
+            foreground_shell_agent_action(Some(Agent::Claude), None, false, true, false),
             ForegroundShellAgentAction::ClearAgent
         );
     }
@@ -3473,7 +3483,21 @@ mod tests {
     #[test]
     fn foreground_agent_job_is_not_clear_signal() {
         assert_eq!(
-            foreground_shell_agent_action(Some(Agent::Claude), Some(Agent::OpenCode), true, false,),
+            foreground_shell_agent_action(
+                Some(Agent::Claude),
+                Some(Agent::OpenCode),
+                true,
+                false,
+                false
+            ),
+            ForegroundShellAgentAction::ObserveProbe
+        );
+    }
+
+    #[test]
+    fn lifecycle_authority_defers_foreground_shell_exit_to_reporter_liveness() {
+        assert_eq!(
+            foreground_shell_agent_action(Some(Agent::Pi), None, true, false, true),
             ForegroundShellAgentAction::ObserveProbe
         );
     }
