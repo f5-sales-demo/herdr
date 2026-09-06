@@ -278,6 +278,19 @@ impl App {
         }
 
         if self
+            .state
+            .next_reporter_liveness_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            let previous_toast = self.state.toast.clone();
+            for update in self.state.expire_reporter_liveness_at(now) {
+                self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
+                self.emit_pane_state_update(&update);
+                changed = true;
+            }
+        }
+
+        if self
             .copy_feedback_deadline
             .is_some_and(|deadline| now >= deadline)
         {
@@ -534,6 +547,7 @@ impl App {
             self.toast_deadline,
             self.state.next_pending_agent_notification_deadline(),
             self.state.next_managed_agent_deadline(),
+            self.state.next_reporter_liveness_deadline(),
             self.copy_feedback_deadline,
             include_git_refresh
                 .then(|| self.git_refresh_deadline())

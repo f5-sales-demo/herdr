@@ -176,12 +176,15 @@ fn agent_start_command_works() {
             "6000",
         ],
     );
-    assert_eq!(stalled.status.code(), Some(1));
-    let stalled: serde_json::Value = serde_json::from_slice(&stalled.stderr).unwrap();
-    assert_eq!(stalled["error"]["code"], "agent_prompt_stalled");
-    assert!(stalled["error"]["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("state_change_seq remained")));
+    assert!(
+        stalled.status.success(),
+        "prompt delivery should be accepted even without an observed lifecycle: {}",
+        String::from_utf8_lossy(&stalled.stderr)
+    );
+    let stalled: serde_json::Value = serde_json::from_slice(&stalled.stdout).unwrap();
+    assert_eq!(stalled["result"]["type"], "agent_prompted");
+    assert_eq!(stalled["result"]["accepted"], true);
+    assert_eq!(stalled["result"]["observed"], false);
 
     let prompted = run_cli(
         &socket_path,

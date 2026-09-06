@@ -62,6 +62,22 @@ fn request_uses_dot_method_names() {
 }
 
 #[test]
+fn reporter_heartbeat_request_round_trips() {
+    let request = Request {
+        id: "heartbeat".into(),
+        method: Method::PaneReportAgentHeartbeat(PaneReportAgentHeartbeatParams {
+            pane_id: "w1:p2".into(),
+            source: "herdr:pi".into(),
+            agent: "pi".into(),
+            seq: Some(42),
+        }),
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "pane.report_agent_heartbeat");
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
+}
+
+#[test]
 fn agent_start_and_prompt_requests_round_trip() {
     let start = Request {
         id: "start".into(),

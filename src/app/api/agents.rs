@@ -126,6 +126,8 @@ impl App {
                 id,
                 ResponseResult::AgentPrompted {
                     agent,
+                    accepted: true,
+                    observed: false,
                     queued: true,
                     queue_position: Some(position),
                 },
@@ -157,6 +159,8 @@ impl App {
             id,
             ResponseResult::AgentPrompted {
                 agent,
+                accepted: true,
+                observed: false,
                 queued: false,
                 queue_position: None,
             },
@@ -683,5 +687,71 @@ mod tests {
                 Some("shell-pane")
             );
         }
+    }
+
+    #[test]
+    fn agent_info_exposes_authoritative_reporter_liveness_and_staleness() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let now = std::time::Instant::now();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Working,
+            false,
+            false,
+            false,
+            false,
+            now,
+        );
+        let session = crate::agent_resume::AgentSessionRef::id("agent-info-liveness")
+            .expect("valid test session");
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:pi".into(),
+            agent: "pi".into(),
+            session_ref: session.clone(),
+        });
+        terminal
+            .set_hook_authority_at(
+                "herdr:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                Some(session),
+                Some(1),
+                now,
+            )
+            .expect("authoritative lifecycle report");
+
+        let fresh = app.agent_info(0, pane_id).expect("agent info");
+        assert_eq!(fresh.agent_status, AgentStatus::Working);
+        assert_eq!(
+            fresh
+                .reporter_liveness
+                .as_ref()
+                .expect("reporter diagnostics")
+                .source,
+            "herdr:pi"
+        );
+        assert_eq!(app.collect_agent_infos().len(), 1);
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .expire_reporter_liveness_at(now + crate::terminal::state::REPORTER_HEARTBEAT_TIMEOUT)
+            .expect("reporter liveness expiry");
+        let stale = app.agent_info(0, pane_id).expect("agent info");
+        assert_eq!(stale.agent_status, AgentStatus::Unknown);
+        assert!(
+            stale
+                .reporter_liveness
+                .as_ref()
+                .expect("reporter diagnostics")
+                .stale
+        );
     }
 }

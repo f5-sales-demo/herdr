@@ -304,7 +304,7 @@ fn ping_over_socket_returns_version() {
     assert_eq!(value["result"]["version"], env!("CARGO_PKG_VERSION"));
     // Intentionally hardcoded so wire protocol bumps require updating this test.
     // Changing this value means old clients/servers are no longer compatible.
-    assert_eq!(value["result"]["protocol"], 18);
+    assert_eq!(value["result"]["protocol"], 19);
 
     cleanup_spawned_herdr(child, base);
 }
@@ -2011,7 +2011,10 @@ fn official_release_waits_for_confirmed_process_exit() {
             pane["result"]["pane"]["agent"], "pi",
             "official release hid the live Pi process: {pane}"
         );
-        assert_eq!(pane["result"]["pane"]["agent_status"], "working");
+        assert_ne!(
+            pane["result"]["pane"]["agent_status"], "unknown",
+            "official release hid the live Pi process: {pane}"
+        );
         thread::sleep(Duration::from_millis(50));
     }
 

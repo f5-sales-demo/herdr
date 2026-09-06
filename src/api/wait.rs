@@ -240,10 +240,7 @@ pub(super) fn prompt_agent(
         {
             AgentWaitTimeoutKind::Status
         } else {
-            AgentWaitTimeoutKind::PromptStalled {
-                baseline: prompt_state_change_seq,
-                timeout_ms: effect_timeout_ms,
-            }
+            AgentWaitTimeoutKind::PromptUnobserved
         };
         let Some(outcome) = wait_for_resolved_agent(
             request_id.clone(),
@@ -319,6 +316,8 @@ fn agent_prompt_success(
         id: request_id,
         result: ResponseResult::AgentPrompted {
             agent,
+            accepted: true,
+            observed: true,
             queued: false,
             queue_position: None,
         },
@@ -340,7 +339,7 @@ struct ResolvedAgentWait {
 #[derive(Clone, Copy)]
 enum AgentWaitTimeoutKind {
     Status,
-    PromptStalled { baseline: u64, timeout_ms: u64 },
+    PromptUnobserved,
 }
 
 enum AgentWaitOutcome {
@@ -617,28 +616,31 @@ fn agent_wait_timeout(
     kind: AgentWaitTimeoutKind,
     current: &crate::api::schema::AgentInfo,
 ) -> std::io::Result<String> {
-    let (code, message) = match kind {
-        AgentWaitTimeoutKind::Status => {
-            ("timeout", "timed out waiting for agent status".to_string())
-        }
-        AgentWaitTimeoutKind::PromptStalled {
-            baseline,
-            timeout_ms,
-        } => {
-            let status = format!("{:?}", current.agent_status).to_ascii_lowercase();
-            (
-                "agent_prompt_stalled",
-                format!(
-                    "agent prompt produced no observed state change within {timeout_ms} ms; status is {status} and state_change_seq remained {baseline}"
-                ),
-            )
-        }
-    };
+    if matches!(kind, AgentWaitTimeoutKind::PromptUnobserved) {
+        return agent_prompt_unobserved_success(request_id, current.clone());
+    }
     serde_json::to_string(&ErrorResponse {
         id: request_id,
         error: ErrorBody {
-            code: code.into(),
-            message,
+            code: "timeout".into(),
+            message: "timed out waiting for agent status".into(),
+        },
+    })
+    .map_err(std::io::Error::other)
+}
+
+fn agent_prompt_unobserved_success(
+    request_id: String,
+    agent: crate::api::schema::AgentInfo,
+) -> std::io::Result<String> {
+    serde_json::to_string(&SuccessResponse {
+        id: request_id,
+        result: ResponseResult::AgentPrompted {
+            agent,
+            accepted: true,
+            observed: false,
+            queued: false,
+            queue_position: None,
         },
     })
     .map_err(std::io::Error::other)

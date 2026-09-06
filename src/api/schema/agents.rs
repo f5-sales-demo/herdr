@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::common::{AgentStatus, ReadFormat, ReadSource};
+use super::common::{AgentStatus, PaneAgentState, ReadFormat, ReadSource};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentReadParams {
@@ -220,10 +220,21 @@ pub struct AgentInfo {
     #[serde(default)]
     pub state_change_seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reporter_liveness: Option<ReporterLivenessInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_cwd: Option<String>,
     pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ReporterLivenessInfo {
+    pub source: String,
+    pub last_seen_unix_ms: u64,
+    pub age_ms: u64,
+    pub last_known_lifecycle: PaneAgentState,
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

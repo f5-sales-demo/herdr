@@ -85,6 +85,13 @@ pub enum AppEvent {
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
         session_start_source: Option<String>,
     },
+    /// Liveness was reported by the pane's existing authoritative lifecycle reporter.
+    AgentHeartbeatReported {
+        pane_id: PaneId,
+        source: String,
+        agent_label: String,
+        seq: Option<u64>,
+    },
     /// Display-only agent metadata was reported for a pane.
     HookMetadataReported {
         pane_id: PaneId,

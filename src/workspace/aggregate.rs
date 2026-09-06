@@ -21,6 +21,7 @@ pub struct PaneDetail {
     pub state: AgentState,
     pub seen: bool,
     pub last_agent_state_change_seq: Option<u64>,
+    pub reporter_stale: bool,
     pub state_labels: HashMap<String, String>,
     pub tokens: HashMap<String, String>,
 }
@@ -64,6 +65,8 @@ impl Tab {
                     state: terminal.state,
                     seen: pane.seen,
                     last_agent_state_change_seq: terminal.last_agent_state_change_seq,
+                    reporter_stale: terminal
+                        .reporter_liveness_is_stale_at(std::time::Instant::now()),
                     state_labels: presentation.state_labels,
                     tokens: terminal.metadata_tokens.values(),
                 })
