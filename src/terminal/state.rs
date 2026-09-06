@@ -2495,6 +2495,13 @@ mod tests {
         assert_eq!(terminal.effective_agent_label(), Some("pi"));
         assert!(terminal.next_reporter_liveness_deadline().is_some());
 
+        // Terminal detection can clear its transient hook claim while the
+        // reporter record is still accepted. The accepted reporter must keep
+        // its own expiry deadline; otherwise a stopped pane is left looking
+        // idle forever instead of becoming visibly stale.
+        terminal.hook_authority = None;
+        assert!(terminal.next_reporter_liveness_deadline().is_some());
+
         terminal
             .expire_reporter_liveness_at(now + REPORTER_HEARTBEAT_TIMEOUT)
             .expect("heartbeat expiry should own the transition");
