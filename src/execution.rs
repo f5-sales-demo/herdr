@@ -248,14 +248,7 @@ impl ExecutionManager {
         };
         let _ = self.mutate(&id, |record| {
             record.stdout_bytes = record.stdout_bytes.saturating_add(bytes.len() as u64);
-            record
-                .stdout_tail
-                .push_str(&redact(&String::from_utf8_lossy(bytes)));
-            if record.stdout_tail.len() > OUTPUT_TAIL_BYTES {
-                let drop_at = record.stdout_tail.len() - OUTPUT_TAIL_BYTES;
-                record.stdout_tail.drain(..drop_at);
-                record.output_truncated = true;
-            }
+            append_bounded_tail(&mut record.stdout_tail, &mut record.output_truncated, bytes);
         });
     }
 
@@ -414,13 +407,18 @@ impl ExecutionManager {
 
 fn append_captured(captured: &mut CapturedOutput, bytes: &[u8]) {
     captured.bytes = captured.bytes.saturating_add(bytes.len() as u64);
-    captured
-        .tail
-        .push_str(&redact(&String::from_utf8_lossy(bytes)));
-    if captured.tail.len() > OUTPUT_TAIL_BYTES {
-        let drop_at = captured.tail.len() - OUTPUT_TAIL_BYTES;
-        captured.tail.drain(..drop_at);
-        captured.truncated = true;
+    append_bounded_tail(&mut captured.tail, &mut captured.truncated, bytes);
+}
+
+fn append_bounded_tail(tail: &mut String, truncated: &mut bool, bytes: &[u8]) {
+    tail.push_str(&redact(&String::from_utf8_lossy(bytes)));
+    if tail.len() > OUTPUT_TAIL_BYTES {
+        let mut drop_at = tail.len() - OUTPUT_TAIL_BYTES;
+        while !tail.is_char_boundary(drop_at) {
+            drop_at += 1;
+        }
+        tail.drain(..drop_at);
+        *truncated = true;
     }
 }
 
@@ -601,6 +599,56 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
         let m = ExecutionManager::load_at(path.clone());
         assert_eq!(m.get("old").unwrap().state, ExecutionState::Lost);
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn tail_with_multibyte_prefix_at_cap_boundary() -> String {
+        format!("é{}", "x".repeat(OUTPUT_TAIL_BYTES - 3))
+    }
+
+    #[test]
+    fn pending_output_tail_keeps_a_utf8_safe_bounded_suffix() {
+        let mut captured = CapturedOutput {
+            bytes: 41,
+            tail: tail_with_multibyte_prefix_at_cap_boundary(),
+            truncated: false,
+        };
+
+        append_captured(&mut captured, b"x");
+
+        assert_eq!(captured.bytes, 42);
+        assert!(captured.truncated);
+        assert!(captured.tail.len() <= OUTPUT_TAIL_BYTES);
+        assert_eq!(
+            captured.tail,
+            format!("{}x\n", "x".repeat(OUTPUT_TAIL_BYTES - 3))
+        );
+    }
+
+    #[test]
+    fn tracked_output_tail_keeps_a_utf8_safe_bounded_suffix() {
+        let path = temp("tracked-utf8-tail");
+        let manager = ExecutionManager::load_at(path.clone());
+        manager.admit_visible(&params("tracked")).unwrap();
+        manager
+            .attach_visible("tracked", 7, "w1:p7".into(), "w1:t1".into(), Some(7))
+            .unwrap();
+        manager
+            .mutate("tracked", |record| {
+                record.stdout_tail = tail_with_multibyte_prefix_at_cap_boundary();
+            })
+            .unwrap();
+
+        manager.observe_visible_output(7, b"x");
+
+        let record = manager.get("tracked").unwrap();
+        assert_eq!(record.stdout_bytes, 1);
+        assert!(record.output_truncated);
+        assert!(record.stdout_tail.len() <= OUTPUT_TAIL_BYTES);
+        assert_eq!(
+            record.stdout_tail,
+            format!("{}x\n", "x".repeat(OUTPUT_TAIL_BYTES - 3))
+        );
         let _ = std::fs::remove_file(path);
     }
 }
