@@ -2,6 +2,7 @@ mod agent_options;
 mod agent_transport;
 mod agent_wait;
 mod agents;
+mod executions;
 mod harness;
 mod hooks;
 mod panes;

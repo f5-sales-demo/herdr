@@ -18,4 +18,8 @@ pub struct ServerCapabilities {
     pub live_handoff: bool,
     #[serde(default)]
     pub detached_server_daemon: bool,
+    #[serde(default)]
+    pub tracked_executions: bool,
+    #[serde(default)]
+    pub agent_turn_journal: bool,
 }

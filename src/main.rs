@@ -56,6 +56,7 @@ fn set_host_color_scheme_reports(enabled: bool) -> io::Result<()> {
 
 mod agent_admission;
 mod agent_resume;
+mod agent_turn;
 mod api;
 mod app;
 mod build_info;
@@ -66,6 +67,7 @@ mod client;
 mod config;
 mod detect;
 mod events;
+mod execution;
 mod ghostty;
 mod handoff_runtime;
 mod input;

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 19,
+  "protocol": 20,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -1396,6 +1396,135 @@
           ],
           "type": "object"
         },
+        "AgentTurnListParams": {
+          "properties": {
+            "since_revision": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "AgentTurnReportParams": {
+          "properties": {
+            "event_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "execution_id": {
+              "type": "string"
+            },
+            "generation": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "producer": {
+              "type": "string"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "result": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "result_digest": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/schemas/request/$defs/AgentTurnState"
+            },
+            "turn_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "execution_id",
+            "pane_id",
+            "producer",
+            "session_id",
+            "turn_id",
+            "event_revision",
+            "state"
+          ],
+          "type": "object"
+        },
+        "AgentTurnState": {
+          "enum": [
+            "starting",
+            "working",
+            "waiting_input",
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted",
+            "lost"
+          ],
+          "type": "string"
+        },
+        "AgentTurnTarget": {
+          "properties": {
+            "generation": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "producer": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "turn_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "producer",
+            "session_id",
+            "turn_id"
+          ],
+          "type": "object"
+        },
+        "AgentTurnWaitParams": {
+          "properties": {
+            "after_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "timeout_ms": {
+              "default": 30000,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "after_revision"
+          ],
+          "type": "object"
+        },
         "AgentViewBuiltinField": {
           "enum": [
             "status",
@@ -2098,6 +2227,115 @@
           },
           "required": [
             "match_event"
+          ],
+          "type": "object"
+        },
+        "ExecutionListParams": {
+          "properties": {
+            "since_revision": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "ExecutionStartParams": {
+          "oneOf": [
+            {
+              "properties": {
+                "argv": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "mode": {
+                  "const": "argv",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode",
+                "argv"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "mode": {
+                  "const": "shell",
+                  "type": "string"
+                },
+                "shell": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode",
+                "shell",
+                "text"
+              ],
+              "type": "object"
+            }
+          ],
+          "properties": {
+            "cwd": {
+              "type": "string"
+            },
+            "execution_id": {
+              "type": "string"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "execution_id",
+            "cwd"
+          ],
+          "type": "object"
+        },
+        "ExecutionTarget": {
+          "properties": {
+            "execution_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "execution_id"
+          ],
+          "type": "object"
+        },
+        "ExecutionWaitParams": {
+          "properties": {
+            "after_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "timeout_ms": {
+              "default": 30000,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "after_revision"
           ],
           "type": "object"
         },
@@ -5653,6 +5891,150 @@
         {
           "properties": {
             "method": {
+              "const": "execution.start",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExecutionStartParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "execution.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExecutionTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "execution.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExecutionListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "execution.wait",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExecutionWaitParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "execution.cancel",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExecutionTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.turn.report",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentTurnReportParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.turn.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentTurnTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.turn.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentTurnListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.turn.wait",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentTurnWaitParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.wait_for_output",
               "type": "string"
             },
@@ -6348,6 +6730,92 @@
             "blocked",
             "done",
             "unknown"
+          ],
+          "type": "string"
+        },
+        "AgentTurnRecord": {
+          "properties": {
+            "event_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "execution_id": {
+              "type": "string"
+            },
+            "generation": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "producer": {
+              "type": "string"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reported_at_unix_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "result": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "result_digest": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/schemas/success_response/$defs/AgentTurnState"
+            },
+            "turn_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "execution_id",
+            "pane_id",
+            "producer",
+            "session_id",
+            "turn_id",
+            "event_revision",
+            "state",
+            "revision",
+            "reported_at_unix_ms"
+          ],
+          "type": "object"
+        },
+        "AgentTurnState": {
+          "enum": [
+            "starting",
+            "working",
+            "waiting_input",
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted",
+            "lost"
           ],
           "type": "string"
         },
@@ -7057,6 +7525,188 @@
             "pane_agent_detected",
             "pane_agent_status_changed",
             "layout_updated"
+          ],
+          "type": "string"
+        },
+        "ExecutionCommand": {
+          "oneOf": [
+            {
+              "properties": {
+                "argv": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "mode": {
+                  "const": "argv",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode",
+                "argv"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "mode": {
+                  "const": "shell",
+                  "type": "string"
+                },
+                "shell": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode",
+                "shell",
+                "text"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ExecutionRecord": {
+          "properties": {
+            "admitted_at_unix_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "cancel_requested": {
+              "default": false,
+              "type": "boolean"
+            },
+            "command": {
+              "$ref": "#/schemas/success_response/$defs/ExecutionCommand"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "evidence_gap": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "execution_id": {
+              "type": "string"
+            },
+            "exit_code": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "finished_at_unix_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "output_complete": {
+              "default": false,
+              "type": "boolean"
+            },
+            "output_truncated": {
+              "default": false,
+              "type": "boolean"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "signal": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "signal_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "started_at_unix_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "state": {
+              "$ref": "#/schemas/success_response/$defs/ExecutionState"
+            },
+            "stderr_bytes": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stderr_tail": {
+              "default": "",
+              "type": "string"
+            },
+            "stdout_bytes": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stdout_tail": {
+              "default": "",
+              "type": "string"
+            },
+            "tab_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "execution_id",
+            "cwd",
+            "command",
+            "state",
+            "revision",
+            "admitted_at_unix_ms"
+          ],
+          "type": "object"
+        },
+        "ExecutionState": {
+          "enum": [
+            "starting",
+            "running",
+            "exited",
+            "cancelled",
+            "lost"
           ],
           "type": "string"
         },
@@ -8677,6 +9327,84 @@
           "oneOf": [
             {
               "properties": {
+                "admitted": {
+                  "type": "boolean"
+                },
+                "turn": {
+                  "$ref": "#/schemas/success_response/$defs/AgentTurnRecord"
+                },
+                "type": {
+                  "const": "agent_turn",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "turn",
+                "admitted"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "turns": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/AgentTurnRecord"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "agent_turn_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "turns"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "admitted": {
+                  "type": "boolean"
+                },
+                "execution": {
+                  "$ref": "#/schemas/success_response/$defs/ExecutionRecord"
+                },
+                "type": {
+                  "const": "execution",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "execution",
+                "admitted"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "executions": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ExecutionRecord"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "execution_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "executions"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "capabilities": {
                   "anyOf": [
                     {
@@ -9793,11 +10521,19 @@
         },
         "ServerCapabilities": {
           "properties": {
+            "agent_turn_journal": {
+              "default": false,
+              "type": "boolean"
+            },
             "detached_server_daemon": {
               "default": false,
               "type": "boolean"
             },
             "live_handoff": {
+              "type": "boolean"
+            },
+            "tracked_executions": {
+              "default": false,
               "type": "boolean"
             }
           },
