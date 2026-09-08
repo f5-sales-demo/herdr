@@ -213,6 +213,19 @@ file: ../../../public/assets/logo.svg
 
 
 class ConventionalCommitTests(unittest.TestCase):
+    @mock.patch.object(conventional_commits.subprocess, "check_output")
+    def test_git_subjects_ignores_github_merge_wrappers(self, check_output):
+        check_output.return_value = "fix: preserve UTF-8 tails\n"
+
+        self.assertEqual(
+            conventional_commits.git_subjects("before..after"),
+            ["fix: preserve UTF-8 tails"],
+        )
+        check_output.assert_called_once_with(
+            ["git", "log", "--no-merges", "--pretty=format:%s", "before..after"],
+            text=True,
+        )
+
     def test_valid_subjects_allow_scopes_and_bang(self):
         self.assertTrue(conventional_commits.valid_subject("fix(update): handle preview"))
         self.assertTrue(conventional_commits.valid_subject("feat!: change config"))
