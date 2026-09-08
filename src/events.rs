@@ -54,6 +54,14 @@ pub struct WorktreeRemoveResult {
 /// An event from a background task to the main loop.
 #[derive(Debug)]
 pub enum AppEvent {
+    /// A pane child wait completed with structural status evidence.
+    PaneExitObserved {
+        pane_id: PaneId,
+        status: Option<portable_pty::ExitStatus>,
+        error: Option<String>,
+    },
+    /// The PTY reader reached EOF after draining available output.
+    PaneOutputClosed { pane_id: PaneId },
     /// A pane's child process exited.
     PaneDied { pane_id: PaneId },
     /// Fallback detector state changed in a pane.

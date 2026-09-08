@@ -11,6 +11,7 @@ use crate::api::schema::{
 mod agent;
 mod api;
 mod completion;
+mod execution;
 mod integration;
 mod notification;
 mod pane;
@@ -98,6 +99,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "pane" => pane::run_pane_command(&args[2..])?,
         "plugin" => plugin::run_plugin_command(&args[2..])?,
         "integration" => integration::run_integration_command(&args[2..])?,
+        "execution" => execution::run(&args[2..])?,
         "session" => run_session_command(&args[2..])?,
         _ => return Ok(CommandOutcome::NotCli),
     };

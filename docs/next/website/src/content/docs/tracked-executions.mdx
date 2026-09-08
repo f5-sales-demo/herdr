@@ -1,0 +1,52 @@
+---
+title: Tracked command executions
+description: Server-owned command lifecycle for automation clients.
+---
+
+Tracked executions provide process lifecycle evidence without interpreting terminal text or agent UI state.
+
+## Contract
+
+`execution.start` requires a caller-generated `execution_id`, an existing absolute `cwd`, and one of two explicit command forms:
+
+- `{"mode":"argv","argv":[...]}` executes the argument vector directly.
+- `{"mode":"shell","shell":"bash|zsh","text":"..."}` executes the exact text with the selected shell's `-lc` semantics.
+
+Each admitted execution creates a new tab in the selected or active workspace. The tab is not focused. Its root pane directly spawns the requested command under Herdr's native PTY, so output is visible and normal `pane.send_text`, `pane.send_keys`, and terminal attachment remain available for interactive tools such as XCSH.
+
+Repeating a start with the same ID and identical specification returns the existing record with `admitted: false` and never creates another tab. Reusing the ID for a different specification fails with `execution_id_conflict`. The server records admission, successful PTY spawn, tab and pane IDs, PID, observed exit code or signal name, cancellation requests, byte counts, and a bounded redacted 4 KiB tail of the combined PTY stream. PTYs do not preserve a reliable stdout/stderr distinction, so `stdout_tail` represents the combined stream and `stderr_tail` remains empty. Process exit and PTY output drain are independent facts: `output_complete: true` means the native reader reached EOF after draining available bytes.
+
+Full records are capped at 256 per named Herdr session. Expired IDs remain protected by 4,096 recent tombstones plus a persistent 64-Kibit probabilistic filter. The filter has no false negatives for IDs inserted by that binary, so an expired ID is not silently re-executed; false positives conservatively return `execution_expired` and require a fresh ID.
+
+Use `execution.get`, `execution.list`, and `execution.wait` to query, long-poll for revisions, or replay changes after reconnect. Revisions are monotonically increasing within the retained session journal. A consumer should keep the greatest observed revision, tolerate duplicate records, and treat a later record for the same ID as authoritative.
+
+`execution.cancel` uses the killer cloned from Herdr's owned PTY child handle. A successful cancel response proves only that termination was requested; terminal state is authoritative only after the same child watcher reports `cancelled` or `exited` with wait-status evidence.
+
+## Recovery and semantic limits
+
+Records are persisted independently of panes. If the Herdr server restarts while a command is starting or running, the restored record becomes `lost` with an `evidence_gap`; Herdr does not claim the child survived, was killed, or exited successfully. This is at-least-once admission with idempotent duplicate suppression, not distributed exactly-once execution.
+
+Tracked executions are visible interactive PTY panes but do not steal focus. A shell prompt, terminal contents, or TUI idle appearance is never exit evidence. A Codex or XCSH process exiting successfully is also not proof that its requested task succeeded: consume the agent's native semantic lifecycle separately.
+
+## Native semantic turns
+
+Protocol 20 advertises `agent_turn_journal` when the server supports durable native semantic results. A tracked agent receives `HERDR_EXECUTION_ID`; it reports against both that execution ID and its server-assigned `HERDR_PANE_ID`. Herdr rejects a report when the pane is not owned by the execution, preventing a producer from attaching a result to unrelated work.
+
+Use `agent.turn.report`, `agent.turn.get`, `agent.turn.list`, and `agent.turn.wait` over the JSON API. A turn is keyed by producer, native session ID, native turn ID, and generation. Producer `event_revision` starts at 1 and increases monotonically. Herdr assigns a separate journal `revision` for consumers. Exact duplicate reports are idempotent; changed content at the same revision, stale revisions, and updates after a terminal event are rejected.
+
+States are `starting`, `working`, `waiting_input`, `completed`, `failed`, `cancelled`, `interrupted`, and `lost`. The first event must be `starting`. Only `completed` carries a result, capped at 8,000 UTF-8 bytes and paired with its SHA-256 digest. Reasons are also capped at 8,000 bytes. On server restart, each latest nonterminal turn becomes `lost`; terminal records replay from the persisted journal. Retention is bounded, so consumers must persist accepted events and revisions rather than treating Herdr as indefinite result storage.
+
+Semantic completion is independent of execution exit and output drainage. A manager accepts a task only from the terminal semantic event that matches its admitted execution and expected native identity; it must never derive success from `execution.state`, pane state, terminal output, or metadata tokens.
+
+## CLI
+
+```sh
+herdr execution start build-42 --cwd /srv/project -- just check
+herdr execution start script-42 --cwd /srv/project --shell zsh -- 'printf "%s\\n" "$PWD"'
+herdr execution get build-42
+herdr execution list --since 120
+herdr execution wait 120
+herdr execution cancel build-42
+```
+
+The API socket remains owner-only. Output tails are best-effort redacted for common credential labels, but callers must not print secrets or full sensitive transcripts. The broker migration is a clean replacement: generate and persist the execution ID before admission, call `execution.start` with the control workspace and safe tab label, retain the returned tab/pane IDs for visibility and interactive input, then reconcile with `get`/`list --since` or `wait`. Remove the Python wrapper callback, spool file, prompt scraping, and pane-id completion inference only after the native binary is deployed and the broker has passed reconnect/cancellation UAT.

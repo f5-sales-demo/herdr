@@ -979,6 +979,7 @@ pub struct PaneRuntime {
     child_pid: Arc<AtomicU32>,
     reported_cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     child_wait_completed: Option<Arc<AtomicBool>>,
+    child_killer: Option<Arc<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>>>,
     kitty_keyboard_flags: Arc<AtomicU16>,
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
@@ -1889,6 +1890,7 @@ impl PaneRuntime {
             child_pid,
             reported_cwd,
             child_wait_completed: None,
+            child_killer: None,
             kitty_keyboard_flags,
             detection_content_seq,
             full_lifecycle_authority_active,
@@ -1945,25 +1947,38 @@ impl PaneRuntime {
         let child_wait_completed = Arc::new(AtomicBool::new(false));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
+        let mut child = spawned.child;
+        let child_killer = Arc::new(Mutex::new(child.clone_killer()));
         {
             let child_pid = child_pid.clone();
             let child_wait_completed = child_wait_completed.clone();
             let events = events.clone();
             let rt = tokio::runtime::Handle::current();
-            let mut child = spawned.child;
             if let Some(pid) = child.process_id() {
                 child_pid.store(pid, Ordering::Release);
                 crate::logging::pane_spawned(pane_id.raw(), pid);
             }
             tokio::task::spawn_blocking(move || {
-                match child.wait() {
+                let (status, wait_error) = match child.wait() {
                     Ok(status) => {
                         let status_text = format!("{status:?}");
                         crate::logging::pane_exited(pane_id.raw(), &status_text);
+                        (Some(status), None)
                     }
-                    Err(e) => crate::logging::pane_exit_failed(pane_id.raw(), &e.to_string()),
-                }
+                    Err(e) => {
+                        crate::logging::pane_exit_failed(pane_id.raw(), &e.to_string());
+                        (None, Some(e.to_string()))
+                    }
+                };
                 child_wait_completed.store(true, Ordering::Release);
+                if let Err(e) = rt.block_on(events.send(AppEvent::PaneExitObserved {
+                    pane_id,
+                    status,
+                    error: wait_error,
+                })) {
+                    error!(pane = pane_id.raw(), err = %e, "failed to send pane exit evidence");
+                    return;
+                }
                 // Use blocking send — PaneDied is critical, must not be dropped
                 if let Err(e) = rt.block_on(events.send(AppEvent::PaneDied { pane_id })) {
                     error!(pane = pane_id.raw(), err = %e, "failed to send PaneDied event");
@@ -1981,7 +1996,11 @@ impl PaneRuntime {
             let events = events.clone();
             let reported_cwd = reported_cwd.clone();
             let rt = tokio::runtime::Handle::current();
+            let output_close_events = events.clone();
+            let output_close_rt = rt.clone();
             let on_read = Box::new(move |bytes: &[u8]| {
+                crate::execution::ExecutionManager::global()
+                    .observe_visible_output(pane_id.raw(), bytes);
                 let shell_pid = child_pid.load(Ordering::Acquire);
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
@@ -2017,6 +2036,10 @@ impl PaneRuntime {
                     terminal_responses: result.terminal_responses,
                 }
             });
+            let on_reader_exit = Box::new(move || {
+                let _ = output_close_rt
+                    .block_on(output_close_events.send(AppEvent::PaneOutputClosed { pane_id }));
+            });
             PaneRuntimeIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
                 pane_id: pane_id.raw(),
                 #[cfg(unix)]
@@ -2025,7 +2048,7 @@ impl PaneRuntime {
                 master: spawned.master,
                 initially_quiesced: false,
                 on_read,
-                on_reader_exit: None,
+                on_reader_exit: Some(on_reader_exit),
             })?)
         };
 
@@ -2404,6 +2427,7 @@ impl PaneRuntime {
             child_pid,
             reported_cwd,
             child_wait_completed: Some(child_wait_completed),
+            child_killer: Some(child_killer),
             kitty_keyboard_flags,
             detection_content_seq,
             full_lifecycle_authority_active,
@@ -2422,6 +2446,18 @@ impl PaneRuntime {
             });
         }
         self.detect_reset_notify.notify_one();
+    }
+
+    pub fn terminate_child(&self) -> std::io::Result<()> {
+        let killer = self
+            .child_killer
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("pane child is not owned by this runtime"))?;
+        killer
+            .lock()
+            .map_err(|_| std::io::Error::other("pane child killer lock poisoned"))?
+            .kill()
+            .map_err(|error| std::io::Error::other(error.to_string()))
     }
 
     pub fn reset_agent_detection(&self) {
@@ -2888,6 +2924,7 @@ impl PaneRuntime {
                 child_pid: Arc::new(AtomicU32::new(0)),
                 reported_cwd: Arc::new(Mutex::new(None)),
                 child_wait_completed: None,
+                child_killer: None,
                 kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
                 detection_content_seq: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
@@ -3396,6 +3433,7 @@ mod tests {
             child_pid: Arc::new(AtomicU32::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
+            child_killer: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
@@ -3427,6 +3465,7 @@ mod tests {
             child_pid: Arc::new(AtomicU32::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
+            child_killer: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),

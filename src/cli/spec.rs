@@ -42,6 +42,7 @@ pub(super) fn command() -> Command {
         .subcommand(terminal_command())
         .subcommand(session_command())
         .subcommand(integration_command())
+        .subcommand(Command::new("execution").about("Run and inspect durable tracked commands"))
         .subcommand(plugin_command());
     configure_help(command, true)
 }

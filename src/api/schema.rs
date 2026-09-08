@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+pub mod agent_turns;
 pub mod agents;
 pub mod common;
 pub mod events;
+pub mod executions;
 pub mod integrations;
 pub mod panes;
 pub mod plugins;
@@ -13,9 +15,11 @@ pub mod tabs;
 pub mod workspaces;
 pub mod worktrees;
 
+pub use agent_turns::*;
 pub use agents::*;
 pub use common::*;
 pub use events::*;
+pub use executions::*;
 pub use integrations::*;
 pub use panes::*;
 pub use plugins::*;
@@ -209,6 +213,24 @@ pub enum Method {
     EventsSubscribe(EventsSubscribeParams),
     #[serde(rename = "events.wait")]
     EventsWait(EventsWaitParams),
+    #[serde(rename = "execution.start")]
+    ExecutionStart(ExecutionStartParams),
+    #[serde(rename = "execution.get")]
+    ExecutionGet(ExecutionTarget),
+    #[serde(rename = "execution.list")]
+    ExecutionList(ExecutionListParams),
+    #[serde(rename = "execution.wait")]
+    ExecutionWait(ExecutionWaitParams),
+    #[serde(rename = "execution.cancel")]
+    ExecutionCancel(ExecutionTarget),
+    #[serde(rename = "agent.turn.report")]
+    AgentTurnReport(AgentTurnReportParams),
+    #[serde(rename = "agent.turn.get")]
+    AgentTurnGet(AgentTurnTarget),
+    #[serde(rename = "agent.turn.list")]
+    AgentTurnList(AgentTurnListParams),
+    #[serde(rename = "agent.turn.wait")]
+    AgentTurnWait(AgentTurnWaitParams),
     #[serde(rename = "pane.wait_for_output")]
     PaneWaitForOutput(PaneWaitForOutputParams),
     #[serde(rename = "integration.install")]

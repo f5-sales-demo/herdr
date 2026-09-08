@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 mod agent_view;
 mod agents;
 mod env;
+mod executions;
 mod integrations;
 mod layouts;
 mod pane_graphics;
@@ -98,6 +99,23 @@ impl App {
     }
 
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
+        if let AppEvent::PaneExitObserved {
+            pane_id,
+            status,
+            error,
+        } = &ev
+        {
+            crate::execution::ExecutionManager::global().finish_visible(
+                pane_id.raw(),
+                status.as_ref(),
+                error.as_deref(),
+            );
+            return;
+        }
+        if let AppEvent::PaneOutputClosed { pane_id } = &ev {
+            crate::execution::ExecutionManager::global().finish_visible_output(pane_id.raw());
+            return;
+        }
         if let AppEvent::ClipboardWrite { content } = ev {
             #[cfg(not(test))]
             crate::selection::write_osc52_bytes(&content);
@@ -1070,6 +1088,22 @@ impl App {
             Method::TabList(params) => return self.handle_tab_list(request.id, params),
             Method::TabGet(target) => return self.handle_tab_get(request.id, target),
             Method::TabCreate(params) => return self.handle_tab_create(request.id, params),
+            Method::ExecutionStart(params) => {
+                return self.handle_execution_start(request.id, params)
+            }
+            Method::ExecutionCancel(target) => {
+                return self.handle_execution_cancel(request.id, target.execution_id)
+            }
+            Method::AgentTurnReport(_)
+            | Method::AgentTurnGet(_)
+            | Method::AgentTurnList(_)
+            | Method::AgentTurnWait(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "invalid_request",
+                    "agent.turn methods are handled by the server runtime",
+                )
+            }
             Method::TabFocus(target) => return self.handle_tab_focus(request.id, target),
             Method::TabRename(params) => return self.handle_tab_rename(request.id, params),
             Method::TabMove(params) => return self.handle_tab_move(request.id, params),

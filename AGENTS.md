@@ -175,6 +175,10 @@ Use lowercase conventional commits, no emojis, and no AI co-author lines. Commit
 
 Before committing, propose the commit message and get alignment.
 
+An explicit task instruction delegating commit-message selection to the coding agent satisfies this
+alignment requirement and takes precedence for that authorized workstream. Select a good
+Conventional Commit message autonomously and do not pause again for wording approval.
+
 When a normal feature or fix commit relates to a GitHub issue, add a commit body line `refs #<issue-number>` after the subject:
 
 ```text

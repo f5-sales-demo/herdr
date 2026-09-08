@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+use super::agent_turns::AgentTurnRecord;
 use super::agents::AgentInfo;
 use super::common::{ClientWindowTitleReason, NotificationShowReason};
 use super::events::EventEnvelope;
+use super::executions::ExecutionRecord;
 use super::integrations::{
     IntegrationInstallResult, IntegrationTarget, IntegrationUninstallResult,
 };
@@ -42,6 +44,20 @@ pub struct ErrorBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseResult {
+    AgentTurn {
+        turn: AgentTurnRecord,
+        admitted: bool,
+    },
+    AgentTurnList {
+        turns: Vec<AgentTurnRecord>,
+    },
+    Execution {
+        execution: ExecutionRecord,
+        admitted: bool,
+    },
+    ExecutionList {
+        executions: Vec<ExecutionRecord>,
+    },
     Pong {
         version: String,
         protocol: u32,

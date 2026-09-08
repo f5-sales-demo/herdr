@@ -67,6 +67,8 @@ pub fn start_server(
         Some(ServerCapabilities {
             live_handoff: crate::platform::capabilities().live_handoff,
             detached_server_daemon: crate::platform::current_process_is_detached_server_daemon(),
+            tracked_executions: true,
+            agent_turn_journal: true,
         }),
     )
 }
@@ -319,6 +321,8 @@ fn handle_request(
     capabilities: Option<ServerCapabilities>,
     response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
 ) -> String {
+    let executions = crate::execution::ExecutionManager::global();
+    let agent_turns = crate::agent_turn::AgentTurnManager::global();
     match request.method {
         Method::Ping(_) => serde_json::to_string(&SuccessResponse {
             id: request.id,
@@ -332,6 +336,60 @@ fn handle_request(
             r#"{"id":"","error":{"code":"internal_error","message":"failed to encode response"}}"#
                 .to_string()
         }),
+        Method::ExecutionGet(target) => match executions.get(&target.execution_id) {
+            Some(execution) => encode_execution_response(
+                request.id,
+                crate::api::schema::ResponseResult::Execution {
+                    execution,
+                    admitted: false,
+                },
+            ),
+            None => encode_execution_error(request.id, "execution_not_found"),
+        },
+        Method::ExecutionList(params) => encode_execution_response(
+            request.id,
+            crate::api::schema::ResponseResult::ExecutionList {
+                executions: executions.list_since(params.since_revision),
+            },
+        ),
+        Method::ExecutionWait(params) => encode_execution_response(
+            request.id,
+            crate::api::schema::ResponseResult::ExecutionList {
+                executions: executions.wait_since(params.after_revision, params.timeout_ms),
+            },
+        ),
+        Method::AgentTurnReport(params) => match agent_turns.report(params) {
+            Ok((turn, admitted)) => encode_execution_response(
+                request.id,
+                crate::api::schema::ResponseResult::AgentTurn { turn, admitted },
+            ),
+            Err(error) => {
+                let code = error.split(':').next().unwrap_or("agent_turn_error");
+                encode_execution_error(request.id, code)
+            }
+        },
+        Method::AgentTurnGet(target) => match agent_turns.get(&target) {
+            Some(turn) => encode_execution_response(
+                request.id,
+                crate::api::schema::ResponseResult::AgentTurn {
+                    turn,
+                    admitted: false,
+                },
+            ),
+            None => encode_execution_error(request.id, "agent_turn_not_found"),
+        },
+        Method::AgentTurnList(params) => encode_execution_response(
+            request.id,
+            crate::api::schema::ResponseResult::AgentTurnList {
+                turns: agent_turns.list_since(params.since_revision),
+            },
+        ),
+        Method::AgentTurnWait(params) => encode_execution_response(
+            request.id,
+            crate::api::schema::ResponseResult::AgentTurnList {
+                turns: agent_turns.wait_since(params.after_revision, params.timeout_ms),
+            },
+        ),
         _ => dispatch_to_app_with_timeout_and_write_completion(
             request,
             api_tx,
@@ -339,6 +397,25 @@ fn handle_request(
             response_write_complete,
         ),
     }
+}
+
+fn encode_execution_response(id: String, result: crate::api::schema::ResponseResult) -> String {
+    serde_json::to_string(&SuccessResponse { id, result }).unwrap_or_else(|_| {
+        r#"{"id":"","error":{"code":"internal_error","message":"failed to encode response"}}"#
+            .to_string()
+    })
+}
+
+fn encode_execution_error(id: String, message: &str) -> String {
+    let code = message.split(':').next().unwrap_or("execution_error");
+    serde_json::to_string(&ErrorResponse {
+        id,
+        error: ErrorBody {
+            code: code.into(),
+            message: message.into(),
+        },
+    })
+    .unwrap_or_else(|_| "{}".into())
 }
 
 fn api_method_name(method: &Method) -> &'static str {
@@ -424,6 +501,15 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PopupClose(_) => "popup.close",
         Method::EventsSubscribe(_) => "events.subscribe",
         Method::EventsWait(_) => "events.wait",
+        Method::ExecutionStart(_) => "execution.start",
+        Method::ExecutionGet(_) => "execution.get",
+        Method::ExecutionList(_) => "execution.list",
+        Method::ExecutionWait(_) => "execution.wait",
+        Method::ExecutionCancel(_) => "execution.cancel",
+        Method::AgentTurnReport(_) => "agent.turn.report",
+        Method::AgentTurnGet(_) => "agent.turn.get",
+        Method::AgentTurnList(_) => "agent.turn.list",
+        Method::AgentTurnWait(_) => "agent.turn.wait",
         Method::PaneWaitForOutput(_) => "pane.wait_for_output",
         Method::IntegrationInstall(_) => "integration.install",
         Method::IntegrationUninstall(_) => "integration.uninstall",
@@ -1008,6 +1094,8 @@ mod tests {
             Some(ServerCapabilities {
                 live_handoff: true,
                 detached_server_daemon: true,
+                tracked_executions: true,
+                agent_turn_journal: true,
             }),
             None,
         );

@@ -655,6 +655,8 @@ fn success_response_round_trips() {
             capabilities: Some(ServerCapabilities {
                 live_handoff: true,
                 detached_server_daemon: true,
+                tracked_executions: true,
+                agent_turn_journal: true,
             }),
         },
     };

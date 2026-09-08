@@ -2712,6 +2712,8 @@ impl AppState {
 
     pub fn handle_app_event(&mut self, event: AppEvent) -> Vec<PaneStateUpdate> {
         match event {
+            AppEvent::PaneExitObserved { .. } => Vec::new(),
+            AppEvent::PaneOutputClosed { .. } => Vec::new(),
             AppEvent::PaneDied { pane_id } => {
                 self.handle_pane_died(pane_id);
                 Vec::new()
