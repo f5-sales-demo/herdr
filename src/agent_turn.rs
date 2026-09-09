@@ -576,12 +576,33 @@ mod tests {
                 .unwrap()
                 .1
         );
+        assert_eq!(
+            executions.get(&claimed.execution_id).unwrap().state,
+            crate::api::schema::ExecutionState::Lost
+        );
+        assert!(executions
+            .get(&claimed.execution_id)
+            .unwrap()
+            .native_registration
+            .unwrap()
+            .journaled_at_unix_ms
+            .is_some());
+        let target = crate::api::schema::AgentTurnActionTarget {
+            execution_id: "semantic".into(),
+            pane_id: "w1:p1".into(),
+            producer: "xcsh".into(),
+            session_id: "0123abcd4567ef89".into(),
+            generation: 1,
+            native_capability: cap.clone(),
+            after_revision: 0,
+        };
+        assert!(executions.native_actions(&target).unwrap().is_empty());
         let mut altered = starting;
         altered.reason = Some("altered".into());
         assert!(turns
             .report_with_execution_manager(altered, &executions)
             .unwrap_err()
-            .contains("conflict"));
+            .contains("stale_revision"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
