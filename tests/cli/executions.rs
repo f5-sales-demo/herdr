@@ -49,13 +49,36 @@ fn native_resume_socket_claim_is_idempotent_and_rejects_replay_conflicts() {
     cleanup_spawned_herdr(herdr, base);
 }
 
+#[cfg(unix)]
 #[test]
-fn native_xcsh_child_accepts_semantic_report_only_with_durable_binding() {
+fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
     let socket_path = runtime_dir.join("herdr.sock");
-    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    let bin_dir = base.join("bin");
+    let args_path = base.join("xcsh-args");
+    let env_path = base.join("xcsh-env");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fixture = bin_dir.join("xcsh");
+    fs::write(
+        &fixture,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n%s\\n%s\\n%s\\n' \"$HERDR_EXECUTION_ID\" \"$HERDR_EXECUTION_GENERATION\" \"$HERDR_SOCKET_PATH\" \"$HERDR_PANE_ID\" > '{}'\nsleep 1\npython3 - \"$HERDR_SOCKET_PATH\" \"$HERDR_PANE_ID\" \"$HERDR_EXECUTION_ID\" \"$HERDR_EXECUTION_GENERATION\" <<'PY'\nimport json, socket, sys\nsock, pane, execution, generation = sys.argv[1:]\nframe = {{'method':'agent.turn.report','params':{{'execution_id':execution,'pane_id':pane,'producer':'xcsh','session_id':'fixture-session','turn_id':'fixture-turn','generation':int(generation),'event_revision':1,'state':'starting'}}}}\nfor request_id in ('fixture-first', 'fixture-replay'):\n    frame['id'] = request_id\n    client = socket.socket(socket.AF_UNIX)\n    client.connect(sock)\n    client.sendall((json.dumps(frame) + '\\n').encode())\n    client.recv(65536)\n    client.close()\nPY\nsleep 30\n",
+            args_path.display(),
+            env_path.display(),
+        ),
+    ).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&fixture, fs::Permissions::from_mode(0o755)).unwrap();
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let path_override = format!("{}:{inherited_path}", bin_dir.display());
+    let herdr = spawn_herdr_with_path(
+        &config_home,
+        &runtime_dir,
+        &socket_path,
+        Some(Path::new(&path_override)),
+    );
     wait_for_socket(&socket_path, Duration::from_secs(5));
     assert!(run_cli(
         &socket_path,
@@ -81,45 +104,47 @@ fn native_xcsh_child_accepts_semantic_report_only_with_durable_binding() {
     );
     let execution = &resumed["result"]["execution"];
     assert_ne!(execution["execution_id"], "semantic-child");
-    let pane = execution["pane_id"].as_str().expect("native child pane");
-    let report = |id: &str, producer: &str, session_id: &str, generation: u64| {
-        serde_json::json!({
-            "id": id, "method": "agent.turn.report", "params": {
-                "execution_id": "semantic-child", "pane_id": pane, "producer": producer,
-                "session_id": session_id, "turn_id": "real-child-turn", "generation": generation,
-                "event_revision": 1, "state": "starting"
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        if args_path.exists() && env_path.exists() {
+            let turns = send_request(
+                &socket_path,
+                r#"{"id":"fixture-turns","method":"agent.turn.list","params":{"since_revision":0}}"#,
+            );
+            if turns["result"]["turns"]
+                .as_array()
+                .is_some_and(|turns| turns.len() == 1)
+            {
+                break;
             }
-        })
-    };
-    let accepted = send_request(
-        &socket_path,
-        &report("native-report", "xcsh", "fixture-session", 11).to_string(),
-    );
-    assert_eq!(accepted["result"]["admitted"], true);
-    let bad_session = send_request(
-        &socket_path,
-        &report("native-bad-session", "xcsh", "foreign", 11).to_string(),
-    );
+        }
+        assert!(Instant::now() < deadline, "fixture child did not report");
+        thread::sleep(Duration::from_millis(25));
+    }
     assert_eq!(
-        bad_session["error"]["code"],
-        "agent_turn_native_binding_mismatch"
+        fs::read_to_string(&args_path).unwrap(),
+        "--resume\nfixture-session\nfixture\n"
     );
-    let bad_producer = send_request(
+    let env = fs::read_to_string(&env_path).unwrap();
+    let lines: Vec<_> = env.lines().collect();
+    assert_eq!(&lines[..2], ["semantic-child", "11"]);
+    assert!(!lines[2].is_empty() && !lines[3].is_empty());
+    let backend_id = execution["execution_id"].as_str().unwrap();
+    let second = send_request(&socket_path, &serde_json::json!({
+        "id":"fixture-next", "method":"execution.resume", "params": {
+            "execution_id":"semantic-child", "generation":12, "session_id":"fixture-session", "text":"fixture", "cwd":base
+        }
+    }).to_string());
+    assert_eq!(second["result"]["admitted"], true);
+    let old = send_request(
         &socket_path,
-        &report("native-bad-producer", "foreign", "fixture-session", 11).to_string(),
+        &format!(
+            r#"{{"id":"fixture-old","method":"execution.get","params":{{"execution_id":"{backend_id}"}}}}"#
+        ),
     );
-    assert_eq!(
-        bad_producer["error"]["code"],
-        "agent_turn_native_binding_mismatch"
-    );
-    let bad_generation = send_request(
-        &socket_path,
-        &report("native-bad-generation", "xcsh", "fixture-session", 12).to_string(),
-    );
-    assert_eq!(
-        bad_generation["error"]["code"],
-        "agent_turn_execution_not_found"
-    );
+    assert!(old["result"]["execution"]["cancel_requested"]
+        .as_bool()
+        .unwrap());
     cleanup_spawned_herdr(herdr, base);
 }
 

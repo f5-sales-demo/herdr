@@ -103,6 +103,13 @@ impl ExecutionManager {
             return Err("execution_id_conflict: execution id is already admitted with a different specification".into());
         }
         if state
+            .records
+            .iter()
+            .any(|record| record.semantic_execution_id.as_deref() == Some(&params.execution_id))
+        {
+            return Err("execution_namespace_conflict: execution id is reserved by a native semantic execution".into());
+        }
+        if state
             .tombstones
             .iter()
             .any(|old| old.execution_id == params.execution_id)
@@ -178,6 +185,11 @@ impl ExecutionManager {
             .state
             .lock()
             .map_err(|_| "execution state lock poisoned")?;
+        if state.records.iter().any(|record| {
+            record.execution_id == params.execution_id && record.semantic_execution_id.is_none()
+        }) {
+            return Err("execution_namespace_conflict: semantic execution id is already owned by an ordinary execution".into());
+        }
         if let Some(existing) = state.records.iter().find(|record| {
             record.semantic_execution_id.as_deref() == Some(&params.execution_id)
                 && record.generation == Some(params.generation)
@@ -771,6 +783,26 @@ mod tests {
             .unwrap_err()
             .contains("safe integer"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn ordinary_and_native_execution_namespaces_cannot_collide_in_either_order() {
+        let path = temp("native-ordinary-collision");
+        let manager = ExecutionManager::load_at(path.clone());
+        manager.admit_visible(&params("semantic-task")).unwrap();
+        assert!(manager
+            .admit_xcsh_resume(&resume_params(1))
+            .unwrap_err()
+            .contains("namespace_conflict"));
+        let other_path = temp("ordinary-native-collision");
+        let other = ExecutionManager::load_at(other_path.clone());
+        other.admit_xcsh_resume(&resume_params(1)).unwrap();
+        assert!(other
+            .admit_visible(&params("semantic-task"))
+            .unwrap_err()
+            .contains("namespace_conflict"));
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(other_path);
     }
 
     #[test]
