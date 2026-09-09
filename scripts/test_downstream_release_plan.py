@@ -17,6 +17,15 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertEqual(release_level(["fix: repair lifecycle", "feat(queue): admit prompts"]), "minor")
         self.assertEqual(bump("0.7.5", "minor"), "0.8.0")
 
+    def test_merged_feature_and_fix_still_plan_a_minor_release(self) -> None:
+        messages = [
+            "Merge pull request #49 from owner/feature",
+            "fix(api): recover native child receipt",
+            "feat(api): add native launch v3 receipts",
+        ]
+        self.assertEqual(release_level(messages), "minor")
+        self.assertEqual(bump("0.14.2", "minor"), "0.15.0")
+
     def test_breaking_change_is_a_major_release(self) -> None:
         self.assertEqual(release_level(["feat(api)!: replace protocol"]), "major")
         self.assertEqual(release_level(["feat: replace protocol\n\nBREAKING CHANGE: old clients stop working"]), "major")

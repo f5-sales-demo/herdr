@@ -63,6 +63,16 @@ jobs:
         if: github.event_name == 'push'
         run: python3 scripts/conventional_commits.py --range "${{ github.event.before }}..${{ github.event.after }}"
 
+      - name: Validate merge subjects
+        if: github.event_name == 'push'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/validate_merge_commits.py --range "${{ github.event.before }}..${{ github.event.after }}" --repository "$GITHUB_REPOSITORY" --base-ref "$GITHUB_REF_NAME"
+
+      - name: Validate PR commit subjects
+        if: github.event_name == 'pull_request'
+        run: python3 scripts/conventional_commits.py --range "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+
       - name: Validate PR title
         if: github.event_name == 'pull_request'
         env:
