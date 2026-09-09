@@ -61,11 +61,17 @@ jobs:
 
       - name: Validate commit subjects
         if: github.event_name == 'push'
-        run: python3 scripts/conventional_commits.py --first-parent --range "${{ github.event.before }}..${{ github.event.after }}"
+        run: python3 scripts/conventional_commits.py --range "${{ github.event.before }}..${{ github.event.after }}"
 
       - name: Validate PR commit subjects
         if: github.event_name == 'pull_request'
         run: python3 scripts/conventional_commits.py --range "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+
+      - name: Validate PR title
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: python3 scripts/conventional_commits.py "$PR_TITLE"
 
   check:
     name: check (${{ matrix.os }})

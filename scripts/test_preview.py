@@ -215,7 +215,7 @@ file: ../../../public/assets/logo.svg
 
 class ConventionalCommitTests(unittest.TestCase):
     def test_pr_and_push_ranges_preserve_conventional_enforcement(self):
-        """PR commits are checked before merge; postmerge checks stay first-parent-only."""
+        """PR and push ranges both reject invalid constituent commits."""
         validator = Path(__file__).with_name("conventional_commits.py")
 
         with tempfile.TemporaryDirectory() as directory:
@@ -251,13 +251,25 @@ class ConventionalCommitTests(unittest.TestCase):
             self.assertIn("style: invalid PR constituent", pr_result.stdout)
 
             git("switch", "main")
-            git("merge", "--no-ff", "feature", "-m", "feat: merge validated feature")
+            git("merge", "--no-ff", "feature", "-m", "Merge direct invalid feature")
             merge = git("rev-parse", "HEAD")
             self.assertNotEqual(validate("--range", f"{base}..{merge}").returncode, 0)
-            self.assertEqual(validate("--first-parent", "--range", f"{base}..{merge}").returncode, 0)
 
+            git("switch", "--create", "valid-feature")
+            valid_head = commit("fix: preserve valid merge history", "valid feature\n")
+            git("switch", "main")
+            git("merge", "--no-ff", "valid-feature", "-m", "Merge valid feature")
+            valid_merge = git("rev-parse", "HEAD")
+            self.assertEqual(validate("--range", f"{merge}..{valid_merge}").returncode, 0)
+            self.assertEqual(validate("--range", f"{merge}..{valid_head}").returncode, 0)
+
+            git("switch", "--create", "valid-direct", valid_merge)
+            direct_valid = commit("fix: validate direct push", "valid direct\n")
+            self.assertEqual(validate("--range", f"{valid_merge}..{direct_valid}").returncode, 0)
+
+            git("switch", "main")
             direct_head = commit("style: invalid direct push", "direct\n")
-            direct_result = validate("--first-parent", "--range", f"{merge}..{direct_head}")
+            direct_result = validate("--range", f"{valid_merge}..{direct_head}")
             self.assertNotEqual(direct_result.returncode, 0)
             self.assertIn("style: invalid direct push", direct_result.stdout)
 
@@ -274,30 +286,12 @@ class ConventionalCommitTests(unittest.TestCase):
             text=True,
         )
 
-    @mock.patch.object(conventional_commits.subprocess, "check_output")
-    def test_git_subjects_can_limit_push_validation_to_first_parent(self, check_output):
-        check_output.return_value = "fix: preserve UTF-8 tails\n"
-
-        self.assertEqual(
-            conventional_commits.git_subjects("before..after", first_parent=True),
-            ["fix: preserve UTF-8 tails"],
-        )
-        check_output.assert_called_once_with(
-            [
-                "git",
-                "log",
-                "--first-parent",
-                "--no-merges",
-                "--pretty=format:%s",
-                "before..after",
-            ],
-            text=True,
-        )
-
     def test_valid_subjects_allow_scopes_and_bang(self):
         self.assertTrue(conventional_commits.valid_subject("fix(update): handle preview"))
         self.assertTrue(conventional_commits.valid_subject("feat!: change config"))
+        self.assertTrue(conventional_commits.valid_subject("feat: merge validated feature"))
         self.assertFalse(conventional_commits.valid_subject("update preview channel"))
+        self.assertFalse(conventional_commits.valid_subject("Merge direct invalid feature"))
         self.assertFalse(conventional_commits.valid_subject("style: format native settlement regression"))
 
     def test_commit_message_subject_skips_comments(self):
