@@ -63,10 +63,18 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
     async def test_hung_probe_failures_are_parallel_and_bounded(self):
         # The real Unix-socket hang is exercised by the native harness.  This
         # unit test verifies only supervisor fan-out. Stub independent
-        # subprocess probes so runner load cannot invalidate its timing bound.
+        # subprocess probes and assert overlap directly so runner scheduling
+        # load cannot invalidate a wall-clock timing assertion.
+        active = maximum_active = 0
         async def hung(path, payload=None):
-            await asyncio.sleep(.05)
-            return False, 'TimeoutError: injected hung probe'
+            nonlocal active, maximum_active
+            active += 1
+            maximum_active = max(maximum_active, active)
+            try:
+                await asyncio.sleep(.05)
+                return False, 'TimeoutError: injected hung probe'
+            finally:
+                active -= 1
         async def app_probe(_cfg, _config):
             return False, 'injected app-server probe', {}
         async def native_probe(_cfg, _config):
@@ -77,8 +85,8 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
             with patch('control_supervisor.unix_probe', hung), \
                  patch('control_supervisor.appserver_probe', app_probe), \
                  patch('control_supervisor.native_manager_probe', native_probe):
-                started=asyncio.get_running_loop().time(); result=await supervisor.check(); elapsed=asyncio.get_running_loop().time()-started
-            self.assertLess(elapsed,.15)
+                result=await supervisor.check()
+            self.assertEqual(maximum_active, 4)
             self.assertTrue(any(item['component']=='broker' and item['status']=='degraded' for item in result['components']))
 
     async def test_threshold_admission_is_single_durable_action(self):

@@ -50,6 +50,22 @@ class ControllerTests(unittest.TestCase):
     c.act('restart_loss','p1','wrong-execution','token',wrong)
    c.close()
 
+ def test_disposable_controller_refuses_noncausal_restart_or_reconnect_before_claim(self):
+  """Synthetic component fixture; it is not installed-UAT evidence."""
+  with tempfile.TemporaryDirectory() as raw:
+   root=Path(raw); binary=root/'herdr'; binary.write_bytes(b'fixture')
+   own={'session_id':'xcsh-uat-a','service_id':'xcsh-uat-a','workspace_id':'w1','pane_ids':['p1']}
+   c=DisposableHerdrController(root/'actions.sqlite',own,'token',binary)
+   IsolatedController.register_execution(c,{'id':'e1','workspace_id':'w1','tab_id':'t1','pane_id':'p1'})
+   # This unit fixture has no live service; the assertion isolates the
+   # pre-claim boundary rather than pretending a status read is causality.
+   c.verify_live_ownership=lambda: None
+   for kind in ('reconnect_replay','restart_loss'):
+    with self.assertRaisesRegex(ControllerError,'producer-owned causal'):
+     c.real_action(kind,'p1',f'{kind}-without-producer',c.token)
+   self.assertEqual(c.conn.execute('SELECT count(*) FROM uat_actions').fetchone()[0],0)
+   c.close()
+
  def test_real_v21190_binary_probes_documented_json_session_header(self):
   """Real released-binary smoke; it is source evidence, not installed UAT."""
   archive=Path('/data/robin-GIT/xcsh-codex-login/xcsh/.local/native-lifecycle-artifacts/v21.19.0/xcsh-linux-x64.tar.gz')
@@ -72,6 +88,26 @@ class ControllerTests(unittest.TestCase):
    with self.assertRaisesRegex(ControllerError,'prompt-free durable'):
     controller.create_xcsh_session(binary,hashlib.sha256(binary.read_bytes()).hexdigest(),root,root/'second-session')
 
+ def test_real_current_xcsh_binary_creates_canonical_resume_session_when_explicitly_enabled(self):
+  """Real measured-binary source smoke; never installed-UAT acceptance."""
+  raw_binary=os.environ.get('HERDR_XCSH_BINARY')
+  expected=os.environ.get('HERDR_XCSH_SHA256')
+  if not raw_binary or not expected:
+   self.skipTest('set HERDR_XCSH_BINARY and HERDR_XCSH_SHA256 for the measured XCSH source smoke')
+  binary=Path(raw_binary)
+  with tempfile.TemporaryDirectory(prefix='xcsh-v3-session-') as raw:
+   root=Path(raw)
+   controller=object.__new__(DisposableHerdrController)
+   receipt=controller.create_xcsh_session(binary,expected,root,root/'sessions')
+   self.assertRegex(receipt['session_id'],r'^[0-9a-f]{16}$')
+   self.assertEqual(receipt['xcsh_executable'],str(binary.resolve()))
+   self.assertEqual(receipt['xcsh_executable_sha256'],expected)
+   self.assertEqual(Path(receipt['session_path']).parent,Path(receipt['session_dir']))
+   with Path(receipt['session_path']).open('rb') as source:
+    first_line=source.readline()
+   self.assertTrue(first_line.endswith(b'\n'))
+   self.assertEqual(receipt['session_header']['sha256'],hashlib.sha256(first_line).hexdigest())
+
  def test_real_disposable_binary_actions_when_explicitly_enabled(self):
   raw_binary=os.environ.get('HERDR_DISPOSABLE_BINARY')
   expected=os.environ.get('HERDR_DISPOSABLE_SHA256')
@@ -87,12 +123,13 @@ class ControllerTests(unittest.TestCase):
     reopened=DisposableHerdrController.open_receipt(Path(raw)/'actions.sqlite',receipt_path)
     self.assertEqual(saved['workspace_id'],reopened.ownership['workspace_id'])
     reopened.close()
-    reconnect=c.real_action('reconnect_replay',pane,'real-reconnect',c.token)
-    restart=c.real_action('restart_loss',pane,'real-restart',c.token)
-    self.assertEqual(c.real_action('restart_loss',pane,'real-restart',c.token),restart)
-    self.assertTrue(reconnect['effect']['reconnected'])
+    # A server status/restart alone is not a producer reply-loss or cutpoint
+    # action. Real installed UAT must provide the released producer adapter.
+    with self.assertRaisesRegex(ControllerError,'producer-owned causal'):
+     c.real_action('reconnect_replay',pane,'real-reconnect',c.token)
+    with self.assertRaisesRegex(ControllerError,'producer-owned causal'):
+     c.real_action('restart_loss',pane,'real-restart',c.token)
     with self.assertRaises(ControllerError): c.real_action('cleanup',pane,'real-cleanup',c.token)
-    self.assertEqual(restart['effect']['server_version'],'0.10.1')
    finally:
     subprocess.run([raw_binary,'--session',c.ownership['session_id'],'server','stop'],check=False,capture_output=True,text=True)
     c.close()

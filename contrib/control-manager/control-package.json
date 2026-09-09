@@ -1,6 +1,6 @@
 {
   "name": "control-manager",
-  "package_version": 22,
+  "package_version": 23,
   "state_schema_version": 12,
   "policy": "POLICY.md",
   "shared_policy": "control-policy.json",
@@ -9,14 +9,14 @@
   "scope": "recovery_manager_with_native_xcsh_uat_source",
   "excluded_product_modules": ["XCSH native synthetic fixture runner", "test/dev state and receipts", "installed prompt UAT evidence", "live-release UAT drivers"],
   "native_uat_source_handoff": {
-    "control_broker.py": "1b598b24dbe7734be432757ff2cc850994759df11e22ee949c28b2beb13a1963",
+    "control_broker.py": "9755e7b321de2409e9048878e2c773a41945acc25b7a69cd0280f853401733d7",
     "control_mcp.py": "f19fa2924b525e5cec98e35f1f2f58c1f967c38ed9792da905566d37a7657b01",
-    "control_portable.py": "a66c02663db2a23d766204148034aafde6dec8bb34c09a2d50e87fac4629233b",
-    "runtime/xcsh_isolated_uat_controller.py": "ca3c4ca47a309f0cea5e522e607f279673629260ee73c471dbe524c3e896ea82",
-    "runtime/xcsh_installed_uat.py": "a908a147214aad2200621c54952a20ae90c557cea6b646589b1629eb4b210dcb",
-    "runtime/xcsh-installed-uat/manifest.example.json": "4e8b75a45ad0263b0878ca5190ae4eccf8a1215f6ac6ee749ee96479b1225dea",
-    "runtime/xcsh-installed-uat/scenarios-v1.json": "69b1d4189900997f86bff67d700e09aca4df9d55de7a212983e5feca5e3ef483",
-    "XCSH_NATIVE_UAT_ACCEPTANCE.md": "480ab02f58a18b50853bedb948f8c0ef9caa52c1560a81b415277889c218d9b7"
+    "control_portable.py": "0838930ac20ed0ac20eb7c52657b2e53d339b607c3323c6eb681be134e093624",
+    "runtime/xcsh_isolated_uat_controller.py": "f67530b3b8ebf7a19e39bf9d6f17891dba15c5535b8e9c8fa22426040df83d3f",
+    "runtime/xcsh_installed_uat.py": "d9f2723e193a8ab4af878cca56fc4fd791f77738ee3d56532559aee586ab0b64",
+    "runtime/xcsh-installed-uat/manifest.example.json": "ad028b60cdafc7804fb76c717b3f2f5e14f62124409dcd04f961a114ae6317f0",
+    "runtime/xcsh-installed-uat/scenarios-v1.json": "fbb70cf474112abd47e27cd2b8e9d92a96670fbd5cc7e23454d215c5a0ca8040",
+    "XCSH_NATIVE_UAT_ACCEPTANCE.md": "2945def1a91f6ace1836e7bc5e875f7fe0de720b4a162cf7a17a5bd76e7658d3"
   },
   "contains_credentials": false,
   "contains_runtime_sessions": false,
