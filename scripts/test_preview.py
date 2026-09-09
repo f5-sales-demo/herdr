@@ -9,6 +9,7 @@ from pathlib import Path
 
 import scripts.conventional_commits as conventional_commits
 import scripts.preview as preview
+import scripts.validate_merge_commits as validate_merge_commits
 
 
 class PreviewNotesTests(unittest.TestCase):
@@ -254,14 +255,39 @@ class ConventionalCommitTests(unittest.TestCase):
             git("merge", "--no-ff", "feature", "-m", "Merge direct invalid feature")
             merge = git("rev-parse", "HEAD")
             self.assertNotEqual(validate("--range", f"{base}..{merge}").returncode, 0)
+            self.assertEqual(
+                validate_merge_commits.invalid_merge_subjects(
+                    f"{base}..{merge}", "owner/repo", "main", "token", lambda *_: [], repo
+                ),
+                [(merge, "Merge direct invalid feature")],
+            )
 
             git("switch", "--create", "valid-feature")
             valid_head = commit("fix: preserve valid merge history", "valid feature\n")
             git("switch", "main")
-            git("merge", "--no-ff", "valid-feature", "-m", "Merge valid feature")
+            git("merge", "--no-ff", "valid-feature", "-m", "Merge invalid subject with valid side")
+            invalid_subject_merge = git("rev-parse", "HEAD")
+            self.assertEqual(validate("--range", f"{merge}..{invalid_subject_merge}").returncode, 0)
+            self.assertEqual(
+                validate_merge_commits.invalid_merge_subjects(
+                    f"{merge}..{invalid_subject_merge}", "owner/repo", "main", "token", lambda *_: [], repo
+                ),
+                [(invalid_subject_merge, "Merge invalid subject with valid side")],
+            )
+
+            git("switch", "--create", "valid-merge")
+            valid_head = commit("fix: preserve valid merge history", "valid merge\n")
+            git("switch", "main")
+            git("merge", "--no-ff", "valid-merge", "-m", "fix: merge valid feature")
             valid_merge = git("rev-parse", "HEAD")
-            self.assertEqual(validate("--range", f"{merge}..{valid_merge}").returncode, 0)
+            self.assertEqual(validate("--range", f"{invalid_subject_merge}..{valid_merge}").returncode, 0)
             self.assertEqual(validate("--range", f"{merge}..{valid_head}").returncode, 0)
+            self.assertEqual(
+                validate_merge_commits.invalid_merge_subjects(
+                    f"{invalid_subject_merge}..{valid_merge}", "owner/repo", "main", "token", lambda *_: [], repo
+                ),
+                [],
+            )
 
             git("switch", "--create", "valid-direct", valid_merge)
             direct_valid = commit("fix: validate direct push", "valid direct\n")
@@ -293,6 +319,28 @@ class ConventionalCommitTests(unittest.TestCase):
         self.assertFalse(conventional_commits.valid_subject("update preview channel"))
         self.assertFalse(conventional_commits.valid_subject("Merge direct invalid feature"))
         self.assertFalse(conventional_commits.valid_subject("style: format native settlement regression"))
+
+    def test_github_merge_wrapper_requires_matching_conventional_pr_evidence(self):
+        sha = "a" * 40
+        subject = "Merge pull request #52 from owner/branch"
+        recorded = [{
+            "state": "closed",
+            "merged_at": "2026-09-09T00:00:00Z",
+            "merge_commit_sha": sha,
+            "base": {"ref": "build-xcsh"},
+            "title": "fix(ci): preserve merge constituent validation",
+        }]
+        self.assertTrue(
+            validate_merge_commits.is_recorded_pr_merge(
+                subject, sha, "owner/repo", "build-xcsh", "token", lambda *_: recorded
+            )
+        )
+        recorded[0]["title"] = "invalid merge title"
+        self.assertFalse(
+            validate_merge_commits.is_recorded_pr_merge(
+                subject, sha, "owner/repo", "build-xcsh", "token", lambda *_: recorded
+            )
+        )
 
     def test_commit_message_subject_skips_comments(self):
         with tempfile.TemporaryDirectory() as tmp:
