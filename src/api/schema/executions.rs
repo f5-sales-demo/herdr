@@ -35,7 +35,8 @@ pub struct ExecutionStartParams {
 /// `execution_id` is owned by the producer's semantic task. Herdr assigns a
 /// different `backend_execution_id` for the visible child it launches.
 ///
-/// `session_id` must be XCSH sessionManager's canonical 36-character UUID.
+/// `session_id` must be XCSH SessionHeader's canonical 16-character lowercase
+/// hexadecimal Snowflake ID.
 /// XCSH's convenient ID-prefix and path selectors are intentionally rejected:
 /// they cannot provide the exact durable reporter binding this API requires.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

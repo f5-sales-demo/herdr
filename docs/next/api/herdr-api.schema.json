@@ -2242,7 +2242,7 @@
           "type": "object"
         },
         "ExecutionResumeParams": {
-          "description": "Admit an XCSH child for one immutable semantic execution generation.\n\n`execution_id` is owned by the producer's semantic task. Herdr assigns a\ndifferent `backend_execution_id` for the visible child it launches.\n\n`session_id` must be XCSH sessionManager's canonical 36-character UUID.\nXCSH's convenient ID-prefix and path selectors are intentionally rejected:\nthey cannot provide the exact durable reporter binding this API requires.",
+          "description": "Admit an XCSH child for one immutable semantic execution generation.\n\n`execution_id` is owned by the producer's semantic task. Herdr assigns a\ndifferent `backend_execution_id` for the visible child it launches.\n\n`session_id` must be XCSH SessionHeader's canonical 16-character lowercase\nhexadecimal Snowflake ID.\nXCSH's convenient ID-prefix and path selectors are intentionally rejected:\nthey cannot provide the exact durable reporter binding this API requires.",
           "properties": {
             "cwd": {
               "type": "string"

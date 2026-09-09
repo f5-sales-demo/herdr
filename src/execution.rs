@@ -721,7 +721,7 @@ fn validate_resume(p: &ExecutionResumeParams) -> Result<(), String> {
         return Err("invalid_execution_resume".into());
     }
     if !is_canonical_xcsh_session_id(&p.session_id) {
-        return Err("invalid_xcsh_session_id: execution.resume requires the canonical 36-character XCSH sessionManager UUID; ID prefixes and session paths cannot bind reporter provenance exactly".into());
+        return Err("invalid_xcsh_session_id: execution.resume requires the canonical 16-character lowercase hexadecimal XCSH SessionHeader ID; ID prefixes and session paths cannot bind reporter provenance exactly".into());
     }
     // XCSH serializes generations as JavaScript Number. Larger values round
     // and could silently select a different durable generation binding.
@@ -734,11 +734,10 @@ fn validate_resume(p: &ExecutionResumeParams) -> Result<(), String> {
 }
 
 fn is_canonical_xcsh_session_id(value: &str) -> bool {
-    value.len() == 36
-        && value.bytes().enumerate().all(|(index, byte)| {
-            matches!(index, 8 | 13 | 18 | 23) && byte == b'-'
-                || !matches!(index, 8 | 13 | 18 | 23) && byte.is_ascii_hexdigit()
-        })
+    value.len() == 16
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn native_backend_id(execution_id: &str, generation: u64) -> String {
@@ -794,7 +793,7 @@ mod tests {
         ExecutionResumeParams {
             execution_id: "semantic-task".into(),
             generation,
-            session_id: "123e4567-e89b-12d3-a456-426614174000".into(),
+            session_id: "0123abcd4567ef89".into(),
             text: "continue the task".into(),
             cwd: "/tmp".into(),
             workspace_id: None,
@@ -846,10 +845,15 @@ mod tests {
     }
 
     #[test]
-    fn native_resume_requires_a_canonical_xcsh_session_manager_id() {
+    fn native_resume_requires_a_canonical_xcsh_session_header_id() {
         let path = temp("native-canonical-session");
         let manager = ExecutionManager::load_at(path.clone());
-        for invalid in ["123e4567", "/tmp/xcsh-session.jsonl"] {
+        for invalid in [
+            "0123abcd",
+            "/tmp/xcsh-session.jsonl",
+            "0123ABCD4567EF89",
+            "123e4567-e89b-12d3-a456-426614174000",
+        ] {
             let mut params = resume_params(1);
             params.session_id = invalid.into();
             let error = manager.admit_xcsh_resume(&params).unwrap_err();
@@ -860,7 +864,7 @@ mod tests {
         assert!(admitted);
         assert_eq!(
             record.producer_session_id.as_deref(),
-            Some("123e4567-e89b-12d3-a456-426614174000")
+            Some("0123abcd4567ef89")
         );
         let _ = std::fs::remove_file(path);
     }
@@ -910,7 +914,7 @@ mod tests {
             Some(current.execution_id.as_str())
         );
         let mut conflicting_retry = resume_params(1);
-        conflicting_retry.session_id = "123e4567-e89b-12d3-a456-426614174001".into();
+        conflicting_retry.session_id = "0123abcd4567ef8a".into();
         assert!(manager
             .admit_xcsh_resume(&conflicting_retry)
             .unwrap_err()
@@ -1050,12 +1054,7 @@ mod tests {
         assert_eq!(retained.state, ExecutionState::Lost);
         assert_eq!(
             reloaded
-                .resolve_agent_turn_execution(
-                    "semantic-task",
-                    "xcsh",
-                    "123e4567-e89b-12d3-a456-426614174000",
-                    6,
-                )
+                .resolve_agent_turn_execution("semantic-task", "xcsh", "0123abcd4567ef89", 6,)
                 .unwrap()
                 .execution_id,
             claimed.execution_id

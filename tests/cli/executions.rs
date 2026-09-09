@@ -12,7 +12,7 @@ fn native_resume_socket_claim_is_idempotent_and_rejects_replay_conflicts() {
         serde_json::json!({
             "id": id, "method": "execution.resume", "params": {
                 "execution_id": "semantic-replay", "generation": 3,
-                "session_id": "123e4567-e89b-12d3-a456-426614174000", "text": text, "cwd": base,
+                "session_id": "0123abcd4567ef89", "text": text, "cwd": base,
             }
         })
     };
@@ -64,7 +64,7 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
     fs::write(
         &fixture,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n%s\\n%s\\n%s\\n' \"$HERDR_EXECUTION_ID\" \"$HERDR_EXECUTION_GENERATION\" \"$HERDR_SOCKET_PATH\" \"$HERDR_PANE_ID\" > '{}'\nsleep 1\npython3 - \"$HERDR_SOCKET_PATH\" \"$HERDR_PANE_ID\" \"$HERDR_EXECUTION_ID\" \"$HERDR_EXECUTION_GENERATION\" <<'PY'\nimport json, socket, sys\nsock, pane, execution, generation = sys.argv[1:]\nframe = {{'method':'agent.turn.report','params':{{'execution_id':execution,'pane_id':pane,'producer':'xcsh','session_id':'123e4567-e89b-12d3-a456-426614174000','turn_id':'fixture-turn','generation':int(generation),'event_revision':1,'state':'starting'}}}}\nfor request_id in ('fixture-first', 'fixture-replay'):\n    frame['id'] = request_id\n    client = socket.socket(socket.AF_UNIX)\n    client.connect(sock)\n    client.sendall((json.dumps(frame) + '\\n').encode())\n    client.recv(65536)\n    client.close()\nPY\nsleep 30\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n%s\\n%s\\n%s\\n' \"$HERDR_EXECUTION_ID\" \"$HERDR_EXECUTION_GENERATION\" \"$HERDR_SOCKET_PATH\" \"$HERDR_PANE_ID\" > '{}'\nsleep 1\npython3 - \"$HERDR_SOCKET_PATH\" \"$HERDR_PANE_ID\" \"$HERDR_EXECUTION_ID\" \"$HERDR_EXECUTION_GENERATION\" <<'PY'\nimport json, socket, sys\nsock, pane, execution, generation = sys.argv[1:]\nframe = {{'method':'agent.turn.report','params':{{'execution_id':execution,'pane_id':pane,'producer':'xcsh','session_id':'0123abcd4567ef89','turn_id':'fixture-turn','generation':int(generation),'event_revision':1,'state':'starting'}}}}\nfor request_id in ('fixture-first', 'fixture-replay'):\n    frame['id'] = request_id\n    client = socket.socket(socket.AF_UNIX)\n    client.connect(sock)\n    client.sendall((json.dumps(frame) + '\\n').encode())\n    client.recv(65536)\n    client.close()\nPY\nsleep 30\n",
             args_path.display(),
             env_path.display(),
         ),
@@ -92,7 +92,12 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
     )
     .status
     .success());
-    for invalid_session in ["123e4567", "/tmp/xcsh-session.jsonl"] {
+    for invalid_session in [
+        "0123abcd",
+        "/tmp/xcsh-session.jsonl",
+        "0123ABCD4567EF89",
+        "123e4567-e89b-12d3-a456-426614174000",
+    ] {
         let rejected = send_request(
             &socket_path,
             &serde_json::json!({
@@ -114,7 +119,7 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
         &serde_json::json!({
             "id": "native-child", "method": "execution.resume", "params": {
                 "execution_id": "semantic-child", "generation": 11,
-            "session_id": "123e4567-e89b-12d3-a456-426614174000", "text": "fixture", "cwd": base,
+            "session_id": "0123abcd4567ef89", "text": "fixture", "cwd": base,
             }
         })
         .to_string(),
@@ -140,7 +145,7 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
     }
     assert_eq!(
         fs::read_to_string(&args_path).unwrap(),
-        "--resume\n123e4567-e89b-12d3-a456-426614174000\nfixture\n"
+        "--resume\n0123abcd4567ef89\nfixture\n"
     );
     let env = fs::read_to_string(&env_path).unwrap();
     let lines: Vec<_> = env.lines().collect();
@@ -172,7 +177,7 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
         &serde_json::json!({
             "id": "fixture-after-churn", "method": "agent.turn.report", "params": {
                 "execution_id": "semantic-child", "pane_id": execution["pane_id"], "producer": "xcsh",
-                "session_id": "123e4567-e89b-12d3-a456-426614174000", "turn_id": "fixture-after-churn",
+                "session_id": "0123abcd4567ef89", "turn_id": "fixture-after-churn",
                 "generation": 11, "event_revision": 1, "state": "starting"
             }
         })
@@ -184,7 +189,7 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
     );
     let second = send_request(&socket_path, &serde_json::json!({
         "id":"fixture-next", "method":"execution.resume", "params": {
-            "execution_id":"semantic-child", "generation":12, "session_id":"123e4567-e89b-12d3-a456-426614174000", "text":"fixture", "cwd":base
+            "execution_id":"semantic-child", "generation":12, "session_id":"0123abcd4567ef89", "text":"fixture", "cwd":base
         }
     }).to_string());
     assert_eq!(second["result"]["admitted"], true);
@@ -207,7 +212,7 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
     }
     let duplicate_second = send_request(&socket_path, &serde_json::json!({
         "id":"fixture-next-retry", "method":"execution.resume", "params": {
-            "execution_id":"semantic-child", "generation":12, "session_id":"123e4567-e89b-12d3-a456-426614174000", "text":"fixture", "cwd":base
+            "execution_id":"semantic-child", "generation":12, "session_id":"0123abcd4567ef89", "text":"fixture", "cwd":base
         }
     }).to_string());
     assert_eq!(duplicate_second["result"]["admitted"], false);
