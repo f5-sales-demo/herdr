@@ -60,6 +60,22 @@ impl App {
                 )
             }
         }
+        let Some(native_launch) = claimed.native_launch.as_ref() else {
+            return self.fail_visible_execution(
+                id,
+                &claimed.execution_id,
+                "execution_binding_missing",
+                "native execution is missing its durable XCSH launch binding",
+            );
+        };
+        if let Err(error) = crate::execution::measure_xcsh_session_header(native_launch) {
+            return self.fail_visible_execution(
+                id,
+                &claimed.execution_id,
+                "execution_session_binding_changed",
+                &error,
+            );
+        }
         let ws_idx = if let Some(workspace_id) = params.workspace_id.as_deref() {
             match self.parse_workspace_id(workspace_id) {
                 Some(index) => index,
@@ -94,11 +110,20 @@ impl App {
             }
         };
         let (rows, cols) = self.state.estimate_pane_size();
-        let env = claimed
+        let mut env: Vec<(String, String)> = claimed
             .injected_env
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
+        let Some(capability) = manager.native_capability(&claimed.execution_id) else {
+            return self.fail_visible_execution(
+                id,
+                &claimed.execution_id,
+                "execution_capability_missing",
+                "native execution is missing its private producer capability",
+            );
+        };
+        env.push(("HERDR_NATIVE_CAPABILITY".into(), capability));
         let result = self
             .state
             .workspaces
@@ -308,7 +333,14 @@ impl App {
 
     pub(super) fn handle_execution_cancel(&mut self, id: String, execution_id: String) -> String {
         let manager = crate::execution::ExecutionManager::global();
-        let record = match manager.request_visible_cancel(&execution_id) {
+        let native = manager
+            .get(&execution_id)
+            .is_some_and(|record| record.native_launch.is_some());
+        let record = match if native {
+            manager.request_native_cancel(&execution_id)
+        } else {
+            manager.request_visible_cancel(&execution_id)
+        } {
             Ok(record) => record,
             Err(error) => {
                 let code = error
@@ -328,6 +360,15 @@ impl App {
                 id,
                 ResponseResult::Execution {
                     execution: record,
+                    admitted: false,
+                },
+            );
+        }
+        if native {
+            return encode_success(
+                id,
+                ResponseResult::Execution {
+                    execution: manager.get(&execution_id).unwrap_or(record),
                     admitted: false,
                 },
             );

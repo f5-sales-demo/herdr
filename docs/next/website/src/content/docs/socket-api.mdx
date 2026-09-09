@@ -128,24 +128,34 @@ worktree discovery remains `worktree.list`.
 From the CLI, `herdr api snapshot` prints the live `session.snapshot` response
 as JSON for clients and agents that want a simple bootstrap command.
 
-## Native XCSH resume binding
+## Native XCSH resume binding (protocol 22)
 
 `execution.resume` is a native lifecycle protocol, not a shell-command
-shortcut. Supply the exact canonical XCSH `SessionHeader` ID and an absolute
-`xcsh_executable` path. Herdr canonicalizes and hashes that executable before
-the durable generation claim, stores the binding in the execution receipt, and
-checks it again immediately before launch. A retry must provide the same
-binding; a relative, unavailable, or ordinarily replaced executable fails
-closed. This is a measured owner-controlled-artifact boundary, not an atomic
+shortcut. Its required `native_launch` is version `3`: an absolute measured
+`xcsh_executable`, canonical `session_dir` and `session_path`, and a
+`session_header` containing the canonical 16-lowercase-hex XCSH ID plus the
+SHA-256 of exactly the first JSONL header line, including its terminating LF.
+Herdr validates and persists the complete typed launch receipt before its
+durable generation claim, then checks its executable and session header again
+immediately before launch. A retry must provide the same binding; a relative,
+unavailable, or ordinarily replaced executable/session binding fails closed.
+This is a measured owner-controlled-artifact boundary, not an atomic
 file-handle-to-exec guarantee against a concurrently hostile filesystem owner.
 Herdr never resolves a native child through the server `PATH`.
+
+`model` is a configured nonsecret XCSH selector, never a user identity.
+`discovery: "reduced-v1"` becomes supported `--no-mcp --no-lsp --no-pty`
+flags, `tools: "read"` becomes `--tools read`, and `interactive: false`
+becomes `--print`. `lifecycle_mode: "managed_turn_v1"` is a durable
+Herdr/producer lifecycle contract, deliberately not an undocumented XCSH CLI
+flag. Herdr derives all native argv itself and accepts no arbitrary argv/env.
 
 On Unix the path must also have an execute permission bit. On Windows it must
 be an absolute regular file; executable admission follows the platform process
 launcher, which applies its normal executable-format and extension rules.
 
 ```json
-{"id":"resume-1","method":"execution.resume","params":{"execution_id":"task-42","generation":1,"session_id":"0123abcd4567ef89","xcsh_executable":"/opt/xcsh/bin/xcsh","text":"continue","cwd":"/work/project"}}
+{"id":"resume-1","method":"execution.resume","params":{"execution_id":"task-42","generation":1,"native_launch":{"version":3,"xcsh_executable":"/opt/xcsh/bin/xcsh","session_dir":"/work/.xcsh/sessions","session_path":"/work/.xcsh/sessions/session.jsonl","session_header":{"id":"0123abcd4567ef89","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},"model":"openai/gpt-5","discovery":"reduced-v1","tools":"read","interactive":false,"lifecycle_mode":"managed_turn_v1"},"text":"continue","cwd":"/work/project"}}
 ```
 
 Pane control methods use public pane ids such as `w1:p1`. Methods whose

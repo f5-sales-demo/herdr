@@ -39,6 +39,49 @@ pub struct AgentTurnReportParams {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_digest: Option<String>,
+    /// One-time native child capability. It is authenticated before journal
+    /// admission and deliberately stripped from persisted turn records.
+    #[serde(default, skip_serializing)]
+    pub native_capability: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentTurnActionTarget {
+    pub execution_id: String,
+    pub pane_id: String,
+    pub producer: String,
+    pub session_id: String,
+    pub generation: u64,
+    pub native_capability: String,
+    #[serde(default)]
+    pub after_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentTurnActionAckParams {
+    #[serde(flatten)]
+    pub target: AgentTurnActionTarget,
+    pub action_id: String,
+    pub action_revision: u64,
+    pub state: AgentTurnActionState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTurnActionState {
+    Requested,
+    SafePoint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentTurnActionRecord {
+    pub backend_execution_id: String,
+    pub action_id: String,
+    pub action_revision: u64,
+    pub state: AgentTurnActionState,
+    pub requested_at_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledged_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

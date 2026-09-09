@@ -326,7 +326,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {full_stdout}"
     );
     assert!(
-        full_stdout.contains("  protocol: 21"),
+        full_stdout.contains("  protocol: 22"),
         "stdout: {full_stdout}"
     );
     assert!(full_stdout.contains("server:\n"), "stdout: {full_stdout}");
@@ -359,7 +359,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {server_stdout}"
     );
     assert!(
-        server_stdout.contains("protocol: 21"),
+        server_stdout.contains("protocol: 22"),
         "stdout: {server_stdout}"
     );
 
@@ -371,7 +371,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {client_stdout}"
     );
     assert!(
-        client_stdout.contains("protocol: 21"),
+        client_stdout.contains("protocol: 22"),
         "stdout: {client_stdout}"
     );
     assert!(

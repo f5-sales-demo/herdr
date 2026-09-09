@@ -30,7 +30,7 @@ Tracked executions are visible interactive PTY panes but do not steal focus. A s
 
 ## Native semantic turns
 
-Protocol 20 advertises `agent_turn_journal` when the server supports durable native semantic results. A tracked agent receives `HERDR_EXECUTION_ID`; it reports against both that execution ID and its server-assigned `HERDR_PANE_ID`. Herdr rejects a report when the pane is not owned by the execution, preventing a producer from attaching a result to unrelated work.
+Protocol 22 advertises `agent_turn_journal` when the server supports durable native semantic results. A tracked agent receives `HERDR_EXECUTION_ID`; it reports against both that execution ID and its server-assigned `HERDR_PANE_ID`. Herdr rejects a report when the pane is not owned by the execution, preventing a producer from attaching a result to unrelated work.
 
 Use `agent.turn.report`, `agent.turn.get`, `agent.turn.list`, and `agent.turn.wait` over the JSON API. A turn is keyed by producer, native session ID, native turn ID, and generation. Producer `event_revision` starts at 1 and increases monotonically. Herdr assigns a separate journal `revision` for consumers. Exact duplicate reports are idempotent; changed content at the same revision, stale revisions, and updates after a terminal event are rejected.
 

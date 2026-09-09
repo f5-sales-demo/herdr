@@ -35,25 +35,67 @@ pub struct ExecutionStartParams {
 /// `execution_id` is owned by the producer's semantic task. Herdr assigns a
 /// different `backend_execution_id` for the visible child it launches.
 ///
-/// `session_id` must be XCSH SessionHeader's canonical 16-character lowercase
-/// hexadecimal Snowflake ID.
-/// XCSH's convenient ID-prefix and path selectors are intentionally rejected:
-/// they cannot provide the exact durable reporter binding this API requires.
+/// `native_launch` is versioned and fully typed. Herdr never accepts a
+/// caller-provided shell command, environment, or opaque XCSH argv here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExecutionResumeParams {
     pub execution_id: String,
     pub generation: u64,
-    pub session_id: String,
-    /// Absolute path to the XCSH executable that owns this generation.
-    /// Herdr measures and persists its canonical path and SHA-256 before
-    /// admission; launches do not resolve `xcsh` through the server PATH.
-    pub xcsh_executable: String,
+    pub native_launch: NativeLaunchV3,
     pub text: String,
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+}
+
+/// Version 3 native XCSH launch contract for protocol 22.
+///
+/// `session_path` is a canonical absolute JSONL path. `session_header.sha256`
+/// is the SHA-256 of exactly the first JSONL line, including its terminating
+/// LF byte. The header's `id` is XCSH's canonical 16-character lowercase hex
+/// SessionHeader ID; selector prefixes and paths are never reporter IDs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NativeLaunchV3 {
+    pub version: u8,
+    pub xcsh_executable: String,
+    /// Canonical absolute directory containing `session_path`.
+    pub session_dir: String,
+    pub session_path: String,
+    pub session_header: NativeSessionHeaderBinding,
+    /// Configured, non-secret XCSH model selector. It is not a user identity.
+    pub model: String,
+    pub discovery: NativeDiscoveryPolicy,
+    pub tools: NativeToolsPolicy,
+    pub interactive: bool,
+    pub lifecycle_mode: NativeLifecycleMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NativeSessionHeaderBinding {
+    pub id: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum NativeDiscoveryPolicy {
+    ReducedV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeToolsPolicy {
+    Read,
+}
+
+/// Semantic lifecycle behavior, retained as durable producer contract rather
+/// than translated into an undocumented XCSH command-line flag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeLifecycleMode {
+    ManagedTurnV1,
 }
 
 /// Immutable measurement of the XCSH program admitted for a native child.
@@ -99,6 +141,11 @@ pub struct ExecutionRecord {
     pub native_producer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_executable: Option<NativeExecutableBinding>,
+    /// Complete protocol-22 typed native launch receipt. Kept alongside the
+    /// normalized executable/session fields for compatibility with existing
+    /// execution consumers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_launch: Option<NativeLaunchV3>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub producer_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

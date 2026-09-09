@@ -76,7 +76,7 @@ impl AgentTurnManager {
 
     pub(crate) fn report(
         &self,
-        report: AgentTurnReportParams,
+        mut report: AgentTurnReportParams,
     ) -> Result<(AgentTurnRecord, bool), String> {
         validate(&report)?;
         let execution = crate::execution::ExecutionManager::global().resolve_agent_turn_execution(
@@ -88,6 +88,11 @@ impl AgentTurnManager {
         if execution.pane_id.as_deref() != Some(report.pane_id.as_str()) {
             return Err("agent_turn_provenance_mismatch: pane is not owned by execution".into());
         }
+        crate::execution::ExecutionManager::global()
+            .authorize_native_report_capability(&execution, report.native_capability.as_deref())?;
+        // The credential is request-only. It must never enter the durable
+        // journal, replay identity, response, or log surface.
+        report.native_capability = None;
         let mut state = self
             .0
             .state
@@ -335,6 +340,7 @@ mod tests {
             result: None,
             reason: None,
             result_digest: None,
+            native_capability: None,
         };
         let state = State {
             revision: 4,
@@ -380,6 +386,7 @@ mod tests {
             result: Some(result.clone()),
             reason: None,
             result_digest: Some(format!("{:x}", Sha256::digest(result.as_bytes()))),
+            native_capability: None,
         };
         assert!(validate(&report).is_ok());
         report.result_digest = Some("0".repeat(64));
