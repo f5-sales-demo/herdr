@@ -1,10 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::api::schema::{ExecutionCommand, ExecutionRecord, ExecutionStartParams, ExecutionState};
+use crate::api::schema::{
+    ExecutionCommand, ExecutionRecord, ExecutionResumeParams, ExecutionStartParams, ExecutionState,
+};
 
 const MAX_RECORDS: usize = 256;
 const OUTPUT_TAIL_BYTES: usize = 4096;
@@ -27,6 +29,12 @@ struct CapturedOutput {
 struct State {
     revision: u64,
     records: Vec<ExecutionRecord>,
+    /// Native semantic identities outlive the bounded visible-record window.
+    /// This is deliberately separate from tombstones: a semantic task may
+    /// continue with a newer generation, but no earlier generation may be
+    /// relaunched and no ordinary execution may claim its identity.
+    #[serde(default)]
+    native_reservations: BTreeMap<String, u64>,
     #[serde(default)]
     tombstones: Vec<ExecutionTombstone>,
     #[serde(default)]
@@ -35,6 +43,10 @@ struct State {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ExecutionTombstone {
     execution_id: String,
+    #[serde(default)]
+    semantic_execution_id: Option<String>,
+    #[serde(default)]
+    generation: Option<u64>,
     command: ExecutionCommand,
     cwd: String,
 }
@@ -101,6 +113,17 @@ impl ExecutionManager {
             return Err("execution_id_conflict: execution id is already admitted with a different specification".into());
         }
         if state
+            .records
+            .iter()
+            .any(|record| record.semantic_execution_id.as_deref() == Some(&params.execution_id))
+            || state.native_reservations.contains_key(&params.execution_id)
+            || state.tombstones.iter().any(|tombstone| {
+                tombstone.semantic_execution_id.as_deref() == Some(&params.execution_id)
+            })
+        {
+            return Err("execution_namespace_conflict: execution id is reserved by a native semantic execution".into());
+        }
+        if state
             .tombstones
             .iter()
             .any(|old| old.execution_id == params.execution_id)
@@ -111,6 +134,13 @@ impl ExecutionManager {
         state.revision += 1;
         let record = ExecutionRecord {
             execution_id: params.execution_id.clone(),
+            backend_execution_id: None,
+            semantic_execution_id: None,
+            generation: None,
+            native_producer: None,
+            producer_session_id: None,
+            injected_env: BTreeMap::new(),
+            superseded_by_backend_execution_id: None,
             cwd: params.cwd.clone(),
             command: params.command.clone(),
             state: ExecutionState::Starting,
@@ -137,6 +167,154 @@ impl ExecutionManager {
         self.enforce_retention(&mut state);
         self.persist_locked(&state)?;
         Ok((record, true))
+    }
+
+    /// Persist the generation claim before an app runtime creates a child.
+    /// A retry returns precisely the previously claimed child; a changed
+    /// specification, a stale generation, or a producer-owned foreign binding
+    /// is rejected rather than being allowed to run a second child.
+    pub(crate) fn admit_xcsh_resume(
+        &self,
+        params: &ExecutionResumeParams,
+    ) -> Result<(ExecutionRecord, bool, Option<ExecutionRecord>), String> {
+        validate_resume(params)?;
+        let backend_execution_id = native_backend_id(&params.execution_id, params.generation);
+        let command = ExecutionCommand::Argv {
+            argv: vec![
+                "xcsh".into(),
+                "--resume".into(),
+                params.session_id.clone(),
+                params.text.clone(),
+            ],
+        };
+        let injected_env = BTreeMap::from([
+            ("HERDR_EXECUTION_ID".into(), params.execution_id.clone()),
+            (
+                "HERDR_EXECUTION_GENERATION".into(),
+                params.generation.to_string(),
+            ),
+        ]);
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| "execution state lock poisoned")?;
+        if state.records.iter().any(|record| {
+            record.execution_id == params.execution_id && record.semantic_execution_id.is_none()
+        }) {
+            return Err("execution_namespace_conflict: semantic execution id is already owned by an ordinary execution".into());
+        }
+        if let Some(existing) = state.records.iter().find(|record| {
+            record.semantic_execution_id.as_deref() == Some(&params.execution_id)
+                && record.generation == Some(params.generation)
+        }) {
+            if existing.backend_execution_id.as_deref() == Some(&backend_execution_id)
+                && existing.cwd == params.cwd
+                && existing.command == command
+                && existing.producer_session_id.as_deref() == Some(&params.session_id)
+                && existing.injected_env == injected_env
+            {
+                return Ok((existing.clone(), false, None));
+            }
+            return Err("execution_generation_conflict: semantic generation is already bound to a different child specification".into());
+        }
+        if state.records.iter().any(|record| {
+            record.semantic_execution_id.as_deref() == Some(&params.execution_id)
+                && record
+                    .generation
+                    .is_some_and(|generation| generation > params.generation)
+        }) {
+            return Err(
+                "execution_generation_stale: a newer semantic generation is already bound".into(),
+            );
+        }
+        let retained_generation = state
+            .native_reservations
+            .get(&params.execution_id)
+            .copied()
+            .into_iter()
+            .chain(
+                state
+                    .tombstones
+                    .iter()
+                    .filter(|tombstone| {
+                        tombstone.semantic_execution_id.as_deref() == Some(&params.execution_id)
+                    })
+                    .filter_map(|tombstone| tombstone.generation),
+            )
+            .max();
+        if let Some(retained_generation) = retained_generation {
+            if retained_generation == params.generation {
+                return Err("execution_expired: semantic generation was previously admitted but its visible record expired; use a newer generation".into());
+            }
+            if retained_generation > params.generation {
+                return Err("execution_generation_stale: a newer retained semantic generation is already bound".into());
+            }
+        }
+        if state
+            .records
+            .iter()
+            .any(|record| record.execution_id == backend_execution_id)
+        {
+            return Err(
+                "execution_backend_id_conflict: generated backend execution id is already owned"
+                    .into(),
+            );
+        }
+        let previous_index = state.records.iter().position(|record| {
+            record.semantic_execution_id.as_deref() == Some(&params.execution_id)
+                && matches!(
+                    record.state,
+                    ExecutionState::Starting | ExecutionState::Running
+                )
+        });
+        state.revision += 1;
+        let revision = state.revision;
+        state
+            .native_reservations
+            .insert(params.execution_id.clone(), params.generation);
+        let record = ExecutionRecord {
+            execution_id: backend_execution_id.clone(),
+            backend_execution_id: Some(backend_execution_id.clone()),
+            semantic_execution_id: Some(params.execution_id.clone()),
+            generation: Some(params.generation),
+            native_producer: Some("xcsh".into()),
+            producer_session_id: Some(params.session_id.clone()),
+            injected_env,
+            superseded_by_backend_execution_id: None,
+            cwd: params.cwd.clone(),
+            command,
+            state: ExecutionState::Starting,
+            revision,
+            admitted_at_unix_ms: now_ms(),
+            started_at_unix_ms: None,
+            finished_at_unix_ms: None,
+            pid: None,
+            pane_id: None,
+            tab_id: None,
+            exit_code: None,
+            signal: None,
+            signal_name: None,
+            cancel_requested: false,
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            output_truncated: false,
+            output_complete: false,
+            evidence_gap: None,
+        };
+        let previous = previous_index.map(|index| {
+            let old = &mut state.records[index];
+            old.cancel_requested = true;
+            old.superseded_by_backend_execution_id = Some(backend_execution_id.clone());
+            old.revision = revision;
+            old.clone()
+        });
+        state.records.push(record.clone());
+        self.enforce_retention(&mut state);
+        self.persist_locked(&state)?;
+        Ok((record, true, previous))
     }
 
     pub(crate) fn attach_visible(
@@ -306,6 +484,43 @@ impl ExecutionManager {
             .find(|r| r.execution_id == id)
             .cloned()
     }
+
+    /// Native children report their semantic id from immutable environment,
+    /// while Herdr owns a separate backend child id. Resolve and validate the
+    /// durable binding instead of trusting reporter-provided provenance.
+    pub(crate) fn resolve_agent_turn_execution(
+        &self,
+        semantic_or_backend_id: &str,
+        producer: &str,
+        session_id: &str,
+        generation: u64,
+    ) -> Result<ExecutionRecord, String> {
+        let state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| "execution state lock poisoned")?;
+        if let Some(record) = state.records.iter().find(|record| {
+            record.semantic_execution_id.as_deref() == Some(semantic_or_backend_id)
+                && record.generation == Some(generation)
+        }) {
+            if record.native_producer.as_deref() != Some(producer)
+                || record.producer_session_id.as_deref() != Some(session_id)
+            {
+                return Err("agent_turn_native_binding_mismatch: reporter does not match durable native binding".into());
+            }
+            return Ok(record.clone());
+        }
+        state
+            .records
+            .iter()
+            .find(|record| {
+                record.execution_id == semantic_or_backend_id
+                    && record.semantic_execution_id.is_none()
+            })
+            .cloned()
+            .ok_or_else(|| "agent_turn_execution_not_found".into())
+    }
     pub(crate) fn list_since(&self, revision: u64) -> Vec<ExecutionRecord> {
         self.0
             .state
@@ -349,10 +564,23 @@ impl ExecutionManager {
     }
     fn enforce_retention(&self, state: &mut State) {
         while state.records.len() > MAX_RECORDS {
-            let record = state.records.remove(0);
+            let Some(index) = state.records.iter().position(|record| {
+                !matches!(
+                    record.state,
+                    ExecutionState::Starting | ExecutionState::Running
+                )
+            }) else {
+                // Active records carry the durable ownership required for
+                // reporter validation, cancellation, and native handoff. Do
+                // not trade that authority for a bounded history window.
+                break;
+            };
+            let record = state.records.remove(index);
             expired_filter_insert(&mut state.expired_id_filter, &record.execution_id);
             state.tombstones.push(ExecutionTombstone {
                 execution_id: record.execution_id,
+                semantic_execution_id: record.semantic_execution_id,
+                generation: record.generation,
                 command: record.command,
                 cwd: record.cwd,
             });
@@ -478,6 +706,49 @@ fn validate(p: &ExecutionStartParams) -> Result<(), String> {
         _ => Ok(()),
     }
 }
+
+fn validate_resume(p: &ExecutionResumeParams) -> Result<(), String> {
+    validate(&ExecutionStartParams {
+        execution_id: p.execution_id.clone(),
+        cwd: p.cwd.clone(),
+        workspace_id: None,
+        label: None,
+        command: ExecutionCommand::Argv {
+            argv: vec!["xcsh".into()],
+        },
+    })?;
+    if p.text.is_empty() || p.text.len() > 65_536 {
+        return Err("invalid_execution_resume".into());
+    }
+    if !is_canonical_xcsh_session_id(&p.session_id) {
+        return Err("invalid_xcsh_session_id: execution.resume requires the canonical 16-character lowercase hexadecimal XCSH SessionHeader ID; ID prefixes and session paths cannot bind reporter provenance exactly".into());
+    }
+    // XCSH serializes generations as JavaScript Number. Larger values round
+    // and could silently select a different durable generation binding.
+    if p.generation > 9_007_199_254_740_991 {
+        return Err(
+            "invalid_execution_generation: generation exceeds JavaScript safe integer range".into(),
+        );
+    }
+    Ok(())
+}
+
+fn is_canonical_xcsh_session_id(value: &str) -> bool {
+    value.len() == 16
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn native_backend_id(execution_id: &str, generation: u64) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("xcsh\0{execution_id}\0{generation}").as_bytes());
+    let suffix: String = digest[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("xcsh-{suffix}")
+}
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -518,6 +789,168 @@ mod tests {
             },
         }
     }
+    fn resume_params(generation: u64) -> ExecutionResumeParams {
+        ExecutionResumeParams {
+            execution_id: "semantic-task".into(),
+            generation,
+            session_id: "0123abcd4567ef89".into(),
+            text: "continue the task".into(),
+            cwd: "/tmp".into(),
+            workspace_id: None,
+            label: None,
+        }
+    }
+
+    #[test]
+    fn native_generation_admission_is_idempotent_and_preserves_provenance() {
+        let path = temp("native-idempotency");
+        let manager = ExecutionManager::load_at(path.clone());
+        let params = resume_params(4);
+        let (first, admitted, old) = manager.admit_xcsh_resume(&params).unwrap();
+        assert!(admitted);
+        assert!(old.is_none());
+        assert_ne!(first.execution_id, params.execution_id);
+        assert_eq!(
+            first.semantic_execution_id.as_deref(),
+            Some("semantic-task")
+        );
+        assert_eq!(first.generation, Some(4));
+        assert_eq!(first.native_producer.as_deref(), Some("xcsh"));
+        assert_eq!(first.injected_env["HERDR_EXECUTION_ID"], "semantic-task");
+        assert_eq!(first.injected_env["HERDR_EXECUTION_GENERATION"], "4");
+        let (retry, admitted, _) = manager.admit_xcsh_resume(&params).unwrap();
+        assert!(!admitted);
+        assert_eq!(retry.execution_id, first.execution_id);
+        let mut conflict = params;
+        conflict.text = "different replay".into();
+        assert!(manager
+            .admit_xcsh_resume(&conflict)
+            .unwrap_err()
+            .contains("generation_conflict"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn native_generation_rejects_values_xcsh_cannot_represent_exactly() {
+        let path = temp("native-safe-integer");
+        let manager = ExecutionManager::load_at(path.clone());
+        assert!(manager
+            .admit_xcsh_resume(&resume_params(9_007_199_254_740_991))
+            .is_ok());
+        assert!(manager
+            .admit_xcsh_resume(&resume_params(9_007_199_254_740_992))
+            .unwrap_err()
+            .contains("safe integer"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn native_resume_requires_a_canonical_xcsh_session_header_id() {
+        let path = temp("native-canonical-session");
+        let manager = ExecutionManager::load_at(path.clone());
+        for invalid in [
+            "0123abcd",
+            "/tmp/xcsh-session.jsonl",
+            "0123ABCD4567EF89",
+            "123e4567-e89b-12d3-a456-426614174000",
+        ] {
+            let mut params = resume_params(1);
+            params.session_id = invalid.into();
+            let error = manager.admit_xcsh_resume(&params).unwrap_err();
+            assert!(error.starts_with("invalid_xcsh_session_id"));
+            assert!(error.contains("prefixes and session paths"));
+        }
+        let (record, admitted, _) = manager.admit_xcsh_resume(&resume_params(1)).unwrap();
+        assert!(admitted);
+        assert_eq!(
+            record.producer_session_id.as_deref(),
+            Some("0123abcd4567ef89")
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn ordinary_and_native_execution_namespaces_cannot_collide_in_either_order() {
+        let path = temp("native-ordinary-collision");
+        let manager = ExecutionManager::load_at(path.clone());
+        manager.admit_visible(&params("semantic-task")).unwrap();
+        assert!(manager
+            .admit_xcsh_resume(&resume_params(1))
+            .unwrap_err()
+            .contains("namespace_conflict"));
+        let other_path = temp("ordinary-native-collision");
+        let other = ExecutionManager::load_at(other_path.clone());
+        other.admit_xcsh_resume(&resume_params(1)).unwrap();
+        assert!(other
+            .admit_visible(&params("semantic-task"))
+            .unwrap_err()
+            .contains("namespace_conflict"));
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(other_path);
+    }
+
+    #[test]
+    fn native_generation_handoff_marks_old_then_rejects_stale_and_foreign_bindings() {
+        let path = temp("native-handoff");
+        let manager = ExecutionManager::load_at(path.clone());
+        let first = resume_params(1);
+        let (old, _, _) = manager.admit_xcsh_resume(&first).unwrap();
+        manager
+            .attach_visible(
+                &old.execution_id,
+                7,
+                "w1:p7".into(),
+                "w1:t1".into(),
+                Some(7),
+            )
+            .unwrap();
+        let (current, admitted, previous) = manager.admit_xcsh_resume(&resume_params(2)).unwrap();
+        assert!(admitted);
+        assert_eq!(previous.unwrap().execution_id, old.execution_id);
+        let old = manager.get(&old.execution_id).unwrap();
+        assert!(old.cancel_requested);
+        assert_eq!(
+            old.superseded_by_backend_execution_id.as_deref(),
+            Some(current.execution_id.as_str())
+        );
+        let mut conflicting_retry = resume_params(1);
+        conflicting_retry.session_id = "0123abcd4567ef8a".into();
+        assert!(manager
+            .admit_xcsh_resume(&conflicting_retry)
+            .unwrap_err()
+            .contains("generation_conflict"));
+        assert!(manager
+            .admit_xcsh_resume(&resume_params(0))
+            .unwrap_err()
+            .contains("generation_stale"));
+        manager.finish_visible(
+            7,
+            Some(&portable_pty::ExitStatus::with_signal("Terminated")),
+            None,
+        );
+        assert_eq!(
+            manager.get(&old.execution_id).unwrap().state,
+            ExecutionState::Cancelled
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn restart_reconciles_claimed_child_before_effect_as_lost() {
+        let path = temp("native-crash-claim");
+        let manager = ExecutionManager::load_at(path.clone());
+        let (claimed, _, _) = manager.admit_xcsh_resume(&resume_params(9)).unwrap();
+        drop(manager);
+        let reloaded = ExecutionManager::load_at(path.clone());
+        let recovered = reloaded.get(&claimed.execution_id).unwrap();
+        assert_eq!(recovered.state, ExecutionState::Lost);
+        assert!(recovered
+            .evidence_gap
+            .as_deref()
+            .unwrap()
+            .contains("restarted"));
+        let _ = std::fs::remove_file(path);
+    }
     #[test]
     fn idempotent_admission_and_conflict() {
         let path = temp("idem");
@@ -556,10 +989,76 @@ mod tests {
         let path = temp("tombstone");
         let m = ExecutionManager::load_at(path.clone());
         for index in 0..=MAX_RECORDS {
-            m.admit_visible(&params(&format!("id-{index}"))).unwrap();
+            let id = format!("id-{index}");
+            m.admit_visible(&params(&id)).unwrap();
+            m.mark_start_failed(&id, "test settlement");
         }
         let error = m.admit_visible(&params("id-0")).unwrap_err();
         assert!(error.starts_with("execution_expired"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn evicted_native_generation_remains_reserved_across_restart() {
+        let path = temp("evicted-native-generation");
+        let manager = ExecutionManager::load_at(path.clone());
+        let (claimed, admitted, _) = manager.admit_xcsh_resume(&resume_params(6)).unwrap();
+        assert!(admitted);
+        manager.mark_start_failed(&claimed.execution_id, "test settlement");
+        for index in 0..MAX_RECORDS {
+            manager
+                .admit_visible(&params(&format!("eviction-{index}")))
+                .unwrap();
+        }
+        assert!(manager.get(&claimed.execution_id).is_none());
+        drop(manager);
+
+        let reloaded = ExecutionManager::load_at(path.clone());
+        let retry = reloaded.admit_xcsh_resume(&resume_params(6)).unwrap_err();
+        assert!(retry.starts_with("execution_expired"));
+        let collision = reloaded
+            .admit_visible(&params("semantic-task"))
+            .unwrap_err();
+        assert!(collision.starts_with("execution_namespace_conflict"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn active_native_record_survives_history_churn_and_restart() {
+        let path = temp("active-native-retention");
+        let manager = ExecutionManager::load_at(path.clone());
+        let (claimed, admitted, _) = manager.admit_xcsh_resume(&resume_params(6)).unwrap();
+        assert!(admitted);
+        manager
+            .attach_visible(
+                &claimed.execution_id,
+                77,
+                "w1:p77".into(),
+                "w1:t1".into(),
+                Some(77),
+            )
+            .unwrap();
+        for index in 0..=MAX_RECORDS {
+            let id = format!("settled-{index}");
+            manager.admit_visible(&params(&id)).unwrap();
+            manager.mark_start_failed(&id, "test settlement");
+        }
+        assert_eq!(
+            manager.get(&claimed.execution_id).unwrap().state,
+            ExecutionState::Running
+        );
+        drop(manager);
+
+        let reloaded = ExecutionManager::load_at(path.clone());
+        let retained = reloaded.get(&claimed.execution_id).unwrap();
+        assert_eq!(retained.state, ExecutionState::Lost);
+        assert_eq!(
+            reloaded
+                .resolve_agent_turn_execution("semantic-task", "xcsh", "0123abcd4567ef89", 6,)
+                .unwrap()
+                .execution_id,
+            claimed.execution_id
+        );
         let _ = std::fs::remove_file(path);
     }
     #[test]
@@ -569,6 +1068,13 @@ mod tests {
             revision: 1,
             records: vec![ExecutionRecord {
                 execution_id: "old".into(),
+                backend_execution_id: None,
+                semantic_execution_id: None,
+                generation: None,
+                native_producer: None,
+                producer_session_id: None,
+                injected_env: BTreeMap::new(),
+                superseded_by_backend_execution_id: None,
                 cwd: "/tmp".into(),
                 command: ExecutionCommand::Argv {
                     argv: vec!["x".into()],
@@ -593,6 +1099,7 @@ mod tests {
                 output_complete: false,
                 evidence_gap: None,
             }],
+            native_reservations: BTreeMap::new(),
             tombstones: Vec::new(),
             expired_id_filter: Vec::new(),
         };

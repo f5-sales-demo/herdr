@@ -1091,6 +1091,9 @@ impl App {
             Method::ExecutionStart(params) => {
                 return self.handle_execution_start(request.id, params)
             }
+            Method::ExecutionResume(params) => {
+                return self.handle_execution_resume(request.id, params)
+            }
             Method::ExecutionCancel(target) => {
                 return self.handle_execution_cancel(request.id, target.execution_id)
             }

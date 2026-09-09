@@ -2241,6 +2241,48 @@
           },
           "type": "object"
         },
+        "ExecutionResumeParams": {
+          "description": "Admit an XCSH child for one immutable semantic execution generation.\n\n`execution_id` is owned by the producer's semantic task. Herdr assigns a\ndifferent `backend_execution_id` for the visible child it launches.\n\n`session_id` must be XCSH SessionHeader's canonical 16-character lowercase\nhexadecimal Snowflake ID.\nXCSH's convenient ID-prefix and path selectors are intentionally rejected:\nthey cannot provide the exact durable reporter binding this API requires.",
+          "properties": {
+            "cwd": {
+              "type": "string"
+            },
+            "execution_id": {
+              "type": "string"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "execution_id",
+            "generation",
+            "session_id",
+            "text",
+            "cwd"
+          ],
+          "type": "object"
+        },
         "ExecutionStartParams": {
           "oneOf": [
             {
@@ -5907,6 +5949,22 @@
         {
           "properties": {
             "method": {
+              "const": "execution.resume",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExecutionResumeParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "execution.get",
               "type": "string"
             },
@@ -7578,6 +7636,13 @@
               "minimum": 0,
               "type": "integer"
             },
+            "backend_execution_id": {
+              "description": "Herdr-owned visible-child identity. It differs from `execution_id` for\nnative resumes and is the target for cancellation and observation.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "cancel_requested": {
               "default": false,
               "type": "boolean"
@@ -7612,6 +7677,26 @@
                 "null"
               ]
             },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "injected_env": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "native_producer": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "output_complete": {
               "default": false,
               "type": "boolean"
@@ -7634,10 +7719,22 @@
                 "null"
               ]
             },
+            "producer_session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "revision": {
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            },
+            "semantic_execution_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "signal": {
               "format": "int32",
@@ -7682,6 +7779,12 @@
             "stdout_tail": {
               "default": "",
               "type": "string"
+            },
+            "superseded_by_backend_execution_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "tab_id": {
               "type": [

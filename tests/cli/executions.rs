@@ -1,6 +1,272 @@
 use super::harness::*;
 
 #[test]
+fn native_resume_socket_claim_is_idempotent_and_rejects_replay_conflicts() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    let request = |id: &str, text: &str| {
+        serde_json::json!({
+            "id": id, "method": "execution.resume", "params": {
+                "execution_id": "semantic-replay", "generation": 3,
+                "session_id": "0123abcd4567ef89", "text": text, "cwd": base,
+            }
+        })
+    };
+    // No workspace means the post-claim launch is deliberately rejected. This
+    // exercises the socket contract without opening an external XCSH session.
+    let first = send_request(
+        &socket_path,
+        &request("native-first", "continue").to_string(),
+    );
+    assert_eq!(first["error"]["code"], "workspace_not_found");
+    let backend = send_request(
+        &socket_path,
+        r#"{"id":"native-list","method":"execution.list","params":{"since_revision":0}}"#,
+    );
+    let execution = &backend["result"]["executions"][0];
+    assert_ne!(execution["execution_id"], "semantic-replay");
+    assert_eq!(execution["semantic_execution_id"], "semantic-replay");
+    assert_eq!(execution["generation"], 3);
+    assert_eq!(
+        execution["injected_env"]["HERDR_EXECUTION_ID"],
+        "semantic-replay"
+    );
+    assert_eq!(execution["injected_env"]["HERDR_EXECUTION_GENERATION"], "3");
+    let duplicate = send_request(
+        &socket_path,
+        &request("native-retry", "continue").to_string(),
+    );
+    assert_eq!(duplicate["result"]["admitted"], false);
+    let conflict = send_request(
+        &socket_path,
+        &request("native-conflict", "different").to_string(),
+    );
+    assert_eq!(conflict["error"]["code"], "execution_generation_conflict");
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[cfg(unix)]
+#[test]
+fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let bin_dir = base.join("bin");
+    let args_path = base.join("xcsh-args");
+    let env_path = base.join("xcsh-env");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fixture = bin_dir.join("xcsh");
+    fs::write(
+        &fixture,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n%s\\n%s\\n%s\\n' \"$HERDR_EXECUTION_ID\" \"$HERDR_EXECUTION_GENERATION\" \"$HERDR_SOCKET_PATH\" \"$HERDR_PANE_ID\" > '{}'\nsleep 1\npython3 - \"$HERDR_SOCKET_PATH\" \"$HERDR_PANE_ID\" \"$HERDR_EXECUTION_ID\" \"$HERDR_EXECUTION_GENERATION\" <<'PY'\nimport json, socket, sys\nsock, pane, execution, generation = sys.argv[1:]\nframe = {{'method':'agent.turn.report','params':{{'execution_id':execution,'pane_id':pane,'producer':'xcsh','session_id':'0123abcd4567ef89','turn_id':'fixture-turn','generation':int(generation),'event_revision':1,'state':'starting'}}}}\nfor request_id in ('fixture-first', 'fixture-replay'):\n    frame['id'] = request_id\n    client = socket.socket(socket.AF_UNIX)\n    client.connect(sock)\n    client.sendall((json.dumps(frame) + '\\n').encode())\n    client.recv(65536)\n    client.close()\nPY\nsleep 30\n",
+            args_path.display(),
+            env_path.display(),
+        ),
+    ).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&fixture, fs::Permissions::from_mode(0o755)).unwrap();
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let path_override = format!("{}:{inherited_path}", bin_dir.display());
+    let herdr = spawn_herdr_with_path(
+        &config_home,
+        &runtime_dir,
+        &socket_path,
+        Some(Path::new(&path_override)),
+    );
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    assert!(run_cli(
+        &socket_path,
+        &[
+            "workspace",
+            "create",
+            "--cwd",
+            base.to_str().unwrap(),
+            "--focus"
+        ]
+    )
+    .status
+    .success());
+    for invalid_session in [
+        "0123abcd",
+        "/tmp/xcsh-session.jsonl",
+        "0123ABCD4567EF89",
+        "123e4567-e89b-12d3-a456-426614174000",
+    ] {
+        let rejected = send_request(
+            &socket_path,
+            &serde_json::json!({
+                "id": format!("invalid-{invalid_session}"), "method": "execution.resume", "params": {
+                    "execution_id": "semantic-rejected", "generation": 10,
+                    "session_id": invalid_session, "text": "fixture", "cwd": base,
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(rejected["error"]["code"], "invalid_xcsh_session_id");
+        assert!(
+            !args_path.exists(),
+            "invalid session selector launched xcsh"
+        );
+    }
+    let resumed = send_request(
+        &socket_path,
+        &serde_json::json!({
+            "id": "native-child", "method": "execution.resume", "params": {
+                "execution_id": "semantic-child", "generation": 11,
+            "session_id": "0123abcd4567ef89", "text": "fixture", "cwd": base,
+            }
+        })
+        .to_string(),
+    );
+    let execution = &resumed["result"]["execution"];
+    assert_ne!(execution["execution_id"], "semantic-child");
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        if args_path.exists() && env_path.exists() {
+            let turns = send_request(
+                &socket_path,
+                r#"{"id":"fixture-turns","method":"agent.turn.list","params":{"since_revision":0}}"#,
+            );
+            if turns["result"]["turns"]
+                .as_array()
+                .is_some_and(|turns| turns.len() == 1)
+            {
+                break;
+            }
+        }
+        assert!(Instant::now() < deadline, "fixture child did not report");
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(
+        fs::read_to_string(&args_path).unwrap(),
+        "--resume\n0123abcd4567ef89\nfixture\n"
+    );
+    let env = fs::read_to_string(&env_path).unwrap();
+    let lines: Vec<_> = env.lines().collect();
+    assert_eq!(&lines[..2], ["semantic-child", "11"]);
+    assert!(!lines[2].is_empty() && !lines[3].is_empty());
+    let backend_id = execution["execution_id"].as_str().unwrap();
+    for index in 0..=256 {
+        let churn = send_request(
+            &socket_path,
+            &serde_json::json!({
+                "id": format!("churn-{index}"), "method": "execution.start", "params": {
+                    "execution_id": format!("settled-history-{index}"),
+                    "cwd": base, "workspace_id": "w999", "mode": "argv", "argv": ["/bin/true"]
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(churn["error"]["code"], "workspace_not_found");
+    }
+    let retained = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"fixture-retained","method":"execution.get","params":{{"execution_id":"{backend_id}"}}}}"#
+        ),
+    );
+    assert_eq!(retained["result"]["execution"]["state"], "running");
+    let post_churn_report = send_request(
+        &socket_path,
+        &serde_json::json!({
+            "id": "fixture-after-churn", "method": "agent.turn.report", "params": {
+                "execution_id": "semantic-child", "pane_id": execution["pane_id"], "producer": "xcsh",
+                "session_id": "0123abcd4567ef89", "turn_id": "fixture-after-churn",
+                "generation": 11, "event_revision": 1, "state": "starting"
+            }
+        })
+        .to_string(),
+    );
+    assert!(
+        post_churn_report.get("error").is_none(),
+        "post-churn reporter was rejected: {post_churn_report}"
+    );
+    let second = send_request(&socket_path, &serde_json::json!({
+        "id":"fixture-next", "method":"execution.resume", "params": {
+            "execution_id":"semantic-child", "generation":12, "session_id":"0123abcd4567ef89", "text":"fixture", "cwd":base
+        }
+    }).to_string());
+    assert_eq!(second["result"]["admitted"], true);
+    let handoff_deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let old = send_request(
+            &socket_path,
+            &format!(
+                r#"{{"id":"fixture-handoff-old","method":"execution.get","params":{{"execution_id":"{backend_id}"}}}}"#
+            ),
+        );
+        if old["result"]["execution"]["state"] == "cancelled" {
+            break;
+        }
+        assert!(
+            Instant::now() < handoff_deadline,
+            "next generation did not settle the old child: {old}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    let duplicate_second = send_request(&socket_path, &serde_json::json!({
+        "id":"fixture-next-retry", "method":"execution.resume", "params": {
+            "execution_id":"semantic-child", "generation":12, "session_id":"0123abcd4567ef89", "text":"fixture", "cwd":base
+        }
+    }).to_string());
+    assert_eq!(duplicate_second["result"]["admitted"], false);
+    let old_after_retry = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"fixture-handoff-old-retry","method":"execution.get","params":{{"execution_id":"{backend_id}"}}}}"#
+        ),
+    );
+    assert_eq!(old_after_retry["result"]["execution"]["state"], "cancelled");
+    assert_eq!(
+        old_after_retry["result"]["execution"]["superseded_by_backend_execution_id"],
+        second["result"]["execution"]["execution_id"]
+    );
+    let current_backend_id = second["result"]["execution"]["execution_id"]
+        .as_str()
+        .unwrap();
+    let cancelled = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"fixture-current-cancel","method":"execution.cancel","params":{{"execution_id":"{current_backend_id}"}}}}"#
+        ),
+    );
+    assert!(cancelled.get("error").is_none());
+    let cancel_deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let current = send_request(
+            &socket_path,
+            &format!(
+                r#"{{"id":"fixture-current","method":"execution.get","params":{{"execution_id":"{current_backend_id}"}}}}"#
+            ),
+        );
+        if current["result"]["execution"]["state"] == "cancelled" {
+            break;
+        }
+        assert!(
+            Instant::now() < cancel_deadline,
+            "current backend cancellation did not terminate its child"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    let old = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"fixture-old","method":"execution.get","params":{{"execution_id":"{backend_id}"}}}}"#
+        ),
+    );
+    assert!(old["result"]["execution"]["cancel_requested"]
+        .as_bool()
+        .unwrap());
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn visible_execution_owns_a_background_tab_input_exit_and_idempotency() {
     let base = unique_test_dir();
     let config_home = base.join("config");

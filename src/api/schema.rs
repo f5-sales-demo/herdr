@@ -215,6 +215,8 @@ pub enum Method {
     EventsWait(EventsWaitParams),
     #[serde(rename = "execution.start")]
     ExecutionStart(ExecutionStartParams),
+    #[serde(rename = "execution.resume")]
+    ExecutionResume(ExecutionResumeParams),
     #[serde(rename = "execution.get")]
     ExecutionGet(ExecutionTarget),
     #[serde(rename = "execution.list")]

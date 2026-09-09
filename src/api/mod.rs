@@ -23,6 +23,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
     matches!(
         &request.method,
         Method::ExecutionStart(_)
+            | Method::ExecutionResume(_)
             | Method::ExecutionCancel(_)
             | Method::ServerReloadConfig(_)
             | Method::ServerReloadAgentManifests(_)
