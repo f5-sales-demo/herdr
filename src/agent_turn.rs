@@ -647,7 +647,9 @@ mod tests {
             native_capability: cap.clone(),
             after_revision: 0,
         };
-        assert!(executions.native_actions(&target).unwrap()[0].settled_at_unix_ms.is_some());
+        assert!(executions.native_actions(&target).unwrap()[0]
+            .settled_at_unix_ms
+            .is_some());
         let mut altered = starting;
         altered.reason = Some("altered".into());
         assert!(turns
