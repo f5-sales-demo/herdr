@@ -38,6 +38,32 @@ def github_pr_evidence(repository: str, sha: str, token: str) -> list[dict[str, 
         return json.load(response)
 
 
+def github_check_runs(repository: str, sha: str, token: str) -> list[dict[str, object]]:
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{repository}/commits/{sha}/check-runs",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    with urllib.request.urlopen(request) as response:  # noqa: S310 -- fixed GitHub API origin
+        payload = json.load(response)
+    return payload.get("check_runs", [])
+
+
+def has_passing_conventional_check(
+    repository: str,
+    sha: str,
+    token: str,
+    checks: Callable[[str, str, str], list[dict[str, object]]],
+) -> bool:
+    return any(
+        check.get("name") == "conventional-commits" and check.get("conclusion") == "success"
+        for check in checks(repository, sha, token)
+    )
+
+
 def is_recorded_pr_merge(
     subject: str,
     sha: str,
@@ -45,6 +71,7 @@ def is_recorded_pr_merge(
     base_ref: str,
     token: str,
     evidence: Callable[[str, str, str], list[dict[str, object]]] = github_pr_evidence,
+    checks: Callable[[str, str, str], list[dict[str, object]]] = github_check_runs,
 ) -> bool:
     for pull in evidence(repository, sha, token):
         base = pull.get("base")
@@ -56,6 +83,8 @@ def is_recorded_pr_merge(
             and pull.get("merge_commit_sha") == sha
             and base.get("ref") == base_ref
             and valid_subject(str(pull.get("title", "")))
+            and isinstance(pull.get("head"), dict)
+            and has_passing_conventional_check(repository, str(pull["head"].get("sha", "")), token, checks)
         ):
             return True
     return False
@@ -67,12 +96,14 @@ def invalid_merge_subjects(
     base_ref: str,
     token: str,
     evidence: Callable[[str, str, str], list[dict[str, object]]] = github_pr_evidence,
+    checks: Callable[[str, str, str], list[dict[str, object]]] = github_check_runs,
     cwd: Path | None = None,
 ) -> list[tuple[str, str]]:
     return [
         (sha, subject)
         for sha, subject in merge_subjects(rev_range, cwd=cwd)
-        if not valid_subject(subject) and not is_recorded_pr_merge(subject, sha, repository, base_ref, token, evidence)
+        if not valid_subject(subject)
+        and not is_recorded_pr_merge(subject, sha, repository, base_ref, token, evidence, checks)
     ]
 
 

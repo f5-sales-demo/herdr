@@ -257,7 +257,7 @@ class ConventionalCommitTests(unittest.TestCase):
             self.assertNotEqual(validate("--range", f"{base}..{merge}").returncode, 0)
             self.assertEqual(
                 validate_merge_commits.invalid_merge_subjects(
-                    f"{base}..{merge}", "owner/repo", "main", "token", lambda *_: [], repo
+                    f"{base}..{merge}", "owner/repo", "main", "token", lambda *_: [], lambda *_: [], repo
                 ),
                 [(merge, "Merge direct invalid feature")],
             )
@@ -270,7 +270,7 @@ class ConventionalCommitTests(unittest.TestCase):
             self.assertEqual(validate("--range", f"{merge}..{invalid_subject_merge}").returncode, 0)
             self.assertEqual(
                 validate_merge_commits.invalid_merge_subjects(
-                    f"{merge}..{invalid_subject_merge}", "owner/repo", "main", "token", lambda *_: [], repo
+                    f"{merge}..{invalid_subject_merge}", "owner/repo", "main", "token", lambda *_: [], lambda *_: [], repo
                 ),
                 [(invalid_subject_merge, "Merge invalid subject with valid side")],
             )
@@ -284,7 +284,7 @@ class ConventionalCommitTests(unittest.TestCase):
             self.assertEqual(validate("--range", f"{merge}..{valid_head}").returncode, 0)
             self.assertEqual(
                 validate_merge_commits.invalid_merge_subjects(
-                    f"{invalid_subject_merge}..{valid_merge}", "owner/repo", "main", "token", lambda *_: [], repo
+                    f"{invalid_subject_merge}..{valid_merge}", "owner/repo", "main", "token", lambda *_: [], lambda *_: [], repo
                 ),
                 [],
             )
@@ -328,17 +328,26 @@ class ConventionalCommitTests(unittest.TestCase):
             "merged_at": "2026-09-09T00:00:00Z",
             "merge_commit_sha": sha,
             "base": {"ref": "build-xcsh"},
+            "head": {"sha": "b" * 40},
             "title": "fix(ci): preserve merge constituent validation",
         }]
+        passing_checks = [{"name": "conventional-commits", "conclusion": "success"}]
         self.assertTrue(
             validate_merge_commits.is_recorded_pr_merge(
-                subject, sha, "owner/repo", "build-xcsh", "token", lambda *_: recorded
+                subject, sha, "owner/repo", "build-xcsh", "token", lambda *_: recorded, lambda *_: passing_checks
             )
         )
         recorded[0]["title"] = "invalid merge title"
         self.assertFalse(
             validate_merge_commits.is_recorded_pr_merge(
-                subject, sha, "owner/repo", "build-xcsh", "token", lambda *_: recorded
+                subject, sha, "owner/repo", "build-xcsh", "token", lambda *_: recorded, lambda *_: passing_checks
+            )
+        )
+        recorded[0]["title"] = "fix(ci): preserve merge constituent validation"
+        passing_checks[0]["conclusion"] = "failure"
+        self.assertFalse(
+            validate_merge_commits.is_recorded_pr_merge(
+                subject, sha, "owner/repo", "build-xcsh", "token", lambda *_: recorded, lambda *_: passing_checks
             )
         )
 
