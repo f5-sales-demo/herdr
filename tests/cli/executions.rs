@@ -210,7 +210,7 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
     assert_eq!(
         fs::read_to_string(&args_path).unwrap(),
         format!(
-            "--mode\njson\n--session-dir\n{}\n--resume\n{}\n--model\ntest/model\n--tools\nread\n--no-mcp\n--no-lsp\n--no-pty\n--print\nfixture\n",
+            "--mode\njson\n--session-dir\n{}\n--resume\n{}\n--model\ntest/model\n--tools\nread\n--no-mcp\n--no-lsp\n--no-memories\n--no-skills\n--no-rules\n--no-pty\n--print\nfixture\n",
             session_dir.display(),
             session_path.display(),
         )

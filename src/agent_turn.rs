@@ -107,12 +107,11 @@ impl AgentTurnManager {
         // same authenticated revision-1 starting frame may remove that exact
         // synthetic marker and resume confirmation; no terminal producer event
         // is reset or fabricated.
-        recover_synthetic_restart_lost(&mut state, &report);
-        let latest = state
-            .records
-            .iter()
-            .rev()
-            .find(|record| same_turn(&record.report, &report));
+        let recovering_start = recover_synthetic_restart_lost(&state, &report);
+        let latest = state.records.iter().rev().find(|record| {
+            same_turn(&record.report, &report)
+                && !(recovering_start && is_synthetic_restart_lost(&record.report))
+        });
         if latest.is_none()
             && state
                 .tombstones
@@ -289,30 +288,28 @@ fn same_turn(left: &AgentTurnReportParams, right: &AgentTurnReportParams) -> boo
         && left.generation == right.generation
 }
 
-fn recover_synthetic_restart_lost(state: &mut State, report: &AgentTurnReportParams) -> bool {
+fn is_synthetic_restart_lost(report: &AgentTurnReportParams) -> bool {
+    report.state == AgentTurnState::Lost
+        && report.reason.as_deref()
+            == Some("Herdr restarted before the semantic turn reached a terminal state")
+        && report.event_revision == 2
+}
+
+fn recover_synthetic_restart_lost(state: &State, report: &AgentTurnReportParams) -> bool {
     if report.state != AgentTurnState::Starting || report.event_revision != 1 {
         return false;
     }
     let Some(index) = state.records.iter().rposition(|candidate| {
-        same_turn(&candidate.report, report)
-            && candidate.report.state == AgentTurnState::Lost
-            && candidate.report.reason.as_deref()
-                == Some("Herdr restarted before the semantic turn reached a terminal state")
-            && candidate.report.event_revision == 2
+        same_turn(&candidate.report, report) && is_synthetic_restart_lost(&candidate.report)
     }) else {
         return false;
     };
-    if state.records[..index].iter().rev().any(|candidate| {
+    state.records[..index].iter().rev().any(|candidate| {
         same_turn(&candidate.report, report)
             && candidate.report.state == AgentTurnState::Starting
             && candidate.report.event_revision == 1
             && candidate.report == *report
-    }) {
-        state.records.remove(index);
-        true
-    } else {
-        false
-    }
+    })
 }
 
 fn matches_target(target: &AgentTurnTarget, report: &AgentTurnReportParams) -> bool {
@@ -436,7 +433,7 @@ mod tests {
         lost.state = AgentTurnState::Lost;
         lost.reason =
             Some("Herdr restarted before the semantic turn reached a terminal state".into());
-        let mut state = State {
+        let state = State {
             revision: 2,
             records: vec![
                 AgentTurnRecord {
@@ -452,11 +449,11 @@ mod tests {
             ],
             tombstones: Vec::new(),
         };
-        assert!(recover_synthetic_restart_lost(&mut state, &starting));
-        assert_eq!(state.records.len(), 1);
+        assert!(recover_synthetic_restart_lost(&state, &starting));
+        assert_eq!(state.records.len(), 2, "synthetic history is preserved");
         let mut foreign = starting.clone();
         foreign.pane_id = "w1:p2".into();
-        assert!(!recover_synthetic_restart_lost(&mut state, &foreign));
+        assert!(!recover_synthetic_restart_lost(&state, &foreign));
     }
 
     #[test]

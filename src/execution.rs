@@ -1330,10 +1330,11 @@ fn native_xcsh_argv(
     launch: &NativeLaunchV3,
     text: &str,
 ) -> Result<Vec<String>, String> {
-    let mut argv = vec![
-        executable.canonical_path.clone(),
-        "--mode".into(),
-        "json".into(),
+    let mut argv = vec![executable.canonical_path.clone()];
+    if !launch.interactive {
+        argv.extend(["--mode".into(), "json".into()]);
+    }
+    argv.extend([
         "--session-dir".into(),
         launch.session_dir.clone(),
         "--resume".into(),
@@ -1344,8 +1345,11 @@ fn native_xcsh_argv(
         "read".into(),
         "--no-mcp".into(),
         "--no-lsp".into(),
+        "--no-memories".into(),
+        "--no-skills".into(),
+        "--no-rules".into(),
         "--no-pty".into(),
-    ];
+    ]);
     if !launch.interactive {
         argv.push("--print".into());
     }
@@ -1505,6 +1509,24 @@ mod tests {
             .contains("generation_conflict"));
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(alternate);
+    }
+
+    #[test]
+    fn interactive_native_argv_omits_json_mode_and_reduced_policy_flags_are_complete() {
+        let mut params = resume_params(1);
+        params.native_launch.interactive = true;
+        let binding = measure_xcsh_executable(&params.native_launch.xcsh_executable).unwrap();
+        let argv = native_xcsh_argv(&binding, &params.native_launch, &params.text).unwrap();
+        assert!(!argv.windows(2).any(|pair| pair == ["--mode", "json"]));
+        for flag in [
+            "--no-mcp",
+            "--no-lsp",
+            "--no-memories",
+            "--no-skills",
+            "--no-rules",
+        ] {
+            assert!(argv.iter().any(|argument| argument == flag));
+        }
     }
 
     #[test]
