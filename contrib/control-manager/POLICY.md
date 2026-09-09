@@ -22,6 +22,8 @@ identity. Capability refreshes resume and reload the exact thread in place;
 candidate creation or promotion is a separately authorized manual operation.
 Liveness checks use metadata-only reads and subscribed lifecycle events, not
 repeated full-history hydration.
+Optional diagnostic adapters remain visible in health reports but are excluded
+from aggregate recovery success because the supervisor cannot repair them.
 
 A terminal reconnect failure is actionable only when a bounded visible or
 detection read contains the complete fatal reconnect screen and footer, and
