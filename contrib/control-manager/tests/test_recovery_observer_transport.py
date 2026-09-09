@@ -226,8 +226,10 @@ class HoldSemanticsTests(unittest.TestCase):
                     return {}
                 if method == "thread/read":
                     self.reads += 1
-                    return {"thread": {"id": "canonical", "status": "idle", "turns": [
-                        {"id": "turn", "status": self.status, "error": self.error}]}}
+                    self.assert_metadata = params["includeTurns"] is False
+                    return {"thread": {"id": "canonical", "status": "idle"}}
+                if method == "thread/turns/list":
+                    return {"data": [{"id": "turn", "status": self.status, "error": self.error}]}
                 raise AssertionError(method)
             def _receive_json(self, timeout=None):
                 raise RuntimeError("stop fixture")

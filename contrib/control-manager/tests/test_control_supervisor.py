@@ -272,6 +272,41 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result['state'],'completed')
             self.assertEqual(runner.call_args.args[0],[str(binary),'app-server','daemon','restart'])
 
+    async def test_automatic_capability_refresh_preserves_canonical_thread_in_place(self):
+        from unittest.mock import AsyncMock, patch
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw); config=root/'machine.json'; config.write_text(json.dumps({
+                'supervisor_mode':'guarded_live','recovery_live_enabled':True,
+                'manager_thread_id':'canonical-thread','app_server_socket':'fixture.sock',
+            }))
+            supervisor=Supervisor(root/'socket',root/'state.sqlite3',config)
+            with patch('control_supervisor.bounded_process',AsyncMock(return_value=(0,'{}',''))) as runner:
+                result=await supervisor._run_action(
+                    supervisor.bindings(),{'action_id':'refresh-fixture'},'refresh_capabilities'
+                )
+            self.assertEqual(result['state'],'completed')
+            argv=runner.call_args.args[0]
+            self.assertEqual(argv[-2:],['refresh-tools-in-place','canonical-thread'])
+            self.assertNotIn('refresh-tools-activate',argv)
+
+    async def test_appserver_registration_unit_is_never_restarted_as_daemon(self):
+        from unittest.mock import AsyncMock, patch
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw); binary=root/'codex'; binary.write_text('#!/bin/sh\nexit 0\n'); binary.chmod(0o700)
+            config=root/'machine.json'; config.write_text(json.dumps({
+                'supervisor_mode':'guarded_live','recovery_live_enabled':True,
+                'codex_binary':str(binary),
+                'component_units':{'app_server':'codex-remote-control.service'},
+            }))
+            supervisor=Supervisor(root/'socket',root/'state.sqlite3',config)
+            with patch('control_supervisor.bounded_process',AsyncMock()) as runner:
+                result=await supervisor._run_action(
+                    supervisor.bindings(),{'action_id':'registration-fixture'},'restart_app_server'
+                )
+            self.assertEqual(result['state'],'waiting_rollout')
+            self.assertIn('not runtime daemons',result['reason'])
+            runner.assert_not_awaited()
+
     async def test_guarded_live_requires_explicit_live_gate(self):
         with tempfile.TemporaryDirectory() as raw:
             root=Path(raw); config=root/'machine.json'; config.write_text(json.dumps({

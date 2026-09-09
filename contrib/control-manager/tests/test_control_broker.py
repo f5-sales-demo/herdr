@@ -231,6 +231,7 @@ class TestBroker(Broker):
         self.herdr = FakeHerdr()
         self.alerts = []
         self.native_turn_status: dict[str, str] = {}
+        self.appserver_calls: list[tuple[list[str], dict[str, str] | None]] = []
 
     async def emit_attention(self, row):
         self.alerts.append((row["id"], row["state"], row["summary"]))
@@ -238,13 +239,29 @@ class TestBroker(Broker):
     async def _create_native_worker(self, row, text):
         return "01a07cad-d970-7393-82a4-14ae9a1c16ee", "fake-initial-turn"
 
-    async def _start_native_turn(self, row, text):
+    async def _start_native_turn(self, row, text, *, client_user_message_id=None):
         await self.herdr.request(
             "agent.prompt", {"target": row["agent_name"] or row["pane_id"], "text": text}
         )
         return "fake-turn"
 
-    async def _run_json_required(self, argv, timeout=30):
+    async def _run_json_required(self, argv, timeout=30, env=None):
+        self.appserver_calls.append((list(argv), env))
+        if "steer" in argv:
+            return {
+                "thread_id": argv[argv.index("--thread-id") + 1],
+                "turn_id": argv[argv.index("--expected-turn-id") + 1],
+                "client_user_message_id": argv[argv.index("--client-user-message-id") + 1],
+                "delivery": "accepted",
+            }
+        if "queue-list" in argv:
+            return {"thread_id": argv[argv.index("--thread-id") + 1], "submissions": []}
+        if "queue-delete" in argv:
+            return {
+                "thread_id": argv[argv.index("--thread-id") + 1],
+                "queued_submission_id": argv[argv.index("--queued-submission-id") + 1],
+                "deleted": True,
+            }
         if "status" in argv:
             turn_id = argv[argv.index("--turn-id") + 1]
             return {"turn_id": turn_id, "turn_status": self.native_turn_status.get(turn_id, "inProgress")}
@@ -504,7 +521,12 @@ class StateTests(unittest.TestCase):
             source = Path(__file__).parents[1]
             state = Path(raw) / "relocated-state"
             config = state / "machine.json"
-            env = os.environ | {"CODEX_CONTROL_ROOT": str(root), "CODEX_CONTROL_STATE_DIR": str(state)}
+            appserver_socket = Path(raw) / "owned-appserver.sock"
+            env = os.environ | {
+                "CODEX_CONTROL_ROOT": str(root),
+                "CODEX_CONTROL_STATE_DIR": str(state),
+                "CODEX_APP_SERVER_SOCKET": str(appserver_socket),
+            }
             installed = subprocess.run(["python3", str(source / "runtime/control_portable.py"), "install", "--source", str(source), "--target", str(root)], env=env, text=True, capture_output=True, check=True)
             self.assertEqual(json.loads(installed.stdout)["installed_root"], str(root))
             result = subprocess.run(["python3", str(root / "runtime/control_portable.py"), "bootstrap", "--root", str(root), "--state-dir", str(state)], env=env, text=True, capture_output=True, check=True)
@@ -512,6 +534,8 @@ class StateTests(unittest.TestCase):
             self.assertEqual(saved["control_root"], str(root))
             self.assertEqual(saved["state_dir"], str(state))
             self.assertEqual(saved["policy_file"], str(root / "POLICY.md"))
+            self.assertEqual(saved["app_server_socket"], str(appserver_socket))
+            self.assertEqual(saved["app_server_remote"], f"unix://{appserver_socket}")
             self.assertTrue(config.exists())
             self.assertNotIn(str(Path.home()), config.read_text())
 
@@ -1194,6 +1218,161 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(continued["state"], "working")
         self.assertIsNone(self.broker.db.task(task["id"])["cleanup_deadline"])
 
+    async def test_active_followup_steers_exact_turn_without_queue_or_generation_change(self):
+        task = await self.dispatch("active-correction")
+        await self.broker._start_task(self.broker.db.update(task["id"], state="starting"))
+        row = self.broker.db.task(task["id"])
+        self.broker._native_session_exists = lambda value: value == row["agent_session_id"]
+        self.broker.herdr.panes[row["pane_id"]]["agent_status"] = "working"
+        generation = row["run_generation"]
+        result = await self.broker.continue_task({
+            "task_id": task["id"], "text": "use the corrected release hash",
+            "idempotency_key": "active-correction-1",
+        })
+        self.assertEqual(result["followup"]["state"], "accepted")
+        self.assertEqual(result["run_generation"], generation)
+        invocations = [argv for argv, _env in self.broker.appserver_calls]
+        self.assertTrue(any("steer" in argv for argv in invocations))
+        self.assertFalse(any("queue" in argv for argv in invocations))
+        self.assertEqual(result["native_turn_id"], row["native_turn_id"])
+
+    async def test_failed_active_turn_rejects_steer_without_releasing_future_work(self):
+        task = await self.dispatch("failed-turn-correction")
+        await self.broker._start_task(self.broker.db.update(task["id"], state="starting"))
+        row = self.broker.db.task(task["id"])
+        self.broker._native_session_exists = lambda value: value == row["agent_session_id"]
+        self.broker.herdr.panes[row["pane_id"]]["agent_status"] = "working"
+        async def rejected(argv, timeout=30, env=None):
+            self.assertIn("steer", argv)
+            return {"thread_id": row["agent_session_id"], "delivery": "rejected",
+                    "authoritative_turn_id": row["native_turn_id"],
+                    "authoritative_turn_status": "failed", "reason": "turn failed"}
+        self.broker._run_json_required = rejected
+        result = await self.broker.continue_task({
+            "task_id": task["id"], "text": "do not cancel the valid release",
+            "idempotency_key": "failed-turn-correction-1",
+        })
+        self.assertEqual(result["state"], "unknown")
+        self.assertEqual(result["followup"]["state"], "rejected")
+        self.assertEqual(result["run_generation"], row["run_generation"])
+        self.assertEqual(result["native_turn_id"], row["native_turn_id"])
+
+    async def test_uncertain_active_steer_is_durable_and_never_replayed(self):
+        task = await self.dispatch("uncertain-steer")
+        await self.broker._start_task(self.broker.db.update(task["id"], state="starting"))
+        row = self.broker.db.task(task["id"])
+        self.broker._native_session_exists = lambda value: value == row["agent_session_id"]
+        self.broker.herdr.panes[row["pane_id"]]["agent_status"] = "working"
+        attempts = 0
+        async def uncertain(argv, timeout=30, env=None):
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("response lost after possible delivery")
+        self.broker._run_json_required = uncertain
+        params = {"task_id": task["id"], "text": "preserve this exact intent",
+                  "idempotency_key": "uncertain-steer-1"}
+        first = await self.broker.continue_task(params)
+        second = await self.broker.continue_task(params)
+        self.assertEqual(attempts, 1)
+        self.assertEqual(first["followup"]["state"], "uncertain")
+        self.assertEqual(second["followup"]["state"], "uncertain")
+        status = self.broker.status(task["id"])["tasks"][0]
+        self.assertIn("preserve this exact intent", status["followups"][0]["text"])
+        self.assertEqual(status["run_generation"], row["run_generation"])
+
+    async def test_owned_legacy_queue_is_preserved_before_delete_and_foreign_input_isolated(self):
+        task = await self.dispatch("legacy-reconcile")
+        await self.broker._start_task(self.broker.db.update(task["id"], state="starting"))
+        row = self.broker.db.task(task["id"])
+        self.broker._native_session_exists = lambda value: value == row["agent_session_id"]
+        self.broker.herdr.panes[row["pane_id"]]["agent_status"] = "working"
+        owned_text = self.broker._followup_prompt(row, "old stale instruction")
+        owned = {"id": "queued-owned", "clientUserMessageId": "legacy-client",
+                 "input": [{"type": "text", "text": owned_text}]}
+        foreign = {"id": "queued-manual", "clientUserMessageId": "manual-client",
+                   "input": [{"type": "text", "text": "manual future request"}]}
+        deleted = []
+        async def appserver(argv, timeout=30, env=None):
+            if "queue-list" in argv:
+                return {"thread_id": row["agent_session_id"], "submissions": [owned, foreign]}
+            if "queue-delete" in argv:
+                preserved = self.broker.db.preserved_legacy_followups(task["id"])
+                self.assertEqual(preserved[0]["input"], owned["input"])
+                deleted.append(argv[argv.index("--queued-submission-id") + 1])
+                return {"thread_id": row["agent_session_id"],
+                        "queued_submission_id": deleted[-1], "deleted": True}
+            if "steer" in argv:
+                return {"thread_id": row["agent_session_id"], "turn_id": row["native_turn_id"],
+                        "client_user_message_id": argv[argv.index("--client-user-message-id") + 1],
+                        "delivery": "accepted"}
+            self.fail(argv)
+        self.broker._run_json_required = appserver
+        result = await self.broker.continue_task({
+            "task_id": task["id"], "text": "current correction",
+            "idempotency_key": "legacy-reconcile-1", "supersede_pending": True,
+        })
+        self.assertEqual(result["followup"]["state"], "accepted")
+        self.assertEqual(deleted, ["queued-owned"])
+        preserved = self.broker.status(task["id"])["tasks"][0]["preserved_legacy_followups"]
+        self.assertEqual(preserved[0]["state"], "superseded")
+        self.assertEqual(preserved[0]["input"], owned["input"])
+
+    async def test_legacy_delete_race_is_truthful_and_prevents_new_steer(self):
+        task = await self.dispatch("legacy-delete-race")
+        await self.broker._start_task(self.broker.db.update(task["id"], state="starting"))
+        row = self.broker.db.task(task["id"])
+        self.broker._native_session_exists = lambda value: value == row["agent_session_id"]
+        self.broker.herdr.panes[row["pane_id"]]["agent_status"] = "working"
+        owned = {"id": "queued-race", "clientUserMessageId": "legacy-race",
+                 "input": [{"type": "text", "text": self.broker._followup_prompt(row, "stale")}]}
+        calls = []
+        async def appserver(argv, timeout=30, env=None):
+            calls.append(argv)
+            if "queue-list" in argv:
+                return {"thread_id": row["agent_session_id"], "submissions": [owned]}
+            if "queue-delete" in argv:
+                return {"thread_id": row["agent_session_id"],
+                        "queued_submission_id": "queued-race", "deleted": False}
+            self.fail("steer must not run after uncertain delete")
+        self.broker._run_json_required = appserver
+        result = await self.broker.continue_task({
+            "task_id": task["id"], "text": "new correction",
+            "idempotency_key": "legacy-race-1", "supersede_pending": True,
+        })
+        self.assertEqual(result["state"], "unknown")
+        self.assertEqual(result["followup"]["state"], "uncertain")
+        self.assertFalse(any("steer" in argv for argv in calls))
+        preserved = self.broker.status(task["id"])["tasks"][0]["preserved_legacy_followups"]
+        self.assertEqual(preserved[0]["state"], "delete_uncertain")
+
+    async def test_same_turn_steer_keeps_generation_and_next_terminal_report_truthful(self):
+        task = await self.dispatch("terminal-after-steer")
+        await self.broker._start_task(self.broker.db.update(task["id"], state="starting"))
+        row = self.broker.db.task(task["id"])
+        self.broker._native_session_exists = lambda value: value == row["agent_session_id"]
+        self.broker.herdr.panes[row["pane_id"]]["agent_status"] = "working"
+        continued = await self.broker.continue_task({
+            "task_id": task["id"], "text": "correct current work",
+            "idempotency_key": "terminal-after-steer-1",
+        })
+        failed = await self.broker.report({
+            "task_id": task["id"], "state": "failed", "summary": "active turn failed transiently",
+        })
+        event = self.broker.db.conn.execute(
+            "SELECT generation FROM event_journal WHERE event_id=?", (failed["terminal_event_id"],)
+        ).fetchone()
+        self.assertEqual(continued["run_generation"], row["run_generation"])
+        self.assertEqual(event["generation"], row["run_generation"])
+
+    def test_worker_helpers_inherit_nondefault_owned_appserver_endpoint(self):
+        self.broker.config_path.write_text(json.dumps({
+            "app_server_socket": "/owned/appserver.sock",
+            "app_server_remote": "unix:///owned/appserver.sock",
+        }))
+        env = self.broker._appserver_env()
+        self.assertEqual(env["CODEX_APP_SERVER_SOCKET"], "/owned/appserver.sock")
+        self.assertEqual(env["CODEX_APP_SERVER_REMOTE"], "unix:///owned/appserver.sock")
+
     async def test_owned_pane_transport_uncertainty_does_not_replay_resume(self):
         task = await self.dispatch("rebind-retained-session")
         await self.broker._start_task(self.broker.db.update(task["id"], state="starting"))
@@ -1349,7 +1528,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.broker.herdr.panes[row["pane_id"]]["agent_status"] = "working"
         self.broker.db.update(task["id"], herdr_state="working")
 
-        async def completed_turn(argv, timeout=30):
+        async def completed_turn(argv, timeout=30, env=None):
             return {"thread_id": row["agent_session_id"], "turn_status": "completed"}
 
         self.broker._run_json_required = completed_turn

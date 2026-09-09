@@ -113,6 +113,8 @@ def controlctl() -> int:
     followup = subs.add_parser("continue")
     followup.add_argument("task_id")
     followup.add_argument("text")
+    followup.add_argument("--idempotency-key", required=True)
+    followup.add_argument("--supersede-pending", action="store_true")
     followup.add_argument("--wait", type=int, default=90, metavar="SECONDS")
     followup.add_argument("--json", action="store_true")
 
@@ -144,7 +146,12 @@ def controlctl() -> int:
             }
         else:
             method = "continue_task"
-            params = {"task_id": args.task_id, "text": args.text}
+            params = {
+                "task_id": args.task_id,
+                "text": args.text,
+                "idempotency_key": args.idempotency_key,
+                "supersede_pending": args.supersede_pending,
+            }
         if args.command in {"dispatch", "run"} and args.idempotency_key is not None:
             params["idempotency_key"] = args.idempotency_key
         task = request(

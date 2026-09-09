@@ -493,6 +493,35 @@ class StateDB:
                 execution_evidence TEXT NOT NULL DEFAULT 'admitted',
                 created_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS followup_deliveries (
+                followup_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                idempotency_key TEXT NOT NULL,
+                request_sha256 TEXT NOT NULL,
+                client_user_message_id TEXT NOT NULL,
+                delivery_kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                text TEXT NOT NULL,
+                expected_turn_id TEXT,
+                detail TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                UNIQUE(task_id,idempotency_key)
+            );
+            CREATE INDEX IF NOT EXISTS followup_deliveries_task_idx
+              ON followup_deliveries(task_id,created_at);
+            CREATE TABLE IF NOT EXISTS preserved_legacy_followups (
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                thread_id TEXT NOT NULL,
+                queued_submission_id TEXT NOT NULL,
+                client_user_message_id TEXT NOT NULL,
+                input_json TEXT NOT NULL,
+                state TEXT NOT NULL,
+                detail TEXT,
+                preserved_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(task_id,thread_id,queued_submission_id)
+            );
             CREATE TABLE IF NOT EXISTS manager_attachment_recoveries (
                 action_id TEXT PRIMARY KEY,
                 claim_sha256 TEXT NOT NULL,
@@ -955,6 +984,120 @@ class StateDB:
 
     def task(self, task_id: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+
+    def claim_followup(
+        self,
+        *,
+        task_id: str,
+        idempotency_key: str,
+        request_sha256: str,
+        client_user_message_id: str,
+        delivery_kind: str,
+        text: str,
+        expected_turn_id: str | None,
+    ) -> tuple[sqlite3.Row, bool]:
+        existing = self.conn.execute(
+            "SELECT * FROM followup_deliveries WHERE task_id=? AND idempotency_key=?",
+            (task_id, idempotency_key),
+        ).fetchone()
+        if existing is not None:
+            if existing["request_sha256"] != request_sha256:
+                raise ValueError("continue_task idempotency key was reused with different arguments")
+            return existing, False
+        ts = self.clock()
+        followup_id = f"followup-{uuid.uuid4().hex}"
+        self.conn.execute(
+            """INSERT INTO followup_deliveries(
+                 followup_id,task_id,idempotency_key,request_sha256,client_user_message_id,
+                 delivery_kind,state,text,expected_turn_id,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                followup_id,
+                task_id,
+                idempotency_key,
+                request_sha256,
+                client_user_message_id,
+                delivery_kind,
+                "preparing",
+                text,
+                expected_turn_id,
+                ts,
+                ts,
+            ),
+        )
+        self.conn.commit()
+        return self.conn.execute(
+            "SELECT * FROM followup_deliveries WHERE followup_id=?", (followup_id,)
+        ).fetchone(), True
+
+    def update_followup(self, followup_id: str, state: str, detail: str | None = None) -> sqlite3.Row:
+        self.conn.execute(
+            "UPDATE followup_deliveries SET state=?,detail=?,updated_at=? WHERE followup_id=?",
+            (state, detail, self.clock(), followup_id),
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT * FROM followup_deliveries WHERE followup_id=?", (followup_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(followup_id)
+        return row
+
+    def followups(self, task_id: str) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.conn.execute(
+            "SELECT * FROM followup_deliveries WHERE task_id=? ORDER BY created_at",
+            (task_id,),
+        ).fetchall()]
+
+    def followup_by_idempotency(self, task_id: str, idempotency_key: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM followup_deliveries WHERE task_id=? AND idempotency_key=?",
+            (task_id, idempotency_key),
+        ).fetchone()
+
+    def preserve_legacy_followup(
+        self, task_id: str, thread_id: str, submission: dict[str, Any]
+    ) -> sqlite3.Row:
+        queued_id = str(submission["id"])
+        client_id = str(submission["clientUserMessageId"])
+        payload = json.dumps(submission["input"], separators=(",", ":"), sort_keys=True)
+        ts = self.clock()
+        self.conn.execute(
+            """INSERT INTO preserved_legacy_followups(
+                 task_id,thread_id,queued_submission_id,client_user_message_id,input_json,
+                 state,preserved_at,updated_at
+               ) VALUES(?,?,?,?,?,'preserved',?,?)
+               ON CONFLICT(task_id,thread_id,queued_submission_id) DO NOTHING""",
+            (task_id, thread_id, queued_id, client_id, payload, ts, ts),
+        )
+        self.conn.commit()
+        return self.conn.execute(
+            """SELECT * FROM preserved_legacy_followups
+               WHERE task_id=? AND thread_id=? AND queued_submission_id=?""",
+            (task_id, thread_id, queued_id),
+        ).fetchone()
+
+    def update_preserved_legacy(
+        self, task_id: str, thread_id: str, queued_id: str, state: str, detail: str | None = None
+    ) -> None:
+        self.conn.execute(
+            """UPDATE preserved_legacy_followups SET state=?,detail=?,updated_at=?
+               WHERE task_id=? AND thread_id=? AND queued_submission_id=?""",
+            (state, detail, self.clock(), task_id, thread_id, queued_id),
+        )
+        self.conn.commit()
+
+    def preserved_legacy_followups(self, task_id: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM preserved_legacy_followups WHERE task_id=? ORDER BY preserved_at",
+            (task_id,),
+        ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["input"] = json.loads(item.pop("input_json"))
+            result.append(item)
+        return result
 
     def target(self, target: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM targets WHERE target=?", (target,)).fetchone()
@@ -1552,6 +1695,17 @@ class Broker:
             LOG.warning("cannot load %s: %s", self.config_path, exc)
             return {}
 
+    def _appserver_env(self) -> dict[str, str]:
+        config = self.config()
+        env = os.environ.copy()
+        socket_path = config.get("app_server_socket")
+        remote = config.get("app_server_remote")
+        if isinstance(socket_path, str) and socket_path:
+            env["CODEX_APP_SERVER_SOCKET"] = socket_path
+        if isinstance(remote, str) and remote:
+            env["CODEX_APP_SERVER_REMOTE"] = remote
+        return env
+
     def _verified_supervisor_attachment_claim(self, action_id: str, claim_key: str,
                                               owner_generation: str | None = None) -> str:
         """Return the durable capability digest for a replacement request.
@@ -1801,7 +1955,7 @@ class Broker:
                     str(thread_id),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
-                    env=os.environ
+                    env=self._appserver_env()
                     | {
                         "CODEX_CONTROL_CONFIG_PATH": str(self.config_path),
                         "CODEX_CONTROL_MANAGER_CWD": str(config.get("manager_cwd", self.config_path.parent)),
@@ -2253,7 +2407,15 @@ class Broker:
         for row in rows:
             counts[row["state"]] += 1
         return {
-            "tasks": [public_task(row) | {"transitions": self.db.transitions(row["id"])} for row in rows],
+            "tasks": [
+                public_task(row)
+                | {
+                    "transitions": self.db.transitions(row["id"]),
+                    "followups": self.db.followups(row["id"]),
+                    "preserved_legacy_followups": self.db.preserved_legacy_followups(row["id"]),
+                }
+                for row in rows
+            ],
             "counts": counts,
             "running": self.db.running_count(),
             "pending_completions": self.db.pending_completions(limit=50, include_consumed=True),
@@ -2660,6 +2822,48 @@ class Broker:
             return await self._continue_xcsh_task(row, text or "")
         if row["work_kind"] != "codex":
             raise ValueError("continue_task is supported only for Codex work")
+        supplied_idempotency = params.get("idempotency_key")
+        idempotency_key = (
+            bounded(supplied_idempotency, 160, "idempotency_key", required=True)
+            if supplied_idempotency is not None
+            else f"compat-{uuid.uuid4().hex}"
+        )
+        supersede_pending = params.get("supersede_pending", False)
+        if not isinstance(supersede_pending, bool):
+            raise ValueError("supersede_pending must be a boolean")
+        request_sha256 = hashlib.sha256(
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "text": text,
+                    "supersede_pending": supersede_pending,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        existing = self.db.followup_by_idempotency(task_id or "", idempotency_key or "")
+        if existing is not None:
+            if existing["request_sha256"] != request_sha256:
+                raise ValueError("continue_task idempotency key was reused with different arguments")
+            if existing["state"] == "preparing":
+                existing = self.db.update_followup(
+                    existing["followup_id"],
+                    "uncertain",
+                    "broker restarted or caller retried after a response gap; delivery was not replayed",
+                )
+                current = self.db.task(task_id or "")
+                if current is not None and current["state"] not in TERMINAL_STATES:
+                    current = self.db.update(
+                        task_id or "",
+                        event="followup_delivery_uncertain",
+                        state="unknown",
+                        priority="attention",
+                        herdr_state="unknown",
+                        summary="Follow-up delivery is uncertain and was not replayed; inspect durable followup intent.",
+                    )
+                    asyncio.create_task(self.emit_attention(current))
+            return public_task(self.db.task(task_id or "")) | {"followup": dict(existing)}
         if row["session_state"] == "expired" or self.clock() - row["updated_at"] > SESSION_RETENTION_SECONDS:
             if row["session_state"] != "expired":
                 self.db.update(task_id or "", session_state="expired", agent_session_id=None)
@@ -2672,6 +2876,23 @@ class Broker:
             raise ValueError(f"native Codex session {session_id} no longer exists; no new session was created")
         self._cancel_cleanup(task_id or "")
         followup = self._followup_prompt(row, text or "")
+        client_user_message_id = f"control-followup-{uuid.uuid4()}"
+        delivery, _created = self.db.claim_followup(
+            task_id=task_id or "",
+            idempotency_key=idempotency_key or "",
+            request_sha256=request_sha256,
+            client_user_message_id=client_user_message_id,
+            delivery_kind="tracked_task_continuation",
+            text=followup,
+            expected_turn_id=str(row["native_turn_id"] or "") or None,
+        )
+        if supersede_pending:
+            try:
+                await self._supersede_legacy_followups(row)
+            except Exception as exc:
+                return self._uncertain_followup(
+                    row, delivery, f"legacy queue reconciliation is uncertain: {exc}"
+                )
         provenance, detail = await self._worker_binding_provenance(row)
         if provenance == "owned":
             try:
@@ -2680,48 +2901,117 @@ class Broker:
                 )
                 agent = result.get("agent", result)
                 if agent.get("pane_id") != row["pane_id"] or agent.get("agent") != "codex":
-                    return self._resume_admission_unverified(
-                        row, "the owned pane no longer exposes its recorded Codex agent"
-                    )
+                    detail = "the owned pane no longer exposes its recorded Codex agent"
+                    delivery = self.db.update_followup(delivery["followup_id"], "rejected", detail)
+                    return self._resume_admission_unverified(row, detail) | {"followup": dict(delivery)}
                 live_agent_state = agent.get("agent_status", row["herdr_state"])
             except Exception as exc:
                 # Do not create another client for a thread merely because a
                 # Herdr read was interrupted.  That is transport uncertainty,
                 # not proof that the previous client is gone.
-                return self._resume_admission_unverified(
-                    row, f"Herdr could not verify the retained owned agent: {str(exc)[:500]}"
-                )
+                detail = f"Herdr could not verify the retained owned agent: {str(exc)[:500]}"
+                delivery = self.db.update_followup(delivery["followup_id"], "rejected", detail)
+                return self._resume_admission_unverified(row, detail) | {"followup": dict(delivery)}
         elif provenance in {"foreign", "missing"}:
             # A recycled pane ID or a disappeared pane is safe to replace with
             # a new task tab.  _resume_task still uses this task's recorded
             # native thread; it never adopts the pane's identity.
-            return await self._resume_task(row, followup, prior_binding=provenance, prior_detail=detail)
+            resumed = await self._resume_task(
+                row,
+                followup,
+                prior_binding=provenance,
+                prior_detail=detail,
+                client_user_message_id=client_user_message_id,
+            )
+            if resumed["state"] == "working":
+                delivery = self.db.update_followup(
+                    delivery["followup_id"], "accepted", "new continuation turn accepted after exact-thread rebind"
+                )
+            elif resumed["state"] == "unknown":
+                delivery = self.db.update_followup(
+                    delivery["followup_id"], "uncertain", "continuation admission may have reached the rebound thread"
+                )
+            else:
+                delivery = self.db.update_followup(
+                    delivery["followup_id"], "rejected", "rebind failed before follow-up delivery"
+                )
+            return resumed | {"followup": dict(delivery)}
         else:
-            return self._resume_admission_unverified(row, detail)
+            delivery = self.db.update_followup(delivery["followup_id"], "rejected", detail)
+            return self._resume_admission_unverified(row, detail) | {"followup": dict(delivery)}
         if live_agent_state == "working":
-            await self._run_required(
-                [
-                    str(self.config().get("codex_binary") or shutil.which("codex") or "codex"),
-                    "queue",
-                    "--remote",
-                    str(self.config().get("app_server_remote", "unix://")),
-                    "--thread",
-                    session_id,
-                    "--message",
-                    followup,
-                ],
-                timeout=30,
+            expected_turn_id = str(row["native_turn_id"] or "")
+            if not expected_turn_id:
+                detail = "the active worker has no authoritative current turn id"
+                delivery = self.db.update_followup(delivery["followup_id"], "rejected", detail)
+                return self._resume_admission_unverified(row, detail) | {"followup": dict(delivery)}
+            try:
+                result = await self._run_json_required(
+                    [
+                        "/usr/bin/python3",
+                        str(runtime_root() / "worker_appserver.py"),
+                        "steer",
+                        "--thread-id",
+                        session_id,
+                        "--expected-turn-id",
+                        expected_turn_id,
+                        "--client-user-message-id",
+                        client_user_message_id,
+                        "--text",
+                        followup,
+                    ],
+                    timeout=30,
+                    env=self._appserver_env(),
+                )
+            except Exception as exc:
+                return self._uncertain_followup(row, delivery, str(exc))
+            if result.get("delivery") != "accepted":
+                detail = str(result.get("reason") or "active turn rejected steering")[:1000]
+                delivery = self.db.update_followup(delivery["followup_id"], "rejected", detail)
+                current = self.db.task(task_id or "")
+                if current is not None and current["state"] not in TERMINAL_STATES:
+                    current = self.db.update(
+                        task_id or "", event="followup_steer_rejected", state="unknown",
+                        priority="attention", herdr_state="unknown",
+                        summary=f"Follow-up was not delivered because the expected active turn changed: {detail}",
+                    )
+                    asyncio.create_task(self.emit_attention(current))
+                return public_task(self.db.task(task_id or "")) | {"followup": dict(delivery)}
+            if (
+                result.get("thread_id") != session_id
+                or result.get("turn_id") != expected_turn_id
+                or result.get("client_user_message_id") != client_user_message_id
+            ):
+                return self._uncertain_followup(
+                    row, delivery, "app-server steering acknowledgement identity mismatch"
+                )
+            delivery = self.db.update_followup(
+                delivery["followup_id"], "accepted", "accepted by turn/steer on the exact active turn"
             )
+            current = self.db.task(task_id or "")
+            if current is None:
+                raise RuntimeError("task disappeared after accepted steering")
+            self.db.conn.execute(
+                """UPDATE event_journal SET obsolete_at=?,obsolete_reason='superseded_by_same_turn_steer'
+                   WHERE task_id=? AND obsolete_at IS NULL AND event_id IN
+                     (SELECT event_id FROM completion_outbox WHERE client_delivered_at IS NULL)""",
+                (self.clock(), task_id),
+            )
+            self.db.conn.commit()
             updated = self.db.update(
-                task_id or "", event="followup_queued", state="working", finished_at=None,
-                terminal_reported_at=None, cleanup_deadline=None, session_state="live",
-                output_excerpt=None, output_expires_at=None,
-                run_generation=int(row["run_generation"]) + 1, terminal_event_id=None,
-                stop_requested_at=None,
-                summary="Follow-up queued in the same active Codex session.",
+                task_id or "", event="followup_steered", state="working", herdr_state="working",
+                finished_at=None, terminal_reported_at=None, cleanup_deadline=None,
+                output_excerpt=None, output_expires_at=None, terminal_event_id=None,
+                stop_requested_at=None, session_state="live",
+                summary="Follow-up correction accepted by the same active Codex turn.",
             )
-            return public_task(updated)
-        agent = await self._prompt_verified_agent(row, followup)
+            return public_task(updated) | {"followup": dict(delivery)}
+        try:
+            agent = await self._prompt_verified_agent(
+                row, followup, client_user_message_id=client_user_message_id
+            )
+        except Exception as exc:
+            return self._uncertain_followup(row, delivery, str(exc))
         session = agent.get("agent_session") or {}
         observed = session.get("value")
         if observed and observed != row["agent_session_id"]:
@@ -2737,7 +3027,90 @@ class Broker:
             agent_session_id=row["agent_session_id"],
             session_state="live", summary="Follow-up delivered to the same live Codex pane.",
         )
-        return public_task(updated)
+        delivery = self.db.update_followup(
+            delivery["followup_id"], "accepted", "new continuation turn accepted"
+        )
+        return public_task(updated) | {"followup": dict(delivery)}
+
+    def _uncertain_followup(
+        self, row: sqlite3.Row, delivery: sqlite3.Row, detail: str
+    ) -> dict[str, Any]:
+        delivery = self.db.update_followup(
+            delivery["followup_id"], "uncertain", detail[:1000]
+        )
+        current = self.db.task(row["id"])
+        if current is not None and current["state"] not in TERMINAL_STATES:
+            current = self.db.update(
+                row["id"], event="followup_delivery_uncertain", state="unknown",
+                priority="attention", herdr_state="unknown", cleanup_deadline=None,
+                summary="Follow-up delivery is uncertain and will not be replayed; inspect durable followup intent.",
+            )
+            asyncio.create_task(self.emit_attention(current))
+        return public_task(self.db.task(row["id"])) | {"followup": dict(delivery)}
+
+    @staticmethod
+    def _owned_legacy_followup(task_id: str, submission: dict[str, Any]) -> bool:
+        inputs = submission.get("input")
+        if not isinstance(inputs, list) or len(inputs) != 1 or not isinstance(inputs[0], dict):
+            return False
+        text = inputs[0].get("text")
+        prefix = f"Control Manager follow-up for existing task {task_id}. Continue this same workstream "
+        checkpoint = f"control-report --task-id {task_id} "
+        return (
+            inputs[0].get("type") == "text"
+            and isinstance(text, str)
+            and text.startswith(prefix)
+            and checkpoint in text
+            and isinstance(submission.get("id"), str)
+            and isinstance(submission.get("clientUserMessageId"), str)
+        )
+
+    async def _supersede_legacy_followups(self, row: sqlite3.Row) -> None:
+        thread_id = str(row["agent_session_id"] or "")
+        result = await self._run_json_required(
+            [
+                "/usr/bin/python3", str(runtime_root() / "worker_appserver.py"),
+                "queue-list", "--thread-id", thread_id,
+            ],
+            timeout=30,
+            env=self._appserver_env(),
+        )
+        if result.get("thread_id") != thread_id or not isinstance(result.get("submissions"), list):
+            raise RuntimeError("app-server returned an invalid queue inventory")
+        for submission in result["submissions"]:
+            if not isinstance(submission, dict) or not self._owned_legacy_followup(row["id"], submission):
+                continue
+            queued_id = submission["id"]
+            self.db.preserve_legacy_followup(row["id"], thread_id, submission)
+            try:
+                deleted = await self._run_json_required(
+                    [
+                        "/usr/bin/python3", str(runtime_root() / "worker_appserver.py"),
+                        "queue-delete", "--thread-id", thread_id,
+                        "--queued-submission-id", queued_id,
+                    ],
+                    timeout=30,
+                    env=self._appserver_env(),
+                )
+            except Exception as exc:
+                self.db.update_preserved_legacy(
+                    row["id"], thread_id, queued_id, "delete_uncertain", str(exc)[:1000]
+                )
+                raise RuntimeError(f"delete outcome for queued submission {queued_id} is uncertain") from exc
+            if (
+                deleted.get("thread_id") != thread_id
+                or deleted.get("queued_submission_id") != queued_id
+                or deleted.get("deleted") is not True
+            ):
+                self.db.update_preserved_legacy(
+                    row["id"], thread_id, queued_id, "delete_uncertain",
+                    "native delete did not affirm exact queued submission removal",
+                )
+                raise RuntimeError(f"queued submission {queued_id} was not affirmatively deleted")
+            self.db.update_preserved_legacy(
+                row["id"], thread_id, queued_id, "superseded",
+                "full payload preserved before exact native queue deletion",
+            )
 
     def _native_session_exists(self, session_id: str) -> bool:
         if not re.fullmatch(r"[A-Za-z0-9-]{20,80}", session_id):
@@ -2888,7 +3261,13 @@ class Broker:
         return public_task(updated)
 
     async def _resume_task(
-        self, row: sqlite3.Row, followup: str, *, prior_binding: str, prior_detail: str
+        self,
+        row: sqlite3.Row,
+        followup: str,
+        *,
+        prior_binding: str,
+        prior_detail: str,
+        client_user_message_id: str | None = None,
     ) -> dict[str, Any]:
         worker_env = {
             "CONTROL_TASK_ID": row["id"],
@@ -2929,7 +3308,9 @@ class Broker:
             if proof != "owned":
                 raise RuntimeError(f"new resume binding is {proof}: {proof_detail}")
             prompt_attempted = True
-            prompted = await self._prompt_verified_agent(rebound, followup)
+            prompted = await self._prompt_verified_agent(
+                rebound, followup, client_user_message_id=client_user_message_id
+            )
             prompted_session = prompted.get("agent_session") or {}
             observed = prompted_session.get("value")
             if observed and observed != row["agent_session_id"]:
@@ -3959,7 +4340,12 @@ class Broker:
         )
 
     async def _prompt_verified_agent(
-        self, row: sqlite3.Row, text: str, *, timeout: float = 30
+        self,
+        row: sqlite3.Row,
+        text: str,
+        *,
+        timeout: float = 30,
+        client_user_message_id: str | None = None,
     ) -> dict[str, Any]:
         """Prompt one exact live Codex pane and verify that pane changed state.
 
@@ -3983,7 +4369,9 @@ class Broker:
         before_seq = int(before.get("state_change_seq") or 0)
         if not text.strip():
             raise ValueError("worker prompt is empty")
-        turn_id = await self._start_native_turn(row, text)
+        turn_id = await self._start_native_turn(
+            row, text, client_user_message_id=client_user_message_id
+        )
         self.db.update(row["id"], native_turn_id=turn_id)
         self._schedule_native_turn_monitor(row["id"], turn_id)
         deadline = time.monotonic() + timeout
@@ -4025,6 +4413,7 @@ class Broker:
                 text,
             ],
             timeout=30,
+            env=self._appserver_env(),
         )
         session_id = result.get("thread_id")
         if not isinstance(session_id, str) or not re.fullmatch(
@@ -4037,12 +4426,13 @@ class Broker:
             raise RuntimeError("app-server created worker in an unexpected CWD")
         return session_id, str(result["turn_id"])
 
-    async def _start_native_turn(self, row: sqlite3.Row, text: str) -> str:
+    async def _start_native_turn(
+        self, row: sqlite3.Row, text: str, *, client_user_message_id: str | None = None
+    ) -> str:
         session_id = row["agent_session_id"]
         if not session_id:
             raise RuntimeError("worker has no native Codex session id")
-        result = await self._run_json_required(
-            [
+        argv = [
                 "/usr/bin/python3",
                 str(runtime_root() / "worker_appserver.py"),
                 "prompt",
@@ -4060,8 +4450,13 @@ class Broker:
                 row["reasoning_effort"] or "low",
                 "--text",
                 text,
-            ],
+            ]
+        if client_user_message_id:
+            argv.extend(["--client-user-message-id", client_user_message_id])
+        result = await self._run_json_required(
+            argv,
             timeout=30,
+            env=self._appserver_env(),
         )
         if result.get("thread_id") != session_id or not result.get("turn_id"):
             raise RuntimeError("app-server did not start the expected worker turn")
@@ -4105,6 +4500,7 @@ class Broker:
                     result = await self._run_json_required(
                         ["/usr/bin/python3", str(runtime_root() / "worker_appserver.py"),
                          "status", "--thread-id", row["agent_session_id"], "--turn-id", turn_id], timeout=10,
+                        env=self._appserver_env(),
                     )
                     status = result.get("turn_status")
                     if status in {"completed", "failed", "interrupted"}:
@@ -4160,6 +4556,7 @@ class Broker:
                             row["agent_session_id"],
                         ],
                         timeout=10,
+                        env=self._appserver_env(),
                     )
                     turn_status = result.get("turn_status")
                     if turn_status in {"completed", "failed", "interrupted"}:
@@ -4840,9 +5237,11 @@ Requested task:
             raise RuntimeError(f"command failed ({process.returncode}): {detail}")
 
     @staticmethod
-    async def _run_json_required(argv: list[str], timeout: float = 30) -> dict[str, Any]:
+    async def _run_json_required(
+        argv: list[str], timeout: float = 30, env: dict[str, str] | None = None
+    ) -> dict[str, Any]:
         process = await asyncio.create_subprocess_exec(
-            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env
         )
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
         if process.returncode:

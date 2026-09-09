@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Any
 
 
-PACKAGE_VERSION = 20
-STATE_SCHEMA_VERSION = 10
+PACKAGE_VERSION = 21
+STATE_SCHEMA_VERSION = 11
 
 
 def package_root() -> Path:
@@ -80,6 +80,10 @@ def bootstrap(root: Path, state: Path, config: Path) -> dict[str, Any]:
         raise ValueError(f"refusing to overwrite existing machine config: {config}")
     state.mkdir(parents=True, exist_ok=True)
     config.parent.mkdir(parents=True, exist_ok=True)
+    app_server_socket = os.environ.get("CODEX_APP_SERVER_SOCKET", "")
+    app_server_remote = os.environ.get("CODEX_APP_SERVER_REMOTE") or (
+        f"unix://{app_server_socket}" if app_server_socket else "unix://"
+    )
     machine = {
         "package_version": PACKAGE_VERSION,
         "state_schema_version": STATE_SCHEMA_VERSION,
@@ -89,7 +93,8 @@ def bootstrap(root: Path, state: Path, config: Path) -> dict[str, Any]:
         "broker_socket": str(state / "control.sock"),
         "database": str(state / "tasks.sqlite3"),
         "herdr_socket": os.environ.get("CODEX_CONTROL_HERDR_SOCKET", ""),
-        "app_server_socket": os.environ.get("CODEX_APP_SERVER_SOCKET", ""),
+        "app_server_socket": app_server_socket,
+        "app_server_remote": app_server_remote,
         "codex_binary": os.environ.get("CODEX_BINARY", "codex"),
         "supervisor_socket": str(state / "recovery-supervisor.sock"),
         "supervisor_database": str(state / "recovery.sqlite3"),
