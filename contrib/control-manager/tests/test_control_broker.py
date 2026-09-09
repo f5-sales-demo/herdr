@@ -539,6 +539,33 @@ class StateTests(unittest.TestCase):
             self.assertTrue(config.exists())
             self.assertNotIn(str(Path.home()), config.read_text())
 
+    def test_portable_upgrade_does_not_replace_existing_manager_config(self):
+        with tempfile.TemporaryDirectory() as raw:
+            source = Path(__file__).parents[1]
+            root = Path(raw) / "control-manager-new"
+            state = Path(raw) / "new-state"
+            config = Path(raw) / "existing-machine.json"
+            original = {
+                "manager_cwd": "/durable/original-manager-cwd",
+                "control_root": "/durable/original-manager-root",
+                "operator_setting": "preserve-me",
+            }
+            config.write_text(json.dumps(original, sort_keys=True) + "\n")
+            before = config.read_bytes()
+            env = os.environ | {"CODEX_CONTROL_ROOT": str(root), "CODEX_CONTROL_STATE_DIR": str(state)}
+            subprocess.run([
+                "python3", str(source / "runtime/control_portable.py"), "install",
+                "--source", str(source), "--target", str(root),
+            ], env=env, text=True, capture_output=True, check=True)
+            result = subprocess.run([
+                "python3", str(root / "runtime/control_portable.py"), "bootstrap",
+                "--root", str(root), "--state-dir", str(state), "--config", str(config),
+            ], env=env, text=True, capture_output=True, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("refusing to overwrite existing machine config", result.stderr)
+            self.assertEqual(config.read_bytes(), before)
+            self.assertEqual(json.loads(config.read_text())["manager_cwd"], original["manager_cwd"])
+
     def test_newer_state_schema_fails_closed(self):
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "state.sqlite3"

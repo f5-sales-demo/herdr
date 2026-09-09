@@ -30,7 +30,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from control_portable import STATE_SCHEMA_VERSION, machine_config_path, package_root, runtime_root, state_root
+from control_portable import (
+    STATE_SCHEMA_VERSION,
+    machine_config_path,
+    package_root,
+    runtime_root,
+    state_root,
+)
 
 
 LOG = logging.getLogger("control-broker")
@@ -4632,7 +4638,8 @@ Checkpoint contract:
 - Run `{report} --state working --summary TEXT` for a meaningful long-running checkpoint.
 - If a new consequential action falls outside already confirmed scope, run `{report} --state waiting_human --summary TEXT --question TEXT --priority attention`, then stop the turn and wait.
 - On success, run `{report} --state completed --summary TEXT` immediately before your final response. The summary may be up to 8000 characters and must be a self-contained, concise version of the requested deliverable so the manager can relay it without reading a hidden transcript.
-- On an unrecoverable blocker or failure, run `{report} --state blocked|failed --summary TEXT [--question TEXT] --priority attention`.
+- If work cannot proceed at the end of this turn because of any dependency, external system, permission, or other hold, run `{report} --state blocked --summary TEXT --priority attention`; reserve `failed` for a failed attempted operation. Do not leave a recoverable hold as `working` and end the turn.
+- Use `{report} --state waiting_human --summary TEXT --question TEXT --priority attention` only when a human decision/input is required; `waiting_human` always requires a concrete question. Never end after only a `working` checkpoint: without a terminal `completed`, `blocked`, `failed`, or `waiting_human` report, a settled worker is deliberately recorded as `unknown`.
 - Summaries and questions must be bounded and must never contain credentials or complete transcripts.
 
 Requested task:

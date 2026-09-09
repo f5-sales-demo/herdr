@@ -6,10 +6,12 @@ policy, fixtures, and tests. It never contains credentials, machine
 configuration, SQLite state, terminal/session history, screenshots, or
 personal operational documents.
 
-Release scope deliberately excludes unfinished XCSH UAT/controller modules,
-their fixtures, and XCSH acceptance tests. It also excludes live-release UAT
-drivers. Those are separate products/workstreams and cannot be inferred from
-this recovery-manager distribution.
+Release scope includes the reviewed source-only native XCSH admission consumer,
+installed-runtime UAT driver, disposable-runtime controller, catalog, and
+acceptance boundary. It deliberately excludes synthetic fixture runners,
+test/dev state, local receipts, credentials, installed-artifact evidence, and
+live prompt UAT. Source delivery is not release, installation, or acceptance
+evidence.
 
 ## Verify and install a release
 
@@ -31,11 +33,17 @@ Install only into a new empty directory and create fresh local state:
 
 ```sh
 python3 control-manager-<version>/runtime/control_portable.py install \
-  --source "$PWD/control-manager-<version>" --target /opt/control-manager
-CODEX_CONTROL_ROOT=/opt/control-manager \
+  --source "$PWD/control-manager-<version>" --target /opt/control-manager-<version>
+CODEX_CONTROL_ROOT=/opt/control-manager-<version> \
 CODEX_CONTROL_STATE_DIR=/var/lib/control-manager \
-  python3 /opt/control-manager/runtime/control_portable.py bootstrap
+  python3 /opt/control-manager-<version>/runtime/control_portable.py bootstrap
 ```
+
+For an upgrade, keep the existing install directory and machine config in
+place, and install the new archive in a distinct empty versioned directory.
+The installer neither reads nor copies runtime state or machine configuration;
+bootstrap refuses to replace an existing config, including its `manager_cwd`.
+Activation and any machine-specific unit binding are local operator actions.
 
 The bootstrap config has mode `0600` and defaults to observation-only recovery.
 Set machine bindings and credential-provider integration locally; do not copy a
@@ -43,7 +51,7 @@ live state directory from another machine. Start the broker with the generated
 machine config, for example:
 
 ```sh
-python3 /opt/control-manager/runtime/control_broker.py \
+python3 /opt/control-manager-<version>/runtime/control_broker.py \
   --socket /var/lib/control-manager/control.sock \
   --database /var/lib/control-manager/tasks.sqlite3 \
   --config /var/lib/control-manager/machine.json
