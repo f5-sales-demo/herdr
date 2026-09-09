@@ -116,6 +116,7 @@ impl ExecutionManager {
             backend_execution_id: None,
             semantic_execution_id: None,
             generation: None,
+            native_producer: None,
             producer_session_id: None,
             injected_env: BTreeMap::new(),
             superseded_by_backend_execution_id: None,
@@ -225,6 +226,7 @@ impl ExecutionManager {
             backend_execution_id: Some(backend_execution_id.clone()),
             semantic_execution_id: Some(params.execution_id.clone()),
             generation: Some(params.generation),
+            native_producer: Some("xcsh".into()),
             producer_session_id: Some(params.session_id.clone()),
             injected_env,
             superseded_by_backend_execution_id: None,
@@ -430,6 +432,43 @@ impl ExecutionManager {
             .find(|r| r.execution_id == id)
             .cloned()
     }
+
+    /// Native children report their semantic id from immutable environment,
+    /// while Herdr owns a separate backend child id. Resolve and validate the
+    /// durable binding instead of trusting reporter-provided provenance.
+    pub(crate) fn resolve_agent_turn_execution(
+        &self,
+        semantic_or_backend_id: &str,
+        producer: &str,
+        session_id: &str,
+        generation: u64,
+    ) -> Result<ExecutionRecord, String> {
+        let state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| "execution state lock poisoned")?;
+        if let Some(record) = state.records.iter().find(|record| {
+            record.semantic_execution_id.as_deref() == Some(semantic_or_backend_id)
+                && record.generation == Some(generation)
+        }) {
+            if record.native_producer.as_deref() != Some(producer)
+                || record.producer_session_id.as_deref() != Some(session_id)
+            {
+                return Err("agent_turn_native_binding_mismatch: reporter does not match durable native binding".into());
+            }
+            return Ok(record.clone());
+        }
+        state
+            .records
+            .iter()
+            .find(|record| {
+                record.execution_id == semantic_or_backend_id
+                    && record.semantic_execution_id.is_none()
+            })
+            .cloned()
+            .ok_or_else(|| "agent_turn_execution_not_found".into())
+    }
     pub(crate) fn list_since(&self, revision: u64) -> Vec<ExecutionRecord> {
         self.0
             .state
@@ -620,6 +659,13 @@ fn validate_resume(p: &ExecutionResumeParams) -> Result<(), String> {
     {
         return Err("invalid_execution_resume".into());
     }
+    // XCSH serializes generations as JavaScript Number. Larger values round
+    // and could silently select a different durable generation binding.
+    if p.generation > 9_007_199_254_740_991 {
+        return Err(
+            "invalid_execution_generation: generation exceeds JavaScript safe integer range".into(),
+        );
+    }
     Ok(())
 }
 
@@ -698,6 +744,7 @@ mod tests {
             Some("semantic-task")
         );
         assert_eq!(first.generation, Some(4));
+        assert_eq!(first.native_producer.as_deref(), Some("xcsh"));
         assert_eq!(first.injected_env["HERDR_EXECUTION_ID"], "semantic-task");
         assert_eq!(first.injected_env["HERDR_EXECUTION_GENERATION"], "4");
         let (retry, admitted, _) = manager.admit_xcsh_resume(&params).unwrap();
@@ -709,6 +756,20 @@ mod tests {
             .admit_xcsh_resume(&conflict)
             .unwrap_err()
             .contains("generation_conflict"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn native_generation_rejects_values_xcsh_cannot_represent_exactly() {
+        let path = temp("native-safe-integer");
+        let manager = ExecutionManager::load_at(path.clone());
+        assert!(manager
+            .admit_xcsh_resume(&resume_params(9_007_199_254_740_991))
+            .is_ok());
+        assert!(manager
+            .admit_xcsh_resume(&resume_params(9_007_199_254_740_992))
+            .unwrap_err()
+            .contains("safe integer"));
         let _ = std::fs::remove_file(path);
     }
 
@@ -828,6 +889,7 @@ mod tests {
                 backend_execution_id: None,
                 semantic_execution_id: None,
                 generation: None,
+                native_producer: None,
                 producer_session_id: None,
                 injected_env: BTreeMap::new(),
                 superseded_by_backend_execution_id: None,

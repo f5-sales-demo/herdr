@@ -79,9 +79,12 @@ impl AgentTurnManager {
         report: AgentTurnReportParams,
     ) -> Result<(AgentTurnRecord, bool), String> {
         validate(&report)?;
-        let execution = crate::execution::ExecutionManager::global()
-            .get(&report.execution_id)
-            .ok_or("agent_turn_execution_not_found")?;
+        let execution = crate::execution::ExecutionManager::global().resolve_agent_turn_execution(
+            &report.execution_id,
+            &report.producer,
+            &report.session_id,
+            report.generation,
+        )?;
         if execution.pane_id.as_deref() != Some(report.pane_id.as_str()) {
             return Err("agent_turn_provenance_mismatch: pane is not owned by execution".into());
         }

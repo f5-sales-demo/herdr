@@ -80,6 +80,8 @@ pub struct ExecutionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_producer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub producer_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub injected_env: BTreeMap<String, String>,

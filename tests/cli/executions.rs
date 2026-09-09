@@ -50,6 +50,80 @@ fn native_resume_socket_claim_is_idempotent_and_rejects_replay_conflicts() {
 }
 
 #[test]
+fn native_xcsh_child_accepts_semantic_report_only_with_durable_binding() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    assert!(run_cli(
+        &socket_path,
+        &[
+            "workspace",
+            "create",
+            "--cwd",
+            base.to_str().unwrap(),
+            "--focus"
+        ]
+    )
+    .status
+    .success());
+    let resumed = send_request(
+        &socket_path,
+        &serde_json::json!({
+            "id": "native-child", "method": "execution.resume", "params": {
+                "execution_id": "semantic-child", "generation": 11,
+                "session_id": "fixture-session", "text": "fixture", "cwd": base,
+            }
+        })
+        .to_string(),
+    );
+    let execution = &resumed["result"]["execution"];
+    assert_ne!(execution["execution_id"], "semantic-child");
+    let pane = execution["pane_id"].as_str().expect("native child pane");
+    let report = |id: &str, producer: &str, session_id: &str, generation: u64| {
+        serde_json::json!({
+            "id": id, "method": "agent.turn.report", "params": {
+                "execution_id": "semantic-child", "pane_id": pane, "producer": producer,
+                "session_id": session_id, "turn_id": "real-child-turn", "generation": generation,
+                "event_revision": 1, "state": "starting"
+            }
+        })
+    };
+    let accepted = send_request(
+        &socket_path,
+        &report("native-report", "xcsh", "fixture-session", 11).to_string(),
+    );
+    assert_eq!(accepted["result"]["admitted"], true);
+    let bad_session = send_request(
+        &socket_path,
+        &report("native-bad-session", "xcsh", "foreign", 11).to_string(),
+    );
+    assert_eq!(
+        bad_session["error"]["code"],
+        "agent_turn_native_binding_mismatch"
+    );
+    let bad_producer = send_request(
+        &socket_path,
+        &report("native-bad-producer", "foreign", "fixture-session", 11).to_string(),
+    );
+    assert_eq!(
+        bad_producer["error"]["code"],
+        "agent_turn_native_binding_mismatch"
+    );
+    let bad_generation = send_request(
+        &socket_path,
+        &report("native-bad-generation", "xcsh", "fixture-session", 12).to_string(),
+    );
+    assert_eq!(
+        bad_generation["error"]["code"],
+        "agent_turn_execution_not_found"
+    );
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn visible_execution_owns_a_background_tab_input_exit_and_idempotency() {
     let base = unique_test_dir();
     let config_home = base.join("config");
