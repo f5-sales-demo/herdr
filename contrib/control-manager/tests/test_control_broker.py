@@ -933,7 +933,101 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first["state"], "unknown")
         self.assertEqual(replay["id"], first["id"])
         self.assertTrue(replay["idempotency_replayed"])
-        self.assertEqual(len([call for call in self.broker.herdr.calls if call[0] == "execution.start"]), 1)
+        self.assertEqual(len(self.broker.herdr.executions), 1)
+
+    async def test_native_xcsh_atomic_gen0_claim_requires_key_and_replays_one_child(self):
+        """Synthetic component fixture for the task/key/generation transaction."""
+        workspace = await self.configure_control_workspace()
+        base = {"target": "xcsh-atomic", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
+                "text": "safe", "session_id": "session-atomic", "workspace_id": workspace["workspace"]["workspace_id"],
+                "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"}}
+        with self.assertRaisesRegex(ValueError, "idempotency_key"):
+            await self.broker.native_xcsh_admit(base)
+        task = await self.broker.native_xcsh_admit(base | {"idempotency_key": "atomic-gen0"})
+        binding = self.broker.db.native_generation(task["id"], 0)
+        self.assertEqual(binding["state"], "admitted")
+        key = self.broker.db.conn.execute("SELECT task_id FROM admission_idempotency WHERE idempotency_key='atomic-gen0'").fetchone()
+        self.assertEqual(key["task_id"], task["id"])
+        replay = await self.broker.native_xcsh_admit(base | {"idempotency_key": "atomic-gen0"})
+        self.assertEqual(replay["id"], task["id"])
+        self.assertEqual(len(self.broker.herdr.executions), 1)
+
+    async def test_xcsh_generation_history_rejects_foreign_panes_and_settles_old_child(self):
+        """Synthetic component fixture for ledger rules; not UAT evidence."""
+        workspace = await self.configure_control_workspace()
+        task = await self.broker.native_xcsh_admit({
+            "target": "xcsh-generations", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
+            "text": "safe", "session_id": "session-history", "workspace_id": workspace["workspace"]["workspace_id"],
+            "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"}, "idempotency_key": "history",
+        })
+        first = self.broker.db.current_native_generation(task["id"])
+        self.assertIsNotNone(first)
+        base = {"execution_id": task["id"], "pane_id": first["pane_id"], "producer": "xcsh", "session_id": "session-history", "turn_id": "turn-0", "generation": 0}
+        self.broker.db.apply_native_turn({"revision": 1, "report": base | {"event_revision": 1, "state": "starting"}})
+        self.broker.db.apply_native_turn({"revision": 2, "report": base | {"event_revision": 2, "state": "waiting_input", "reason": "need input"}})
+        await self.broker.continue_task({"task_id": task["id"], "text": "next"})
+        current = self.broker.db.current_native_generation(task["id"])
+        self.assertEqual(current["generation"], 1)
+        replay = await self.broker.continue_task({"task_id": task["id"], "text": "next"})
+        self.assertTrue(replay["generation_replayed"])
+        with self.assertRaisesRegex(ValueError, "conflicts"):
+            await self.broker.continue_task({"task_id": task["id"], "text": "different"})
+        # The old child can report its interrupted settlement, but cannot
+        # overwrite the current generation's pane/session/task state.
+        self.assertIsNone(self.broker.db.apply_native_turn({"revision": 3, "report": base | {"event_revision": 3, "state": "interrupted", "reason": "superseded"}}))
+        self.assertEqual(self.broker.db.task(task["id"])["run_generation"], 1)
+        self.assertEqual(self.broker.db.native_generation(task["id"], 0)["terminal_state"], "interrupted")
+        foreign = {"execution_id": task["id"], "pane_id": "foreign:pane", "producer": "xcsh", "session_id": "session-history", "turn_id": "turn-1", "generation": 1}
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            self.broker.db.apply_native_turn({"revision": 4, "report": foreign | {"event_revision": 1, "state": "starting"}})
+        current_report = {"execution_id": task["id"], "pane_id": current["pane_id"], "producer": "xcsh", "session_id": "session-history", "turn_id": "turn-1", "generation": 1}
+        self.broker.db.apply_native_turn({"revision": 4, "report": current_report | {"event_revision": 1, "state": "starting"}})
+        await self.broker.request_stop({"task_id": task["id"]})
+        cancelled = [call for call in self.broker.herdr.calls if call[0] == "execution.cancel"]
+        self.assertEqual(cancelled[-1][1]["execution_id"], current["backend_execution_id"])
+        self.broker.db.apply_native_turn({"revision": 5, "report": current_report | {"event_revision": 2, "state": "cancelled", "reason": "native cancel"}})
+        await self.broker._verified_terminal(task["id"])
+        await self.broker._cleanup_after(task["id"], 0)
+        self.assertNotIn(current["tab_id"], self.broker.herdr.tabs)
+
+    async def test_xcsh_cancel_claim_recovers_after_ambiguous_backend_response(self):
+        """Synthetic component fixture: a persisted cancel claim is replayed exactly."""
+        workspace = await self.configure_control_workspace()
+        task = await self.broker.native_xcsh_admit({
+            "target": "xcsh-cancel-recovery", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
+            "text": "safe", "session_id": "session-cancel", "workspace_id": workspace["workspace"]["workspace_id"],
+            "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"},
+            "idempotency_key": "cancel-recovery",
+        })
+        binding = self.broker.db.current_native_generation(task["id"])
+        original_request = self.broker.herdr.request
+        lost_response = True
+
+        async def uncertain_request(method, params=None, timeout=65):
+            nonlocal lost_response
+            result = await original_request(method, params, timeout)
+            if method == "execution.cancel" and lost_response:
+                lost_response = False
+                raise RuntimeError("response lost after backend cancellation")
+            return result
+
+        self.broker.herdr.request = uncertain_request
+        with self.assertRaisesRegex(RuntimeError, "response lost"):
+            await self.broker.request_stop({"task_id": task["id"]})
+        self.broker.herdr.request = original_request
+        action = self.broker.db.conn.execute(
+            "SELECT * FROM native_execution_actions WHERE task_id=? AND generation=0 AND kind='cancel'",
+            (task["id"],),
+        ).fetchone()
+        self.assertEqual(action["state"], "claimed")
+        self.assertEqual(action["backend_execution_id"], binding["backend_execution_id"])
+        await self.broker._reconcile_native_xcsh_admissions(task["id"])
+        recovered = self.broker.db.conn.execute(
+            "SELECT * FROM native_execution_actions WHERE action_key=?", (action["action_key"],)
+        ).fetchone()
+        self.assertEqual(recovered["state"], "completed")
+        cancels = [call for call in self.broker.herdr.calls if call[0] == "execution.cancel"]
+        self.assertEqual({call[1]["execution_id"] for call in cancels}, {binding["backend_execution_id"]})
 
     async def test_native_xcsh_offline_chain_uses_real_db_outbox_inbox_and_ack(self):
         workspace = await self.configure_control_workspace()
@@ -952,6 +1046,10 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         ]
         applied = await self.broker.consume_native_turns()
         self.assertEqual([item["state"] for item in applied["applied"]], ["starting", "completed"])
+        # Production consume path, not a private test helper, schedules owned
+        # cleanup only after the verified semantic terminal record.
+        await asyncio.sleep(0.08)
+        self.assertNotIn(row["tab_id"], self.broker.herdr.tabs)
         inbox = self.broker.db.deliver_inbox()
         event = next(item for item in inbox if item["task_id"] == task["id"])
         self.assertEqual(event["delivery_state"], "delivered")

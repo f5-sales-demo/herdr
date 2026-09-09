@@ -147,17 +147,15 @@ def preflight(manifest: dict[str, Any], catalog: dict[str, Any], *, probe: bool 
         raise PreflightError("manifest must bind isolated broker_socket and herdr_socket")
     if not isinstance(runtime.get("workspace_id"), str) or not runtime["workspace_id"]:
         raise PreflightError("manifest must bind a dedicated Herdr workspace_id")
-    argv_template = runtime.get("argv_template")
-    if not isinstance(argv_template, list) or not argv_template or any(not isinstance(item, str) for item in argv_template):
-        raise PreflightError("manifest must bind an installed XCSH argv_template")
-    if sum(item.count("{prompt}") for item in argv_template) != 1:
-        raise PreflightError("argv_template must contain exactly one {prompt} placeholder")
-    if not isinstance(runtime.get("xcsh_executable"), str) or argv_template[0] != runtime["xcsh_executable"]:
-        raise PreflightError("argv_template must launch the measured xcsh_executable")
+    if not isinstance(runtime.get("xcsh_session_dir"), str) or not Path(runtime["xcsh_session_dir"]).is_absolute():
+        raise PreflightError("manifest must bind an isolated absolute xcsh_session_dir")
+    if not isinstance(runtime.get("xcsh_executable"), str) or not runtime["xcsh_executable"]:
+        raise PreflightError("manifest must bind the measured xcsh_executable")
     declared_executable_digest = runtime.get("xcsh_executable_sha256")
     if not isinstance(declared_executable_digest, str) or len(declared_executable_digest) != 64:
         raise PreflightError("manifest must bind measured xcsh_executable_sha256")
     validate_xcsh_archive_provenance(runtime, artifacts["xcsh"], verify_archive=probe)
+    fixture = validate_fixture(runtime, verify_file=probe)
     required = set(manifest.get("required_capabilities", []))
     if REQUIRED_CAPABILITY not in required:
         raise PreflightError(f"manifest must require {REQUIRED_CAPABILITY}")
@@ -170,6 +168,7 @@ def preflight(manifest: dict[str, Any], catalog: dict[str, Any], *, probe: bool 
         raise PreflightError("catalog does not cover every required semantic boundary")
     result: dict[str, Any] = {"preflight": "passed", "live_execution": "not_started", "artifact_identities": identities,
                               "required_capabilities": sorted(required), "scenario_ids": sorted(names),
+                              "fixture_sha256": fixture["sha256"],
                               "probe": "not_requested"}
     if probe:
         # Read-only capability check. It intentionally does not start an execution.
@@ -205,6 +204,7 @@ def controller_from_manifest(manifest: dict[str, Any]) -> Any:
     """Open only a local receipt made by the dedicated controller preparer."""
     from xcsh_isolated_uat_controller import ControllerError, DisposableHerdrController
     runtime = manifest["runtime"]
+    fixture = validate_fixture(runtime, verify_file=True)
     receipt = runtime.get("controller_receipt")
     state_db = runtime.get("controller_state_db")
     if not isinstance(receipt, str) or not isinstance(state_db, str):
@@ -242,10 +242,22 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
     if case["id"] in controlled_cases and controller is None:
         raise PreflightError(f"{case['id']} requires an authenticated dedicated-runtime controller; shared/default targets are refused")
     broker_socket, herdr_socket = Path(runtime["broker_socket"]), Path(runtime["herdr_socket"])
-    argv = [item.replace("{prompt}", case["prompt"]) for item in runtime["argv_template"]]
+    prompt = case["prompt"].replace("{fixture_path}", fixture["path"])
+    if controller is None:
+        raise PreflightError("installed execution requires an authenticated controller-owned XCSH session")
+    try:
+        session_receipt = controller.create_xcsh_session(
+            Path(runtime["xcsh_executable"]), runtime["xcsh_executable_sha256"],
+            Path(runtime.get("cwd", "/")),
+            Path(runtime["xcsh_session_dir"]) / f"{run_id}-{case['id']}-{uuid.uuid4().hex}",
+        )
+        session_id = session_receipt["session_id"]
+    except Exception as exc:
+        raise PreflightError(f"controller could not create a measured XCSH session: {exc}") from exc
     task = unix_request(broker_socket, "native_xcsh_admit", {
         "target": "xcsh-native-uat", "cwd": runtime.get("cwd", "/isolated/xcsh-native-uat"),
-        "priority": "routine", "prompt": case["prompt"], "workspace_id": runtime["workspace_id"], "argv": argv,
+        "priority": "routine", "prompt": case["prompt"], "text": prompt,
+        "session_id": session_id, "workspace_id": runtime["workspace_id"],
         "runtime_identity": {f"{name}_artifact": artifact_id(manifest["artifacts"][name], name) for name in ("xcsh", "herdr", "manager")},
         "idempotency_key": f"installed-xcsh-uat:{run_id}:{case['id']}",
     })

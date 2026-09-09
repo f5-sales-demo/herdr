@@ -15,7 +15,7 @@ from typing import Any
 
 
 PACKAGE_VERSION = 21
-STATE_SCHEMA_VERSION = 11
+STATE_SCHEMA_VERSION = 12
 
 
 def terminal_appserver_disconnect(text: str) -> bool:

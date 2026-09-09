@@ -154,6 +154,31 @@ class DisposableHerdrController(IsolatedController):
         if self.ownership["workspace_id"] not in {item.get("workspace_id") for item in listed if isinstance(item,dict)}:
             raise ControllerError("owned workspace provenance no longer matches")
 
+    def create_xcsh_session(self, xcsh_binary: Path, expected_sha256: str, argv: list[str], cwd: Path) -> str:
+        """Create one producer session through an explicit released CLI contract.
+
+        The manifest supplies the measured producer executable and its
+        documented JSON session-create argv.  This controller owns the
+        subprocess, captures its receipt, and refuses labels or inferred IDs.
+        It deliberately cannot synthesize a session when the installed XCSH
+        release lacks this contract.
+        """
+        if (not xcsh_binary.is_file() or hashlib.sha256(xcsh_binary.read_bytes()).hexdigest() != expected_sha256
+                or not isinstance(argv, list) or not argv or any(not isinstance(item, str) or not item for item in argv)
+                or Path(argv[0]).resolve() != xcsh_binary.resolve()):
+            raise ControllerError("controller requires canonical measured XCSH session-create argv")
+        call = subprocess.run(argv, cwd=cwd, check=False, capture_output=True, text=True)
+        if call.returncode:
+            raise ControllerError(f"owned XCSH session creation failed: {call.stderr.strip()[:500]}")
+        try:
+            receipt = json.loads(call.stdout)
+        except json.JSONDecodeError as exc:
+            raise ControllerError("XCSH session creation did not return a JSON receipt") from exc
+        session = receipt.get("session_id") if isinstance(receipt, dict) else None
+        if not isinstance(session, str) or not session:
+            raise ControllerError("XCSH session creation receipt lacks session_id")
+        return session
+
     def _restart(self) -> dict[str,Any]:
         session,service=self.ownership["session_id"],self.ownership["service_id"]
         before=self._owned_call("status","server","--json")
