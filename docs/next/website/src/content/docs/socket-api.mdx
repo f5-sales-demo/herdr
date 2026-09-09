@@ -150,6 +150,18 @@ becomes `--print`. `lifecycle_mode: "managed_turn_v1"` is a durable
 Herdr/producer lifecycle contract, deliberately not an undocumented XCSH CLI
 flag. Herdr derives all native argv itself and accepts no arbitrary argv/env.
 
+Native children first submit an authenticated `agent.turn.report` `starting`
+event. Herdr persists that registration with the owned PTY PID and binds
+`agent.turn.action.get`/`ack` to its exact producer, canonical session,
+generation, pane, and inherited one-time capability. A replacement or
+`execution.cancel` creates a durable `cancel` action; it never force-kills a
+native PTY. The producer acknowledges a safe point within 30 seconds, then
+reports the linked turn as `cancelled`. Missing acknowledgements are durably
+recorded as `timed_out`; an observed PTY exit alone is never a semantic native
+cancellation result. The capability authenticates possession by the launched
+child; the persisted PID is Herdr's PTY ownership evidence, not a claimed
+socket peer-PID credential.
+
 On Unix the path must also have an execute permission bit. On Windows it must
 be an absolute regular file; executable admission follows the platform process
 launcher, which applies its normal executable-format and extension rules.

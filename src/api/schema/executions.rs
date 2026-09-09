@@ -105,6 +105,20 @@ pub struct NativeExecutableBinding {
     pub sha256: String,
 }
 
+/// Durable proof that the launched native child has made its first
+/// authenticated `starting` report. The PID is Herdr's PTY-child ownership
+/// evidence; the inherited capability authenticates the reporting process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NativeProducerRegistration {
+    pub producer: String,
+    pub session_id: String,
+    pub generation: u64,
+    pub pane_id: String,
+    pub pid: u32,
+    pub turn_id: String,
+    pub registered_at_unix_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExecutionTarget {
     pub execution_id: String,
@@ -146,6 +160,8 @@ pub struct ExecutionRecord {
     /// execution consumers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_launch: Option<NativeLaunchV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_registration: Option<NativeProducerRegistration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub producer_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

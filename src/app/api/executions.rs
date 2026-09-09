@@ -175,18 +175,11 @@ impl App {
             Ok(record) => record,
             Err(error) => return encode_error(id, "execution_tracking_failed", error),
         };
-        // The claim and cancellation intent were persisted together before any
-        // child effect. Only after the new child is observable do we signal the
-        // superseded child, so a crash cannot leave two unrecorded authorities.
-        if let Some(old) = previous {
-            if let Some(pane_id) = old.pane_id.as_deref() {
-                if let Some((old_ws, old_pane)) = self.parse_pane_id(pane_id) {
-                    if let Some((runtime, _)) = self.lookup_runtime(old_ws, old_pane) {
-                        let _ = runtime.terminate_child();
-                    }
-                }
-            }
-        }
+        // Admission durably records the superseded child's cooperative cancel
+        // action before this effect. Native v3 children stop only after their
+        // authenticated producer reaches that safe point; never terminate a
+        // native PTY as a substitute for producer lifecycle settlement.
+        let _ = previous;
         self.schedule_session_save();
         self.emit_tab_created_events(ws_idx, tab_idx);
         encode_success(

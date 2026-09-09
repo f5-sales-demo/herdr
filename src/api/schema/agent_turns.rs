@@ -71,6 +71,7 @@ pub struct AgentTurnActionAckParams {
 pub enum AgentTurnActionState {
     Requested,
     SafePoint,
+    TimedOut,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -82,6 +83,11 @@ pub struct AgentTurnActionRecord {
     pub requested_at_unix_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acknowledged_at_unix_ms: Option<u64>,
+    /// The authenticated turn which accepted the cooperative safe point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timed_out_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

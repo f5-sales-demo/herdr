@@ -90,6 +90,9 @@ impl AgentTurnManager {
         }
         crate::execution::ExecutionManager::global()
             .authorize_native_report_capability(&execution, report.native_capability.as_deref())?;
+        crate::execution::ExecutionManager::global().register_native_start(&execution, &report)?;
+        crate::execution::ExecutionManager::global()
+            .validate_native_cancelled_report(&execution, &report)?;
         // The credential is request-only. It must never enter the durable
         // journal, replay identity, response, or log surface.
         report.native_capability = None;

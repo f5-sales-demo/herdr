@@ -247,8 +247,8 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
         &serde_json::json!({
             "id": "fixture-after-churn", "method": "agent.turn.report", "params": {
                 "execution_id": "semantic-child", "pane_id": execution["pane_id"], "producer": "xcsh",
-                "session_id": "0123abcd4567ef89", "turn_id": "fixture-after-churn",
-                "generation": 11, "event_revision": 1, "state": "starting", "native_capability": capability
+                "session_id": "0123abcd4567ef89", "turn_id": "fixture-turn",
+                "generation": 11, "event_revision": 2, "state": "working", "native_capability": capability
             }
         })
         .to_string(),
@@ -263,23 +263,6 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
         }
     }).to_string());
     assert_eq!(second["result"]["admitted"], true);
-    let handoff_deadline = Instant::now() + Duration::from_secs(4);
-    loop {
-        let old = send_request(
-            &socket_path,
-            &format!(
-                r#"{{"id":"fixture-handoff-old","method":"execution.get","params":{{"execution_id":"{backend_id}"}}}}"#
-            ),
-        );
-        if old["result"]["execution"]["state"] == "cancelled" {
-            break;
-        }
-        assert!(
-            Instant::now() < handoff_deadline,
-            "next generation did not settle the old child: {old}"
-        );
-        thread::sleep(Duration::from_millis(25));
-    }
     let duplicate_second = send_request(&socket_path, &serde_json::json!({
         "id":"fixture-next-retry", "method":"execution.resume", "params": {
             "execution_id":"semantic-child", "generation":12, "native_launch":native_launch(&base, &fixture, "0123abcd4567ef89"), "text":"fixture", "cwd":base
@@ -292,7 +275,10 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
             r#"{{"id":"fixture-handoff-old-retry","method":"execution.get","params":{{"execution_id":"{backend_id}"}}}}"#
         ),
     );
-    assert_eq!(old_after_retry["result"]["execution"]["state"], "cancelled");
+    assert_eq!(old_after_retry["result"]["execution"]["state"], "running");
+    assert!(old_after_retry["result"]["execution"]["cancel_requested"]
+        .as_bool()
+        .unwrap());
     assert_eq!(
         old_after_retry["result"]["execution"]["superseded_by_backend_execution_id"],
         second["result"]["execution"]["execution_id"]

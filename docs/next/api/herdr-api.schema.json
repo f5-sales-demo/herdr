@@ -1452,7 +1452,8 @@
         "AgentTurnActionState": {
           "enum": [
             "requested",
-            "safe_point"
+            "safe_point",
+            "timed_out"
           ],
           "type": "string"
         },
@@ -7045,6 +7046,21 @@
             },
             "state": {
               "$ref": "#/schemas/success_response/$defs/AgentTurnActionState"
+            },
+            "timed_out_at_unix_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "turn_id": {
+              "description": "The authenticated turn which accepted the cooperative safe point.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -7059,7 +7075,8 @@
         "AgentTurnActionState": {
           "enum": [
             "requested",
-            "safe_point"
+            "safe_point",
+            "timed_out"
           ],
           "type": "string"
         },
@@ -7998,6 +8015,16 @@
                 "null"
               ]
             },
+            "native_registration": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/NativeProducerRegistration"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "output_complete": {
               "default": false,
               "type": "boolean"
@@ -8447,6 +8474,48 @@
             "managed_turn_v1"
           ],
           "type": "string"
+        },
+        "NativeProducerRegistration": {
+          "description": "Durable proof that the launched native child has made its first\nauthenticated `starting` report. The PID is Herdr's PTY-child ownership\nevidence; the inherited capability authenticates the reporting process.",
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "producer": {
+              "type": "string"
+            },
+            "registered_at_unix_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "turn_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "producer",
+            "session_id",
+            "generation",
+            "pane_id",
+            "pid",
+            "turn_id",
+            "registered_at_unix_ms"
+          ],
+          "type": "object"
         },
         "NativeSessionHeaderBinding": {
           "properties": {
