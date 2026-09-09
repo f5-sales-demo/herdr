@@ -257,7 +257,7 @@ class ConventionalCommitTests(unittest.TestCase):
             self.assertNotEqual(validate("--range", f"{base}..{merge}").returncode, 0)
             self.assertEqual(
                 validate_merge_commits.invalid_merge_subjects(
-                    f"{base}..{merge}", "owner/repo", "main", "token", lambda *_: [], lambda *_: [], repo
+                    f"{base}..{merge}", "owner/repo", "main", "token", lambda *_: [], lambda *_: [], lambda *_: {}, repo
                 ),
                 [(merge, "Merge direct invalid feature")],
             )
@@ -270,7 +270,7 @@ class ConventionalCommitTests(unittest.TestCase):
             self.assertEqual(validate("--range", f"{merge}..{invalid_subject_merge}").returncode, 0)
             self.assertEqual(
                 validate_merge_commits.invalid_merge_subjects(
-                    f"{merge}..{invalid_subject_merge}", "owner/repo", "main", "token", lambda *_: [], lambda *_: [], repo
+                    f"{merge}..{invalid_subject_merge}", "owner/repo", "main", "token", lambda *_: [], lambda *_: [], lambda *_: {}, repo
                 ),
                 [(invalid_subject_merge, "Merge invalid subject with valid side")],
             )
@@ -284,7 +284,7 @@ class ConventionalCommitTests(unittest.TestCase):
             self.assertEqual(validate("--range", f"{merge}..{valid_head}").returncode, 0)
             self.assertEqual(
                 validate_merge_commits.invalid_merge_subjects(
-                    f"{invalid_subject_merge}..{valid_merge}", "owner/repo", "main", "token", lambda *_: [], lambda *_: [], repo
+                    f"{invalid_subject_merge}..{valid_merge}", "owner/repo", "main", "token", lambda *_: [], lambda *_: [], lambda *_: {}, repo
                 ),
                 [],
             )
@@ -331,23 +331,34 @@ class ConventionalCommitTests(unittest.TestCase):
             "head": {"sha": "b" * 40},
             "title": "fix(ci): preserve merge constituent validation",
         }]
-        passing_checks = [{"name": "conventional-commits", "conclusion": "success"}]
+        passing_checks = [{
+            "name": "conventional-commits", "status": "completed", "conclusion": "success",
+            "app": {"slug": "github-actions"},
+            "details_url": "https://github.com/owner/repo/actions/runs/123/job/456",
+        }]
+        passing_run = {"name": "CI", "event": "pull_request", "status": "completed", "conclusion": "success", "head_sha": "b" * 40}
         self.assertTrue(
             validate_merge_commits.is_recorded_pr_merge(
-                subject, sha, "owner/repo", "build-xcsh", "token", lambda *_: recorded, lambda *_: passing_checks
+                subject, sha, "owner/repo", "build-xcsh", "token", lambda *_: recorded, lambda *_: passing_checks, lambda *_: passing_run
             )
         )
         recorded[0]["title"] = "invalid merge title"
         self.assertFalse(
             validate_merge_commits.is_recorded_pr_merge(
-                subject, sha, "owner/repo", "build-xcsh", "token", lambda *_: recorded, lambda *_: passing_checks
+                subject, sha, "owner/repo", "build-xcsh", "token", lambda *_: recorded, lambda *_: passing_checks, lambda *_: passing_run
             )
         )
+        passing_checks[0]["conclusion"] = "success"
+        passing_checks[0]["app"] = {"slug": "unrelated-app"}
+        self.assertFalse(validate_merge_commits.is_recorded_pr_merge(subject, sha, "owner/repo", "build-xcsh", "token", lambda *_: recorded, lambda *_: passing_checks, lambda *_: passing_run))
+        passing_checks[0]["app"] = {"slug": "github-actions"}
+        passing_run["head_sha"] = "c" * 40
+        self.assertFalse(validate_merge_commits.is_recorded_pr_merge(subject, sha, "owner/repo", "build-xcsh", "token", lambda *_: recorded, lambda *_: passing_checks, lambda *_: passing_run))
         recorded[0]["title"] = "fix(ci): preserve merge constituent validation"
         passing_checks[0]["conclusion"] = "failure"
         self.assertFalse(
             validate_merge_commits.is_recorded_pr_merge(
-                subject, sha, "owner/repo", "build-xcsh", "token", lambda *_: recorded, lambda *_: passing_checks
+                subject, sha, "owner/repo", "build-xcsh", "token", lambda *_: recorded, lambda *_: passing_checks, lambda *_: passing_run
             )
         )
 
