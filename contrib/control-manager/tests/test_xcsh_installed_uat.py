@@ -22,6 +22,10 @@ def manifest():
 
 
 class InstalledPromptUatTests(unittest.TestCase):
+    def test_catalog_requires_exact_generation_trace_for_every_case(self):
+        catalog = json.loads(CATALOG.read_text())
+        for case in catalog["scenarios"]:
+            self.assertEqual(len(case["expected_generations"]), len(case["expected_states"]))
     def prepared_manifest(self, root: Path):
         candidate = manifest()
         value = candidate["runtime"]["fixture"]["value"]
@@ -158,10 +162,10 @@ class InstalledPromptUatTests(unittest.TestCase):
             def create_xcsh_session(self, *_): return {"session_id": "session-1", "session_file": "/synthetic/session.jsonl", "header_sha256": "synthetic"}
             def register_execution(self, task): self.registered=task
             def real_action(self, kind, pane, key, token, external=None):
-                self.calls.append((kind,pane,key,token)); return {"kind":kind,"execution_id":"task-1","workspace_id":"w-isolated","tab_id":"tab-1","pane_id":pane,"session_id":"owned","effect":{"stop_exit":0,"after_socket":"/isolated/herdr.sock"}}
+                self.calls.append((kind,pane,key,token)); return {"kind":kind,"execution_id":"task-1","workspace_id":"w-isolated","tab_id":"tab-1","pane_id":pane,"session_id":"owned","effect":{"action":"producer_process_cutpoint","producer_session_id":"session-1","producer_pid":123,"execution_id":"task-1","before_revision":2,"process_exited":True,"stop_exit":0,"after_socket":"/isolated/herdr.sock"}}
         controller=Controller(); ticks=[0]
         def fake_broker(path, method, params):
-            if method == "native_xcsh_admit": return {"id":"task-1","state":"starting","workspace_id":"w-isolated","tab_id":"tab-1","pane_id":"pane-1","agent_session_id":None}
+            if method == "native_xcsh_admit": return {"id":"task-1","state":"starting","workspace_id":"w-isolated","tab_id":"tab-1","pane_id":"pane-1","agent_session_id":"session-1"}
             if method == "consume_native_turns": return {"applied":[{"task_id":"task-1","state":reports[max(0,ticks[0]-1)]["report"]["state"]}]}
             if method == "status": return {"tasks":[{"id":"task-1","pane_id":"pane-1","agent_session_id":"session-1"}],"pending_completions":[{"task_id":"task-1","delivery_state":"consumed"}]}
             raise AssertionError(method)

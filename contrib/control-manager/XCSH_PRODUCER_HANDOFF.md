@@ -20,9 +20,20 @@ There is no `--create-session-json` or generic capability command. The driver
 therefore invokes only the documented JSON-mode/session-directory interface
 and proves its observed behavior from the exact executable hash. Herdr PR35
 accepts the corresponding canonical 16-hex SessionHeader grammar. This
-removes the former prompt-free durable-session source dependency; it does not
-turn a source smoke or a synthetic component fixture into installed-UAT
-acceptance.
+removes the former prompt-free durable-session source dependency. The released
+source does not yet expose the versioned failure/await/cancel/reply-loss and
+process-cutpoint actions required below. The installed driver therefore fails
+closed unless the producer adapter supplies causal receipts for those actions;
+it does not turn a source smoke or a synthetic component fixture into
+installed-UAT acceptance.
+
+Herdr v0.13.0's immutable API schema is protocol 20/schema 1 (schema hash
+`88e6f9f583f56e5d7708f6cfd6ec62250ea72ce85dfc61d7a4d04d7c43d42806`) and
+defines both `ExecutionResumeParams` and `AgentTurnReportParams`, including
+the canonical 16-hex XCSH session identity. The manager gates a live runtime
+on advertised protocol >=20 plus `tracked_executions` and
+`agent_turn_journal`, then validates every returned resume receipt's command,
+environment, generation, workspace/tab/pane and producer session provenance.
 
 - A supported deterministic offline backend/test executor, selected by an
   explicit documented argv/configuration surface. Prompt wording must not be

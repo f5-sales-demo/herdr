@@ -25,7 +25,7 @@ class ControllerTests(unittest.TestCase):
    with self.assertRaisesRegex(RuntimeError,'post-side-effect'): c.act('restart_loss','p1','same','token',uncertain)
    with self.assertRaisesRegex(ControllerError,'uncertain'): c.act('restart_loss','p1','same','token',lambda *_: {})
    self.assertEqual(calls,['restart_loss'])
-   with self.assertRaisesRegex(ControllerError,'conflicts'): c.act('cleanup','p1','same','token',lambda *_: {})
+   with self.assertRaisesRegex(ControllerError,'conflicts'): c.act('reconnect_replay','p1','same','token',lambda *_: {})
    c.close()
 
  def test_second_controller_cannot_repeat_completed_key(self):
@@ -88,9 +88,8 @@ class ControllerTests(unittest.TestCase):
     reconnect=c.real_action('reconnect_replay',pane,'real-reconnect',c.token)
     restart=c.real_action('restart_loss',pane,'real-restart',c.token)
     self.assertEqual(c.real_action('restart_loss',pane,'real-restart',c.token),restart)
-    cleanup=c.real_action('cleanup',pane,'real-cleanup',c.token)
     self.assertTrue(reconnect['effect']['reconnected'])
-    self.assertEqual(cleanup['effect']['closed_execution_id'],'real-execution')
+    with self.assertRaises(ControllerError): c.real_action('cleanup',pane,'real-cleanup',c.token)
     self.assertEqual(restart['effect']['server_version'],'0.10.1')
    finally:
     subprocess.run([raw_binary,'--session',c.ownership['session_id'],'server','stop'],check=False,capture_output=True,text=True)

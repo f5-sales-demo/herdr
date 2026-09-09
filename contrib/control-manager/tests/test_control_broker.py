@@ -73,7 +73,7 @@ class FakeHerdr:
             execution.update(state="cancelled", signal_name="Interrupt", output_complete=True)
             return {"execution": execution, "admitted": False}
         if method == "ping":
-            return {"protocol": 20, "capabilities": {"agent_turn_journal": True}}
+            return {"protocol": 20, "capabilities": {"tracked_executions": True, "agent_turn_journal": True}}
         if method == "agent.turn.list":
             since = params.get("since_revision", 0)
             return {"turns": [turn for turn in self.agent_turns if turn["revision"] > since]}
@@ -920,8 +920,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         workspace = await self.configure_control_workspace()
         params = {
             "target": "xcsh-uat", "cwd": str(self.root), "priority": "routine",
-            "prompt": "safe synthesized prompt", "workspace_id": workspace["workspace"]["workspace_id"],
-            "argv": ["/isolated/xcsh", "--prompt", "safe synthesized prompt"],
+            "prompt": "safe synthesized prompt", "text": "safe synthesized prompt", "session_id": "session-1", "workspace_id": workspace["workspace"]["workspace_id"],
             "runtime_identity": {"xcsh_artifact": "xcsh@1#aaa", "herdr_artifact": "herdr@1#bbb", "manager_artifact": "manager@1#ccc"},
             "idempotency_key": "native-xcsh-admit-1",
         }
@@ -929,7 +928,9 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         replay = await self.broker.native_xcsh_admit(params)
         self.assertEqual(admitted["id"], replay["id"])
         self.assertTrue(replay["idempotency_replayed"])
-        self.assertEqual(len([call for call in self.broker.herdr.calls if call[0] == "execution.start"]), 1)
+        starts = [call for call in self.broker.herdr.calls if call[0] == "execution.resume"]
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(starts[0][1]["generation"], 0)
         row = self.broker.db.task(admitted["id"])
         self.assertEqual(row["work_kind"], "xcsh")
         self.assertIn("xcsh@1#aaa", row["native_runtime_json"])
@@ -937,25 +938,27 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.broker.db.apply_native_turn({"revision": 1, "report": base | {"event_revision": 1, "state": "starting"}}), (admitted["id"], "starting"))
         self.assertEqual(self.broker.db.apply_native_turn({"revision": 2, "report": base | {"event_revision": 2, "state": "waiting_input", "reason": "need local label"}}), (admitted["id"], "waiting_human"))
         continued = await self.broker.continue_task({"task_id": admitted["id"], "text": "amber"})
-        self.assertEqual(continued["run_generation"], 1)
-        self.assertEqual(continued["agent_session_id"], "session-1")
-        next_turn = base | {"turn_id": "turn-2", "generation": 1}
-        result = "semantic completion"
-        self.assertEqual(self.broker.db.apply_native_turn({"revision": 3, "report": next_turn | {"event_revision": 3, "state": "working"}}), (admitted["id"], "working"))
-        self.assertEqual(self.broker.db.apply_native_turn({"revision": 4, "report": next_turn | {"event_revision": 4, "state": "completed", "result": result, "result_digest": hashlib.sha256(result.encode()).hexdigest()}}), (admitted["id"], "completed"))
-        self.assertEqual(self.broker.db.task(admitted["id"])["state"], "completed")
+        retained = self.broker.db.task(admitted["id"])
+        self.assertEqual(continued["id"], admitted["id"])
+        self.assertEqual(retained["state"], "starting")
+        self.assertEqual(retained["run_generation"], 1)
+        self.assertIsNone(retained["native_turn_id"])
+        self.assertFalse(any(call[0] == "pane.send_text" for call in self.broker.herdr.calls))
 
     async def test_native_xcsh_uncertain_admission_replay_never_launches_twice(self):
         workspace = await self.configure_control_workspace()
         original = self.broker.herdr.request
+        uncertain_once = True
         async def uncertain(method, params=None, timeout=65):
-            if method == "execution.start":
-                self.broker.herdr.calls.append((method, params or {}))
+            nonlocal uncertain_once
+            if method == "execution.resume" and uncertain_once:
+                uncertain_once = False
+                await original(method, params, timeout)
                 raise RuntimeError("lost response after possible native launch")
             return await original(method, params, timeout)
         self.broker.herdr.request = uncertain
         params = {"target": "xcsh-uncertain", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
-                  "workspace_id": workspace["workspace"]["workspace_id"], "argv": ["/isolated/xcsh", "--prompt", "safe"],
+                  "workspace_id": workspace["workspace"]["workspace_id"], "session_id": "session-uncertain", "text": "safe",
                   "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"}, "idempotency_key": "native-xcsh-uncertain"}
         first = await self.broker.native_xcsh_admit(params)
         replay = await self.broker.native_xcsh_admit(params)
@@ -1143,7 +1146,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.broker.config_path.write_text(json.dumps({"agent_turn_consumer_enabled": True, "agent_turn_producer": "xcsh"}))
         task = await self.broker.native_xcsh_admit({
             "target": "xcsh-e2e", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
-            "workspace_id": workspace["workspace"]["workspace_id"], "argv": ["/isolated/xcsh", "--prompt", "safe"],
+            "workspace_id": workspace["workspace"]["workspace_id"], "session_id": "s1", "text": "safe",
             "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"}, "idempotency_key": "xcsh-e2e",
         })
         row = self.broker.db.task(task["id"])

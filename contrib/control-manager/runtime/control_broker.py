@@ -1753,24 +1753,16 @@ class StateDB:
         row = self.task(task_id)
         if row is None or row["work_kind"] != "xcsh":
             raise ValueError("native turn execution is not an admitted xcsh task")
-        if row["pane_id"] != report.get("pane_id"):
+        generation = report.get("generation")
+        session_id, turn_id = report.get("session_id"), report.get("turn_id")
+        event_revision = report.get("event_revision")
+        if (not isinstance(generation, int) or generation < 0 or not isinstance(session_id, str)
+                or not session_id or not isinstance(turn_id, str) or not turn_id
+                or not isinstance(event_revision, int) or event_revision <= 0):
+            raise ValueError("native turn generation provenance is incomplete")
+        binding = self.native_generation(task_id, generation)
+        if binding is None or binding["pane_id"] != report.get("pane_id") or binding["session_id"] != session_id:
             raise ValueError("native turn task identity/provenance mismatch")
-        # The first observed semantic record may bind a freshly admitted XCSH
-        # session/turn, but only from its owned execution pane and only as a
-        # starting/working report. Later reports are exact identity matches.
-        if row["native_turn_id"] is None:
-            if str(report.get("state", "")) not in {"starting", "working"}:
-                raise ValueError("native turn initial identity requires starting/working")
-            if not report.get("session_id") or not report.get("turn_id"):
-                raise ValueError("native turn initial identity is incomplete")
-            if row["agent_session_id"] is not None and row["agent_session_id"] != report.get("session_id"):
-                raise ValueError("native continuation session identity mismatch")
-            row = self.update(task_id, event="xcsh_identity_bound",
-                              agent_session_id=row["agent_session_id"] or report["session_id"], native_turn_id=report["turn_id"])
-        if row["agent_session_id"] != report.get("session_id") or row["native_turn_id"] != report.get("turn_id"):
-            raise ValueError("native turn task identity/provenance mismatch")
-        if report.get("generation") != row["run_generation"]:
-            raise ValueError("native turn generation mismatch")
         result = report.get("result")
         digest = report.get("result_digest")
         if result is not None:
@@ -1780,10 +1772,25 @@ class StateDB:
         mapped = {"starting": "starting", "working": "working", "waiting_input": "waiting_human", "completed": "completed", "failed": "failed", "cancelled": "cancelled", "interrupted": "unknown", "lost": "unknown"}.get(state)
         if mapped is None:
             raise ValueError("unknown native semantic state")
+        if generation != int(row["run_generation"]) and state not in {"completed", "failed", "cancelled", "interrupted", "lost"}:
+            raise ValueError("stale native generation may only settle terminal evidence")
+        self.settle_native_generation(task_id, generation, state, turn_id, event_revision)
+        # Replayed records still advance the global cursor but cannot perturb
+        # task state. A late terminal settles only its historical generation.
+        if event_revision <= int(binding["last_event_revision"]):
+            self.conn.execute("INSERT INTO native_turn_cursors(producer,last_revision,updated_at) VALUES(?,?,?) ON CONFLICT(producer) DO UPDATE SET last_revision=excluded.last_revision,updated_at=excluded.updated_at", (cursor_key, revision, self.clock()))
+            self.conn.commit()
+            return None
+        if generation != int(row["run_generation"]):
+            self.conn.execute("INSERT INTO native_turn_cursors(producer,last_revision,updated_at) VALUES(?,?,?) ON CONFLICT(producer) DO UPDATE SET last_revision=excluded.last_revision,updated_at=excluded.updated_at", (cursor_key, revision, self.clock()))
+            self.conn.commit()
+            return None
         if row["state"] in TERMINAL_STATES:
             raise ValueError("native turn attempted to change terminal task")
         summary = (result if state == "completed" else str(report.get("reason") or f"Native XCSH turn {state}."))[:MAX_SUMMARY]
         values: dict[str, Any] = {"state": mapped, "summary": summary, "output_excerpt": result if state == "completed" else row["output_excerpt"]}
+        if row["agent_session_id"] != session_id or row["native_turn_id"] != turn_id:
+            values.update(agent_session_id=session_id, native_turn_id=turn_id)
         if mapped == "waiting_human": values["question"] = summary
         if mapped in TERMINAL_STATES: values["finished_at"] = self.clock(); values["terminal_reported_at"] = self.clock()
         self.update(task_id, event=f"xcsh_turn_{state}", **values)
@@ -2547,7 +2554,8 @@ class Broker:
             raise ValueError("native_xcsh_admit requires a durable idempotency_key")
         existing = self._idempotent_admission("native_xcsh_admit", params)
         if existing is not None:
-            return existing
+            await self._reconcile_native_xcsh_admissions(existing["id"])
+            return public_task(self.db.task(existing["id"])) | {"admitted": False, "idempotency_replayed": True}  # type: ignore[arg-type]
         target = bounded(params.get("target"), 64, "target", required=True)
         if not TARGET_RE.fullmatch(target or ""):
             raise ValueError("target must match task target rules")
@@ -2557,9 +2565,8 @@ class Broker:
         if priority not in PRIORITIES:
             raise ValueError(f"priority must be one of {', '.join(PRIORITIES)}")
         workspace_id = bounded(params.get("workspace_id"), 160, "workspace_id", required=True)
-        argv = params.get("argv")
-        if not isinstance(argv, list) or not 1 <= len(argv) <= 64 or any(not isinstance(value, str) or not value or len(value) > 4096 for value in argv):
-            raise ValueError("argv must contain 1..64 non-empty bounded strings")
+        session_id = bounded(params.get("session_id"), 512, "session_id", required=True)
+        text = bounded(params.get("text", params.get("prompt")), MAX_PROMPT, "text", required=True)
         runtime_identity = params.get("runtime_identity")
         if not isinstance(runtime_identity, dict):
             raise ValueError("runtime_identity object is required")
@@ -2568,12 +2575,18 @@ class Broker:
             raise ValueError("runtime_identity must bind xcsh_artifact, herdr_artifact, and manager_artifact")
         persisted_identity = runtime_identity | {
             "workspace_id": workspace_id,
-            "argv_sha256": hashlib.sha256(json.dumps(argv, separators=(",", ":")).encode()).hexdigest(),
+            "resume_schema": "execution.resume/v1",
         }
         identity_json = json.dumps(persisted_identity, sort_keys=True, separators=(",", ":"))
         if len(identity_json) > 4000:
             raise ValueError("runtime_identity is too large")
         try:
+            pong = await self.herdr.request("ping", {}, timeout=10)
+            caps = (pong or {}).get("capabilities") or {}
+            if (int((pong or {}).get("protocol", 0)) < 20
+                    or not caps.get("tracked_executions")
+                    or not caps.get("agent_turn_journal")):
+                raise ValueError("Herdr lacks the protocol-20 tracked-executions and semantic-journal contract required for execution.resume")
             await self.herdr.request("workspace.get", {"workspace_id": workspace_id}, timeout=10)
         except Exception as exc:
             raise ValueError(f"native XCSH workspace is not available: {exc}") from exc
@@ -3785,7 +3798,7 @@ class Broker:
                     if action["state"] == "completed":
                         return public_task(self.db.task(task_id or ""))  # type: ignore[arg-type]
                 result = await self.herdr.request(
-                    "execution.cancel", {"execution_id": task_id}, timeout=10
+                    "execution.cancel", {"execution_id": execution_id}, timeout=10
                 )
                 if row["work_kind"] == "command":
                     await self._apply_native_execution(task_id or "", result["execution"])

@@ -15,6 +15,7 @@ import hashlib
 import json
 import socket
 import os
+import secrets
 import sys
 import time
 import tarfile
@@ -27,7 +28,7 @@ from typing import Any
 CATALOG = Path(__file__).with_name("xcsh-installed-uat") / "scenarios-v1.json"
 SCHEMA_VERSION = 1
 REQUIRED_CAPABILITY = "native_xcsh_admit"
-ALLOWED_HERDR_METHODS = {"ping", "agent.turn.wait", "agent.turn.list", "execution.cancel"}
+ALLOWED_HERDR_METHODS = {"ping", "agent.turn.wait", "agent.turn.list", "execution.cancel", "tab.get"}
 
 
 class PreflightError(RuntimeError):
@@ -212,11 +213,14 @@ def preflight(manifest: dict[str, Any], catalog: dict[str, Any], *, probe: bool 
         broker = unix_request(Path(runtime["broker_socket"]), "ping", {})
         pong = herdr_request(Path(runtime["herdr_socket"]), "ping", {})
         capabilities = (pong or {}).get("capabilities") or {}
-        if int((pong or {}).get("protocol", 0)) < 20 or not capabilities.get("agent_turn_journal"):
-            raise PreflightError("installed Herdr lacks protocol-20 agent_turn_journal")
+        if (int((pong or {}).get("protocol", 0)) < 20
+                or not capabilities.get("tracked_executions")
+                or not capabilities.get("agent_turn_journal")):
+            raise PreflightError("installed Herdr lacks protocol-20 tracked_executions and agent_turn_journal")
         broker_capabilities = broker.get("capabilities") or {}
         result["probe"] = {"broker": broker.get("status"), "herdr_protocol": pong.get("protocol"),
-                           "agent_turn_journal": True, "native_xcsh_admit": bool(broker_capabilities.get(REQUIRED_CAPABILITY))}
+                           "tracked_executions": True, "agent_turn_journal": True,
+                           "native_xcsh_admit": bool(broker_capabilities.get(REQUIRED_CAPABILITY))}
         if not broker_capabilities.get(REQUIRED_CAPABILITY):
             raise PreflightError("installed broker lacks required native_xcsh_admit adapter; install the matching manager artifact before live prompt UAT")
         if not broker_capabilities.get("native_turn_consumer") or broker_capabilities.get("native_turn_producer") != "xcsh":
@@ -235,6 +239,52 @@ def _journal_for_task(socket_path: Path, task_id: str, since: int) -> tuple[list
     matched = [record for record in records if (record.get("report", record) or {}).get("execution_id") == task_id]
     newest = max([since] + [int(record.get("revision", since)) for record in records])
     return matched, newest
+
+
+def require_causal_action(receipt: dict[str, Any], *, kind: str, task: dict[str, Any],
+                          records_before: list[dict[str, Any]]) -> None:
+    """Require an observed producer action, never a socket/listing surrogate.
+
+    The producer-owned adapter supplies this receipt.  These fields are not
+    XCSH CLI flags and this driver deliberately has no fallback that can
+    synthesize them from a manifest, a journal read, or a controller restart.
+    """
+    effect = receipt.get("effect") if isinstance(receipt, dict) else None
+    if receipt.get("kind") != kind or not isinstance(effect, dict):
+        raise PreflightError(f"{kind} has no authoritative causal action receipt")
+    if (effect.get("producer_session_id") != task.get("agent_session_id")
+            or effect.get("execution_id") != task.get("id")
+            or not isinstance(effect.get("producer_pid"), int) or effect["producer_pid"] <= 0):
+        raise PreflightError(f"{kind} causal receipt is not bound to the admitted producer process/session")
+    before = effect.get("before_revision")
+    if not isinstance(before, int) or before != max([0] + [int(item.get("revision", 0)) for item in records_before]):
+        raise PreflightError(f"{kind} causal receipt does not bind the observed pre-action revision")
+    if kind == "reconnect_replay":
+        if effect.get("action") != "producer_report_reply_loss" or effect.get("redelivered") is not True:
+            raise PreflightError("reconnect replay requires a producer report reply-loss/redelivery receipt")
+    elif kind == "restart_loss":
+        if effect.get("action") != "producer_process_cutpoint" or effect.get("process_exited") is not True:
+            raise PreflightError("restart requires an observed producer process/session cutpoint receipt")
+
+
+def wait_for_manager_cleanup(broker_socket: Path, herdr_socket: Path, task: dict[str, Any], deadline: float) -> dict[str, Any]:
+    """Observe manager-owned terminal cleanup; never close the tab from UAT."""
+    scheduled = False
+    while time.monotonic() < deadline:
+        status = unix_request(broker_socket, "status", {"task_id": task["id"]})
+        current = (status.get("tasks") or [None])[0]
+        if isinstance(current, dict) and current.get("cleanup_deadline") is not None:
+            scheduled = True
+        if scheduled:
+            try:
+                herdr_request(herdr_socket, "tab.get", {"tab_id": task["tab_id"]})
+            except Exception:
+                return {"task_id": task["id"], "cleanup_deadline_observed": True,
+                        "owned_tab_absent": True}
+        time.sleep(.2)
+    if not scheduled:
+        raise PreflightError("terminal consumer did not produce a manager-owned cleanup schedule receipt")
+    raise PreflightError("manager-owned cleanup was scheduled but the admitted tab did not disappear")
 
 
 def controller_from_manifest(manifest: dict[str, Any]) -> Any:
@@ -275,6 +325,7 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
                  controller: Any | None = None) -> dict[str, Any]:
     """Drive one real installed XCSH prompt through the atomic broker adapter."""
     runtime = manifest["runtime"]
+    fixture = validate_fixture(runtime, verify_file=True)
     controlled_cases = {"reconnect_replay", "generation_supersession", "cleanup", "restart_loss"}
     if case["id"] in controlled_cases and controller is None:
         raise PreflightError(f"{case['id']} requires an authenticated dedicated-runtime controller; shared/default targets are refused")
@@ -308,6 +359,7 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
     records: list[dict[str, Any]] = []
     cursor, continued, cancelled, controlled = 0, False, False, False
     control_receipt: dict[str, Any] | None = None
+    causal_before: int | None = None
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         fresh, cursor = _journal_for_task(herdr_socket, task["id"], cursor)
@@ -339,10 +391,19 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
         if states and states[-1] == "working" and case["id"] == "cancel" and not cancelled:
             unix_request(broker_socket, "request_stop", {"task_id": task["id"]})
             cancelled = True
+        if states and states[-1] == "working" and case["id"] == "reconnect_replay" and not controlled:
+            causal_before = max([0] + [int(item.get("revision", 0)) for item in records])
+            control_receipt = controller.real_action("reconnect_replay", task["pane_id"],
+                f"{run_id}:{case['id']}:reply-loss", controller.token)
+            assert_controller_identity(control_receipt, task)
+            require_causal_action(control_receipt, kind="reconnect_replay", task=task, records_before=records)
+            controlled = True
         if states and states[-1] == "working" and case["id"] == "restart_loss" and not controlled:
+            causal_before = max([0] + [int(item.get("revision", 0)) for item in records])
             control_receipt = controller.real_action("restart_loss", task["pane_id"],
                 f"{run_id}:{case['id']}:restart", controller.token)
             assert_controller_identity(control_receipt, task)
+            require_causal_action(control_receipt, kind="restart_loss", task=task, records_before=records)
             controlled = True
             socket_after = control_receipt.get("effect", {}).get("after_socket")
             if socket_after != str(herdr_socket):
@@ -352,7 +413,7 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
                 raise PreflightError("restart controller receipt did not reconnect to protocol-20 journal runtime")
         if states == case["expected_states"] and states[-1] == "waiting_input":
             observed = unix_request(broker_socket, "status", {"task_id": task["id"]})["tasks"][0]
-            validate_journal(case, records, observed, None)
+            validate_journal(case, records, observed, None, fixture=fixture)
             return {"scenario_id": case["id"], "task_id": task["id"], "pass": True, "evidence_class": "installed_waiting_input"}
         if states and states[-1] in {"completed", "failed", "cancelled", "lost", "interrupted"}:
             break
@@ -361,15 +422,15 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
         herdr_request(herdr_socket, "agent.turn.wait", {"after_revision": cursor, "timeout_ms": 1000})
     else:
         raise PreflightError(f"semantic journal timed out for {case['id']}")
-    if case["id"] == "reconnect_replay":
-        control_receipt = controller.real_action("reconnect_replay", task["pane_id"],
-            f"{run_id}:{case['id']}:reconnect", controller.token)
-        assert_controller_identity(control_receipt, task)
-        if control_receipt.get("effect", {}).get("socket") != str(herdr_socket):
-            raise PreflightError("controller reconnect receipt is not for the queried Herdr socket")
-        replayed, _ = _journal_for_task(herdr_socket, task["id"], 0)
-        if [item.get("revision") for item in replayed] != [item.get("revision") for item in records]:
-            raise AssertionError("reconnect replay did not preserve the exact journal sequence")
+    if case["id"] in {"reconnect_replay", "restart_loss"}:
+        if causal_before is None:
+            raise PreflightError(f"{case['id']} never reached its causal action boundary")
+        causal_records = [item for item in records if int(item.get("revision", 0)) > causal_before]
+        if len(causal_records) != 1:
+            raise PreflightError(f"{case['id']} requires exactly one post-action server journal revision")
+        expected_terminal = "completed" if case["id"] == "reconnect_replay" else "interrupted"
+        if causal_records[0].get("report", causal_records[0]).get("state") != expected_terminal:
+            raise PreflightError(f"{case['id']} post-action journal evidence is not {expected_terminal}")
     # Apply the real journal through the consumer, then wait for the manager's
     # own consumed receipt. The driver never acknowledges consumption itself.
     # No terminal state is inferred here: every journal record was applied
@@ -388,14 +449,9 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
         time.sleep(.2)
     if not consumed:
         raise PreflightError("manager consumption receipt was not observed; do not self-acknowledge it")
-    validate_journal(case, records, observed_task, consumed)
+    validate_journal(case, records, observed_task, consumed, fixture=fixture)
     if case["id"] == "cleanup":
-        control_receipt = controller.real_action("cleanup", task["pane_id"],
-            f"{run_id}:{case['id']}:cleanup", controller.token)
-        assert_controller_identity(control_receipt, task)
-        effect = control_receipt.get("effect", {})
-        if effect.get("closed_execution_id") != task["id"] or effect.get("closed_tab_id") != task.get("tab_id"):
-            raise PreflightError("cleanup receipt did not close the admitted execution tab")
+        control_receipt = wait_for_manager_cleanup(broker_socket, herdr_socket, task, deadline)
     if case["id"] in controlled_cases and control_receipt is None:
         raise PreflightError("required isolated controller action produced no authoritative receipt")
     return {"scenario_id": case["id"], "task_id": task["id"], "pass": True, "accepted": False,
@@ -413,12 +469,15 @@ def execute(manifest: dict[str, Any], catalog: dict[str, Any], *, run_id: str | 
             "cases": cases, "limitation": "A passing run requires separate authoritative installed_runtime and live_uat gate recording."}
 
 
-def validate_journal(case: dict[str, Any], records: list[dict[str, Any]], task: dict[str, Any], consumed: dict[str, Any] | None) -> None:
+def validate_journal(case: dict[str, Any], records: list[dict[str, Any]], task: dict[str, Any], consumed: dict[str, Any] | None,
+                     *, fixture: dict[str, str] | None = None) -> None:
     """Oracle for real journal observations; no prose/sentinel inference."""
     if not records:
         raise AssertionError("no real semantic journal records")
     expected_states = case["expected_states"]
     reports = [record.get("report", record) for record in records]
+    if any(record.get("synthetic") is True for record in records):
+        raise AssertionError("synthetic journal records are not installed-runtime evidence")
     revisions = [record.get("revision") for record in records]
     if revisions != sorted(set(revisions)):
         raise AssertionError("journal revisions are not strictly monotonic/deduplicated")
@@ -439,6 +498,9 @@ def validate_journal(case: dict[str, Any], records: list[dict[str, Any]], task: 
         result, digest = terminal.get("result"), terminal.get("result_digest")
         if not isinstance(result, str) or hashlib.sha256(result.encode()).hexdigest() != digest:
             raise AssertionError("completed result digest is invalid")
+        if case.get("expected_result") == "fixture_value":
+            if fixture is None or result != fixture["value"]:
+                raise AssertionError("completed result does not equal the prepared fixture value")
     elif terminal["state"] in {"failed", "cancelled", "lost", "interrupted"} and not terminal.get("reason"):
         raise AssertionError("non-completed terminal semantic reason is missing")
     if consumed is not None and (consumed.get("task_id") != task["id"] or consumed.get("stage") != "consumed"):
@@ -451,9 +513,15 @@ def main() -> int:
     parser.add_argument("--catalog", type=Path, default=CATALOG)
     parser.add_argument("--probe-installed", action="store_true", help="read-only socket/capability probe")
     parser.add_argument("--execute", action="store_true", help="run only against the approved dedicated installed runtime")
+    parser.add_argument("--prepare-fixture-dir", type=Path, help="create one local fixture; does not run XCSH")
     parser.add_argument("--run-id", help="stable run identity; reuse after an uncertain adapter response")
     args = parser.parse_args()
     try:
+        if args.prepare_fixture_dir:
+            if args.execute or args.probe_installed:
+                raise PreflightError("fixture preparation cannot be combined with probing or execution")
+            print(json.dumps({"fixture": prepare_fixture(args.prepare_fixture_dir), "accepted": False}, indent=2, sort_keys=True))
+            return 0
         manifest, catalog = load_json(args.manifest), load_json(args.catalog)
         receipt = execute(manifest, catalog, run_id=args.run_id) if args.execute else preflight(manifest, catalog, probe=args.probe_installed)
         print(json.dumps(receipt, indent=2, sort_keys=True))

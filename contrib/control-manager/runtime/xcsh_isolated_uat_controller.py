@@ -5,7 +5,7 @@ import argparse, hashlib, json, os, re, secrets, sqlite3, subprocess, time, uuid
 from pathlib import Path
 from typing import Any, Callable
 
-ALLOWED = {"reconnect_replay", "generation_supersession", "cleanup", "restart_loss"}
+ALLOWED = {"reconnect_replay", "generation_supersession", "restart_loss"}
 # The released XCSH JSON-mode SessionHeader.id is the producer's canonical
 # identity.  It is a 16-character lowercase hexadecimal sessionManager id,
 # not a CLI prefix, a path, or a UUID invented by this controller.
@@ -247,9 +247,6 @@ class DisposableHerdrController(IsolatedController):
                 status=self._owned_call("status","server","--json"); workspaces=self._owned_call("workspace","list")
                 effect={"reconnected":bool(status.get("running")),"socket":status.get("socket"),"workspace_count":len(workspaces.get("workspaces",[])),"execution_id":target["execution_id"]}
             elif kind=="restart_loss": effect=self._restart()
-            elif kind=="cleanup":
-                closed=self._owned_call("tab","close",target["tab_id"])
-                effect={"closed_execution_id":target["execution_id"],"closed_tab_id":target["tab_id"],"close_type":closed.get("type")}
             else:
                 if external is None: raise ControllerError("generation supersession requires the real broker continuation")
                 broker_receipt=external()
