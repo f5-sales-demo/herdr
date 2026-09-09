@@ -1,6 +1,55 @@
 use super::harness::*;
 
 #[test]
+fn native_resume_socket_claim_is_idempotent_and_rejects_replay_conflicts() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    let request = |id: &str, text: &str| {
+        serde_json::json!({
+            "id": id, "method": "execution.resume", "params": {
+                "execution_id": "semantic-replay", "generation": 3,
+                "session_id": "xcsh-session", "text": text, "cwd": base,
+            }
+        })
+    };
+    // No workspace means the post-claim launch is deliberately rejected. This
+    // exercises the socket contract without opening an external XCSH session.
+    let first = send_request(
+        &socket_path,
+        &request("native-first", "continue").to_string(),
+    );
+    assert_eq!(first["error"]["code"], "workspace_not_found");
+    let backend = send_request(
+        &socket_path,
+        r#"{"id":"native-list","method":"execution.list","params":{"since_revision":0}}"#,
+    );
+    let execution = &backend["result"]["executions"][0];
+    assert_ne!(execution["execution_id"], "semantic-replay");
+    assert_eq!(execution["semantic_execution_id"], "semantic-replay");
+    assert_eq!(execution["generation"], 3);
+    assert_eq!(
+        execution["injected_env"]["HERDR_EXECUTION_ID"],
+        "semantic-replay"
+    );
+    assert_eq!(execution["injected_env"]["HERDR_EXECUTION_GENERATION"], "3");
+    let duplicate = send_request(
+        &socket_path,
+        &request("native-retry", "continue").to_string(),
+    );
+    assert_eq!(duplicate["result"]["admitted"], false);
+    let conflict = send_request(
+        &socket_path,
+        &request("native-conflict", "different").to_string(),
+    );
+    assert_eq!(conflict["error"]["code"], "execution_generation_conflict");
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn visible_execution_owns_a_background_tab_input_exit_and_idempotency() {
     let base = unique_test_dir();
     let config_home = base.join("config");

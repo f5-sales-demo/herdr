@@ -1,7 +1,7 @@
 use crate::api::client::ApiClient;
 use crate::api::schema::{
-    ExecutionCommand, ExecutionListParams, ExecutionStartParams, ExecutionTarget,
-    ExecutionWaitParams, Method, Request,
+    ExecutionCommand, ExecutionListParams, ExecutionResumeParams, ExecutionStartParams,
+    ExecutionTarget, ExecutionWaitParams, Method, Request,
 };
 
 pub(super) fn run(args: &[String]) -> std::io::Result<i32> {
@@ -36,6 +36,7 @@ pub(super) fn run(args: &[String]) -> std::io::Result<i32> {
             timeout_ms: 30_000,
         }),
         "start" => parse_start(&args[1..])?,
+        "resume" => parse_resume(&args[1..])?,
         "help" | "--help" | "-h" => return usage_ok(),
         _ => return usage(),
     };
@@ -54,6 +55,47 @@ pub(super) fn run(args: &[String]) -> std::io::Result<i32> {
     } else {
         0
     })
+}
+
+fn parse_resume(args: &[String]) -> std::io::Result<Method> {
+    let [execution_id, generation, rest @ ..] = args else {
+        return Err(std::io::Error::other(
+            "execution id and generation required",
+        ));
+    };
+    let generation = generation
+        .parse()
+        .map_err(|_| std::io::Error::other("generation must be an integer"))?;
+    let mut session_id = None;
+    let mut cwd = None;
+    let mut text = None;
+    let mut index = 0;
+    while index < rest.len() {
+        let value = rest
+            .get(index + 1)
+            .ok_or_else(|| std::io::Error::other("resume flag requires a value"))?
+            .clone();
+        match rest[index].as_str() {
+            "--session" => session_id = Some(value),
+            "--cwd" => cwd = Some(value),
+            "--text" => text = Some(value),
+            _ => {
+                return Err(std::io::Error::other(
+                    "expected --session ID --cwd PATH --text TEXT",
+                ))
+            }
+        }
+        index += 2;
+    }
+    Ok(Method::ExecutionResume(ExecutionResumeParams {
+        execution_id: execution_id.clone(),
+        generation,
+        session_id: session_id.ok_or_else(|| std::io::Error::other("--session is required"))?,
+        cwd: cwd.ok_or_else(|| std::io::Error::other("--cwd is required"))?,
+        text: text.ok_or_else(|| std::io::Error::other("--text is required"))?,
+        workspace_id: None,
+        label: None,
+    }))
 }
 
 fn parse_start(args: &[String]) -> std::io::Result<Method> {
@@ -116,5 +158,31 @@ fn usage_ok() -> std::io::Result<i32> {
     Ok(0)
 }
 fn print_usage() {
-    eprintln!("herdr execution commands:\n  herdr execution start <id> --cwd <absolute-path> [--shell bash|zsh] -- <argv...|command-text>\n  herdr execution get <id>\n  herdr execution list [--since <revision>]\n  herdr execution wait <after-revision>\n  herdr execution cancel <id>");
+    eprintln!("herdr execution commands:\n  herdr execution start <id> --cwd <absolute-path> [--shell bash|zsh] -- <argv...|command-text>\n  herdr execution resume <semantic-id> <generation> --session <xcsh-session-id> --cwd <absolute-path> --text <text>\n  herdr execution get <backend-id>\n  herdr execution list [--since <revision>]\n  herdr execution wait <after-revision>\n  herdr execution cancel <backend-id>");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resume_cli_uses_the_native_generation_contract() {
+        let method = parse_resume(&[
+            "semantic".into(),
+            "7".into(),
+            "--session".into(),
+            "session".into(),
+            "--cwd".into(),
+            "/tmp".into(),
+            "--text".into(),
+            "continue".into(),
+        ])
+        .unwrap();
+        let Method::ExecutionResume(params) = method else {
+            panic!("expected native resume");
+        };
+        assert_eq!(params.execution_id, "semantic");
+        assert_eq!(params.generation, 7);
+        assert_eq!(params.session_id, "session");
+    }
 }

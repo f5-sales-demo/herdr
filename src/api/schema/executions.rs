@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -29,6 +30,23 @@ pub struct ExecutionStartParams {
     pub command: ExecutionCommand,
 }
 
+/// Admit an XCSH child for one immutable semantic execution generation.
+///
+/// `execution_id` is owned by the producer's semantic task. Herdr assigns a
+/// different `backend_execution_id` for the visible child it launches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExecutionResumeParams {
+    pub execution_id: String,
+    pub generation: u64,
+    pub session_id: String,
+    pub text: String,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExecutionTarget {
     pub execution_id: String,
@@ -53,6 +71,20 @@ fn default_wait_timeout_ms() -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExecutionRecord {
     pub execution_id: String,
+    /// Herdr-owned visible-child identity. It differs from `execution_id` for
+    /// native resumes and is the target for cancellation and observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producer_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub injected_env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by_backend_execution_id: Option<String>,
     pub cwd: String,
     pub command: ExecutionCommand,
     pub state: ExecutionState,

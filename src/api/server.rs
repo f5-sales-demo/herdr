@@ -502,6 +502,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::EventsSubscribe(_) => "events.subscribe",
         Method::EventsWait(_) => "events.wait",
         Method::ExecutionStart(_) => "execution.start",
+        Method::ExecutionResume(_) => "execution.resume",
         Method::ExecutionGet(_) => "execution.get",
         Method::ExecutionList(_) => "execution.list",
         Method::ExecutionWait(_) => "execution.wait",

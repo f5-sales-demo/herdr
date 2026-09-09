@@ -2,9 +2,150 @@ use std::path::PathBuf;
 
 use super::responses::{encode_error, encode_success};
 use super::App;
-use crate::api::schema::{ExecutionCommand, ExecutionStartParams, ResponseResult};
+use crate::api::schema::{
+    ExecutionCommand, ExecutionResumeParams, ExecutionStartParams, ResponseResult,
+};
 
 impl App {
+    pub(super) fn handle_execution_resume(
+        &mut self,
+        id: String,
+        params: ExecutionResumeParams,
+    ) -> String {
+        let manager = crate::execution::ExecutionManager::global();
+        let (claimed, admitted, previous) = match manager.admit_xcsh_resume(&params) {
+            Ok(result) => result,
+            Err(error) => {
+                let code = error
+                    .split(':')
+                    .next()
+                    .unwrap_or("execution_error")
+                    .to_string();
+                return encode_error(id, &code, error);
+            }
+        };
+        if !admitted {
+            return encode_success(
+                id,
+                ResponseResult::Execution {
+                    execution: claimed,
+                    admitted: false,
+                },
+            );
+        }
+        let ws_idx = if let Some(workspace_id) = params.workspace_id.as_deref() {
+            match self.parse_workspace_id(workspace_id) {
+                Some(index) => index,
+                None => {
+                    return self.fail_visible_execution(
+                        id,
+                        &claimed.execution_id,
+                        "workspace_not_found",
+                        "workspace not found",
+                    )
+                }
+            }
+        } else if let Some(active) = self.state.active {
+            active
+        } else {
+            return self.fail_visible_execution(
+                id,
+                &claimed.execution_id,
+                "workspace_not_found",
+                "no active workspace",
+            );
+        };
+        let argv = match visible_argv(&claimed.command) {
+            Ok(argv) => argv,
+            Err(error) => {
+                return self.fail_visible_execution(
+                    id,
+                    &claimed.execution_id,
+                    "invalid_command",
+                    &error,
+                )
+            }
+        };
+        let (rows, cols) = self.state.estimate_pane_size();
+        let env = claimed
+            .injected_env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let result = self
+            .state
+            .workspaces
+            .get_mut(ws_idx)
+            .ok_or_else(|| std::io::Error::other("workspace disappeared"))
+            .and_then(|workspace| {
+                workspace.create_tab_argv_command(
+                    rows,
+                    cols,
+                    PathBuf::from(&claimed.cwd),
+                    &argv,
+                    env,
+                    self.state.pane_scrollback_limit_bytes,
+                    self.state.host_terminal_theme,
+                )
+            });
+        let (tab_idx, terminal, runtime) = match result {
+            Ok(created) => created,
+            Err(error) => {
+                return self.fail_visible_execution(
+                    id,
+                    &claimed.execution_id,
+                    "execution_start_failed",
+                    &error.to_string(),
+                )
+            }
+        };
+        let pane_raw = self.state.workspaces[ws_idx].tabs[tab_idx].root_pane;
+        let pid = runtime.child_pid();
+        self.terminal_runtimes.insert(terminal.id.clone(), runtime);
+        self.state.terminals.insert(terminal.id.clone(), terminal);
+        self.state.remove_alias_shadowed_by_new_pane(pane_raw);
+        if let Some(label) = params.label {
+            self.state.workspaces[ws_idx].tabs[tab_idx].set_custom_name(label);
+        }
+        let pane_id = self
+            .public_pane_id(ws_idx, pane_raw)
+            .expect("new execution pane has public id");
+        let tab_id = self
+            .public_tab_id(ws_idx, tab_idx)
+            .expect("new execution tab has public id");
+        let execution = match manager.attach_visible(
+            &claimed.execution_id,
+            pane_raw.raw(),
+            pane_id,
+            tab_id,
+            pid,
+        ) {
+            Ok(record) => record,
+            Err(error) => return encode_error(id, "execution_tracking_failed", error),
+        };
+        // The claim and cancellation intent were persisted together before any
+        // child effect. Only after the new child is observable do we signal the
+        // superseded child, so a crash cannot leave two unrecorded authorities.
+        if let Some(old) = previous {
+            if let Some(pane_id) = old.pane_id.as_deref() {
+                if let Some((old_ws, old_pane)) = self.parse_pane_id(pane_id) {
+                    if let Some((runtime, _)) = self.lookup_runtime(old_ws, old_pane) {
+                        let _ = runtime.terminate_child();
+                    }
+                }
+            }
+        }
+        self.schedule_session_save();
+        self.emit_tab_created_events(ws_idx, tab_idx);
+        encode_success(
+            id,
+            ResponseResult::Execution {
+                execution,
+                admitted: true,
+            },
+        )
+    }
+
     pub(super) fn handle_execution_start(
         &mut self,
         id: String,
