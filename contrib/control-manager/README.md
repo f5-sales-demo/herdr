@@ -6,10 +6,12 @@ policy, fixtures, and tests. It never contains credentials, machine
 configuration, SQLite state, terminal/session history, screenshots, or
 personal operational documents.
 
-Release scope deliberately excludes unfinished XCSH UAT/controller modules,
-their fixtures, and XCSH acceptance tests. It also excludes live-release UAT
-drivers. Those are separate products/workstreams and cannot be inferred from
-this recovery-manager distribution.
+Release scope includes the reviewed source-only native XCSH admission consumer,
+installed-runtime UAT driver, disposable-runtime controller, catalog, and
+acceptance boundary. It deliberately excludes synthetic fixture runners,
+test/dev state, local receipts, credentials, installed-artifact evidence, and
+live prompt UAT. Source delivery is not release, installation, or acceptance
+evidence.
 
 ## Verify and install a release
 

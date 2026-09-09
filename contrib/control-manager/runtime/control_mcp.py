@@ -127,6 +127,19 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "native_xcsh_admit",
+        "description": "Atomically admit one installed, disposable XCSH semantic-turn execution through Herdr. Requires immutable runtime identities and an idempotency key; terminal process output never settles the task.",
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
+        "inputSchema": {"type": "object", "additionalProperties": False,
+            "required": ["target", "cwd", "priority", "prompt", "workspace_id", "argv", "runtime_identity", "idempotency_key"],
+            "properties": {"target": {"type": "string", "maxLength": 64}, "cwd": {"type": "string"},
+                "priority": {"type": "string", "enum": ["routine", "normal", "attention", "critical"]},
+                "prompt": {"type": "string", "maxLength": 32000}, "workspace_id": {"type": "string", "maxLength": 160},
+                "argv": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "string", "maxLength": 4096}},
+                "runtime_identity": {"type": "object"}, "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 160},
+                "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 90, "default": 0}}},
+    },
+    {
         "name": "status",
         "description": "Return the retained task digest or one task's current state.",
         "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True},
@@ -181,8 +194,8 @@ def call_tool(name: str, arguments: dict[str, Any]) -> Any:
         return request("reply", {"task_id": arguments.get("task_id"), "text": arguments.get("text")})
     if name == "request_stop":
         return request("request_stop", {"task_id": arguments.get("task_id")})
-    if name in {"dispatch", "run_command", "continue_task"}:
-        wait_seconds = arguments.get("wait_seconds", 0 if name == "continue_task" else 90)
+    if name in {"dispatch", "run_command", "continue_task", "native_xcsh_admit"}:
+        wait_seconds = arguments.get("wait_seconds", 0 if name in {"continue_task", "native_xcsh_admit"} else 90)
         if not isinstance(wait_seconds, int) or not 0 <= wait_seconds <= 3600:
             raise ValueError("wait_seconds must be an integer from 0 through 3600")
         if name == "dispatch":
@@ -203,13 +216,15 @@ def call_tool(name: str, arguments: dict[str, Any]) -> Any:
                 "priority": arguments.get("priority", "normal"),
                 "command": arguments.get("command"),
             }
-        else:
+        elif name == "continue_task":
             params = {
                 "task_id": arguments.get("task_id"),
                 "text": arguments.get("text"),
                 "idempotency_key": arguments.get("idempotency_key"),
                 "supersede_pending": arguments.get("supersede_pending", False),
             }
+        else:
+            params = {key: arguments.get(key) for key in ("target", "cwd", "priority", "prompt", "workspace_id", "argv", "runtime_identity", "idempotency_key")}
         if name in {"dispatch", "run_command"} and "idempotency_key" in arguments:
             params["idempotency_key"] = arguments["idempotency_key"]
         task = request(name, params)
