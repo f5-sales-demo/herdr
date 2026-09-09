@@ -255,6 +255,41 @@ def normalized_cwd(raw: str) -> str:
     return str(resolved)
 
 
+def measure_xcsh_executable(raw: str | None, *, expected_sha256: str | None = None) -> dict[str, str]:
+    """Resolve and hash the one XCSH program a native generation may launch.
+
+    This deliberately accepts neither a PATH selector nor a caller-declared
+    hash as evidence. The controller supplies an absolute path and its own
+    measurement; the broker independently canonicalizes and measures that
+    exact regular executable before durable admission and every effect retry.
+    """
+    value = bounded(raw, 16_384, "xcsh_executable", required=True)
+    assert value is not None
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError("xcsh_executable must be an absolute path")
+    try:
+        canonical = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"xcsh_executable cannot be resolved: {exc}") from exc
+    if not canonical.is_file() or not os.access(canonical, os.X_OK):
+        raise ValueError("xcsh_executable must name an executable regular file")
+    digest = hashlib.sha256()
+    try:
+        with canonical.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError as exc:
+        raise ValueError(f"xcsh_executable cannot be measured: {exc}") from exc
+    measured = digest.hexdigest()
+    if expected_sha256 is not None:
+        if not isinstance(expected_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+            raise ValueError("xcsh_executable_sha256 must be a lowercase SHA-256 digest")
+        if not hmac.compare_digest(measured, expected_sha256):
+            raise ValueError("xcsh_executable measurement differs from the controller binding")
+    return {"canonical_path": str(canonical), "sha256": measured}
+
+
 def configured_codex_binary(config: dict[str, Any]) -> str:
     """Resolve only an explicit machine binding or a discoverable executable.
 
@@ -1634,13 +1669,17 @@ class StateDB:
         session = execution.get("producer_session_id")
         workspace, tab, pane = (execution.get(key) for key in ("workspace_id", "tab_id", "pane_id"))
         request = json.loads(row["request_json"])
-        expected_argv = ["xcsh", "--resume", row["session_id"], request.get("text")]
+        executable = request.get("xcsh_executable")
+        executable_sha256 = request.get("xcsh_executable_sha256")
+        expected_argv = [executable, "--resume", row["session_id"], request.get("text")]
         command = execution.get("command")
         injected = execution.get("injected_env")
+        native_executable = execution.get("native_executable")
         if (semantic != row["semantic_execution_id"] or execution.get("generation") != generation
                 or execution.get("native_producer") != "xcsh" or session != row["session_id"]
                 or execution.get("cwd") != request.get("cwd") or workspace != row["workspace_id"]
                 or command != {"mode": "argv", "argv": expected_argv}
+                or native_executable != {"canonical_path": executable, "sha256": executable_sha256}
                 or not isinstance(injected, dict)
                 or injected.get("HERDR_EXECUTION_ID") != row["semantic_execution_id"]
                 or injected.get("HERDR_EXECUTION_GENERATION") != str(generation)
@@ -2546,8 +2585,8 @@ class Broker:
         """Atomically admit one installed XCSH execution through Herdr.
 
         This is intentionally separate from Codex dispatch.  It records a
-        durable task/idempotency claim before ``execution.start`` and waits for
-        protocol-20 semantic reports to settle it; process exit/output is not
+        durable task/idempotency claim before ``execution.resume`` and waits for
+        protocol-21 executable-binding plus semantic reports to settle it; process exit/output is not
         task success evidence.
         """
         if params.get("idempotency_key") is None:
@@ -2573,26 +2612,28 @@ class Broker:
         required_identity = ("xcsh_artifact", "herdr_artifact", "manager_artifact")
         if any(not isinstance(runtime_identity.get(key), str) or not runtime_identity[key] for key in required_identity):
             raise ValueError("runtime_identity must bind xcsh_artifact, herdr_artifact, and manager_artifact")
+        executable = measure_xcsh_executable(
+            params.get("xcsh_executable"), expected_sha256=params.get("xcsh_executable_sha256")
+        )
         persisted_identity = runtime_identity | {
             "workspace_id": workspace_id,
-            "resume_schema": "execution.resume/v1",
+            "resume_schema": "execution.resume/v2",
+            "xcsh_executable": executable["canonical_path"],
+            "xcsh_executable_sha256": executable["sha256"],
         }
         identity_json = json.dumps(persisted_identity, sort_keys=True, separators=(",", ":"))
         if len(identity_json) > 4000:
             raise ValueError("runtime_identity is too large")
         try:
-            pong = await self.herdr.request("ping", {}, timeout=10)
-            caps = (pong or {}).get("capabilities") or {}
-            if (int((pong or {}).get("protocol", 0)) < 20
-                    or not caps.get("tracked_executions")
-                    or not caps.get("agent_turn_journal")):
-                raise ValueError("Herdr lacks the protocol-20 tracked-executions and semantic-journal contract required for execution.resume")
+            await self._require_native_xcsh_resume_contract()
             await self.herdr.request("workspace.get", {"workspace_id": workspace_id}, timeout=10)
         except Exception as exc:
             raise ValueError(f"native XCSH workspace is not available: {exc}") from exc
         task_id = f"xut-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
         immutable = {"execution_id": task_id, "generation": 0, "session_id": session_id,
-                     "cwd": cwd, "workspace_id": workspace_id, "text": text}
+                     "cwd": cwd, "workspace_id": workspace_id, "text": text,
+                     "xcsh_executable": executable["canonical_path"],
+                     "xcsh_executable_sha256": executable["sha256"]}
         request_json = json.dumps(immutable, sort_keys=True, separators=(",", ":"))
         canonical = dict(params)
         canonical.pop("idempotency_key", None)
@@ -2608,6 +2649,41 @@ class Broker:
         return await self._resume_xcsh_generation(row["id"], generation=0, session_id=session_id or "",
                                                    text=text or "", label="xcsh-native-uat")
 
+    async def _require_native_xcsh_resume_contract(self) -> None:
+        """Require PR44's protocol-21 executable-binding response contract.
+
+        PR44 adds no invented capability bit: its authoritative compatibility
+        boundary is protocol 21 plus the existing tracked execution and
+        semantic-journal capabilities. Receipt validation below proves the
+        required response schema at every admission.
+        """
+        pong = await self.herdr.request("ping", {}, timeout=10)
+        caps = (pong or {}).get("capabilities") or {}
+        if (int((pong or {}).get("protocol", 0)) < 21
+                or not caps.get("tracked_executions")
+                or not caps.get("agent_turn_journal")):
+            raise ValueError("Herdr lacks the protocol-21 executable-binding, tracked-executions, and semantic-journal contract required for execution.resume")
+
+    @staticmethod
+    def _native_xcsh_effect_request(request: dict[str, Any], label: str) -> dict[str, Any]:
+        """Re-measure a persisted claim immediately before every resume effect."""
+        measured = measure_xcsh_executable(
+            request.get("xcsh_executable"), expected_sha256=request.get("xcsh_executable_sha256")
+        )
+        if (measured["canonical_path"] != request.get("xcsh_executable")
+                or measured["sha256"] != request.get("xcsh_executable_sha256")):
+            raise RuntimeError("persisted XCSH executable binding is not canonical")
+        fields = ("execution_id", "generation", "session_id", "xcsh_executable", "text", "cwd", "workspace_id")
+        return {field: request[field] for field in fields} | {"label": label}
+
+    @staticmethod
+    def _native_xcsh_public_binding(binding: sqlite3.Row) -> dict[str, Any]:
+        request = json.loads(binding["request_json"])
+        return {"native_executable": {
+            "canonical_path": request["xcsh_executable"],
+            "sha256": request["xcsh_executable_sha256"],
+        }}
+
     async def _resume_xcsh_generation(self, task_id: str, *, generation: int, session_id: str,
                                       text: str, label: str, source_generation: int | None = None,
                                       source_turn_id: str | None = None,
@@ -2615,8 +2691,21 @@ class Broker:
         row = self.db.task(task_id)
         if row is None or row["work_kind"] != "xcsh" or not row["workspace_id"]:
             raise ValueError("XCSH resume lacks an admitted task workspace")
+        # Reject a downgraded runtime before continuation CAS can allocate a
+        # new generation. A second check remains immediately before I/O below.
+        await self._require_native_xcsh_resume_contract()
+        try:
+            runtime_identity = json.loads(row["native_runtime_json"] or "{}")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("XCSH resume has malformed durable runtime provenance") from exc
+        executable = measure_xcsh_executable(
+            runtime_identity.get("xcsh_executable"),
+            expected_sha256=runtime_identity.get("xcsh_executable_sha256"),
+        )
         immutable = {"execution_id": task_id, "generation": generation, "session_id": session_id,
-                     "cwd": row["cwd"], "workspace_id": row["workspace_id"], "text": text}
+                     "cwd": row["cwd"], "workspace_id": row["workspace_id"], "text": text,
+                     "xcsh_executable": executable["canonical_path"],
+                     "xcsh_executable_sha256": executable["sha256"]}
         digest = hashlib.sha256(json.dumps(immutable, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         request_json = json.dumps(immutable, sort_keys=True, separators=(",", ":"))
         binding = self.db.claim_native_generation(task_id, generation=generation, session_id=session_id,
@@ -2635,12 +2724,13 @@ class Broker:
                     summary="Recovered the durable XCSH execution.resume receipt after an interrupted response.",
                 )
             return public_task(row) | {"admitted": False, "generation_replayed": True,
-                                       "backend_execution_id": binding["backend_execution_id"]}
+                                       "backend_execution_id": binding["backend_execution_id"]} | self._native_xcsh_public_binding(binding)
         # The exact durable claim is the only request we can replay after an
         # unknown response. Herdr's generation admission is idempotent, so
         # this neither duplicates child input nor allocates a new authority.
         try:
-            result = await self.herdr.request("execution.resume", immutable | {"label": label}, timeout=30)
+            await self._require_native_xcsh_resume_contract()
+            result = await self.herdr.request("execution.resume", self._native_xcsh_effect_request(immutable, label), timeout=30)
             execution = result.get("execution", result)
             binding = self.db.admit_native_generation(task_id, generation, execution)
             updated = self.db.update(
@@ -2653,7 +2743,7 @@ class Broker:
             admitted = bool(result.get("admitted", True))
             return public_task(updated) | {"admitted": admitted,
                                            "generation_replayed": not admitted,
-                                           "backend_execution_id": binding["backend_execution_id"]}
+                                           "backend_execution_id": binding["backend_execution_id"]} | self._native_xcsh_public_binding(binding)
         except Exception as exc:
             updated = self.db.update(task_id, event="xcsh_resume_unverified", state="unknown",
                                      herdr_state="unknown", session_state="admitting",
@@ -2673,7 +2763,10 @@ class Broker:
                 continue
             request = json.loads(binding["request_json"])
             try:
-                result = await self.herdr.request("execution.resume", request | {"label": "xcsh-native-uat"}, timeout=30)
+                await self._require_native_xcsh_resume_contract()
+                result = await self.herdr.request(
+                    "execution.resume", self._native_xcsh_effect_request(request, "xcsh-native-uat"), timeout=30
+                )
                 execution = result.get("execution", result)
                 admitted = self.db.admit_native_generation(task["id"], int(binding["generation"]), execution)
                 if int(binding["generation"]) == int(task["run_generation"]):

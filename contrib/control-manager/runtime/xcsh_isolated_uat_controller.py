@@ -209,7 +209,9 @@ class DisposableHerdrController(IsolatedController):
             session_file = str(files[0])
         return {"session_id": session, "session_file": session_file,
                 "header_sha256": hashlib.sha256(json.dumps(header, sort_keys=True).encode()).hexdigest(),
-                "json_mode_session_header": True, "resume_ready": session_file is not None}
+                "json_mode_session_header": True, "resume_ready": session_file is not None,
+                "xcsh_executable": str(xcsh_binary.resolve()),
+                "xcsh_executable_sha256": hashlib.sha256(xcsh_binary.read_bytes()).hexdigest()}
 
     def create_xcsh_session(self, xcsh_binary: Path, expected_sha256: str, cwd: Path,
                             session_dir: Path) -> dict[str, str]:
@@ -221,7 +223,9 @@ class DisposableHerdrController(IsolatedController):
                 "the producer needs a prompt-free durable session creation API"
             )
         return {"session_id": receipt["session_id"], "session_file": receipt["session_file"],
-                "header_sha256": receipt["header_sha256"]}
+                "header_sha256": receipt["header_sha256"],
+                "xcsh_executable": receipt["xcsh_executable"],
+                "xcsh_executable_sha256": receipt["xcsh_executable_sha256"]}
 
     def _restart(self) -> dict[str,Any]:
         session,service=self.ownership["session_id"],self.ownership["service_id"]

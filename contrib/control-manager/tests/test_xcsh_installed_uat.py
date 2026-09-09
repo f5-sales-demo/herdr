@@ -40,6 +40,7 @@ class InstalledPromptUatTests(unittest.TestCase):
         self.assertEqual(receipt["live_execution"], "not_started")
         self.assertEqual(len(receipt["scenario_ids"]), 9)
         self.assertIn("native_xcsh_admit", receipt["required_capabilities"])
+        self.assertEqual(json.loads(CATALOG.read_text())["native_resume_contract"]["herdr_protocol_minimum"], 21)
 
     def test_preflight_rejects_nonisolated_or_incomplete_catalog(self):
         invalid = manifest(); invalid["isolation"] = "shared_runtime"
@@ -51,6 +52,10 @@ class InstalledPromptUatTests(unittest.TestCase):
         invalid = manifest(); invalid["runtime"]["xcsh_executable_sha256"] = "b" * 64
         with self.assertRaisesRegex(PreflightError, "archive path"):
             preflight(invalid, json.loads(CATALOG.read_text()))
+        invalid_catalog = json.loads(CATALOG.read_text())
+        invalid_catalog["native_resume_contract"]["herdr_protocol_minimum"] = 20
+        with self.assertRaisesRegex(PreflightError, "protocol-21"):
+            preflight(manifest(), invalid_catalog)
 
     def test_fixture_must_bind_a_random_expected_value_and_exact_file(self):
         value = "xcsh-uat-random-fixture"
@@ -121,7 +126,7 @@ class InstalledPromptUatTests(unittest.TestCase):
         calls = []
         def fake_broker(path, method, params):
             calls.append((method, params))
-            if method == "native_xcsh_admit": return {"id": "task-1", "state": "starting", "workspace_id":"w-isolated","tab_id":"tab-1", "pane_id": "pane-1", "agent_session_id": None}
+            if method == "native_xcsh_admit": return {"id": "task-1", "state": "starting", "workspace_id":"w-isolated","tab_id":"tab-1", "pane_id": "pane-1", "agent_session_id": None, "native_executable": {"canonical_path": params["xcsh_executable"], "sha256": params["xcsh_executable_sha256"]}}
             if method == "consume_native_turns": return {"applied": [{"task_id": "task-1", "state": "completed"}]}
             if method == "status": return {"tasks": [{"id": "task-1", "pane_id": "pane-1", "agent_session_id": "session-1"}], "pending_completions": [{"task_id": "task-1", "delivery_state": "consumed"}]}
             raise AssertionError(method)
@@ -135,7 +140,7 @@ class InstalledPromptUatTests(unittest.TestCase):
             try:
                 class SyntheticController:
                     token = "synthetic"
-                    def create_xcsh_session(self, *_): return {"session_id": "session-1", "session_file": "/synthetic/session.jsonl", "header_sha256": "synthetic"}
+                    def create_xcsh_session(self, *_): return {"session_id": "session-1", "session_file": "/synthetic/session.jsonl", "header_sha256": "synthetic", "xcsh_executable": "/isolated/xcsh", "xcsh_executable_sha256": "a" * 64}
                     def register_execution(self, task): self.task = task
                 receipt = execute_case(self.prepared_manifest(Path(raw)), case, run_id="stable", controller=SyntheticController())
             finally:
@@ -143,6 +148,8 @@ class InstalledPromptUatTests(unittest.TestCase):
         self.assertTrue(receipt["pass"])
         self.assertFalse(receipt["accepted"])
         self.assertEqual(calls[0][0], "native_xcsh_admit")
+        self.assertEqual(calls[0][1]["xcsh_executable"], "/isolated/xcsh")
+        self.assertEqual(calls[0][1]["xcsh_executable_sha256"], "a" * 64)
         self.assertFalse(any(method == "ack_completion" for method, _ in calls))
 
     def test_restart_boundary_requires_and_records_authenticated_controller_action(self):
@@ -159,13 +166,13 @@ class InstalledPromptUatTests(unittest.TestCase):
         class Controller:
             token="token"
             calls=[]
-            def create_xcsh_session(self, *_): return {"session_id": "session-1", "session_file": "/synthetic/session.jsonl", "header_sha256": "synthetic"}
+            def create_xcsh_session(self, *_): return {"session_id": "session-1", "session_file": "/synthetic/session.jsonl", "header_sha256": "synthetic", "xcsh_executable": "/isolated/xcsh", "xcsh_executable_sha256": "a" * 64}
             def register_execution(self, task): self.registered=task
             def real_action(self, kind, pane, key, token, external=None):
                 self.calls.append((kind,pane,key,token)); return {"kind":kind,"execution_id":"task-1","workspace_id":"w-isolated","tab_id":"tab-1","pane_id":pane,"session_id":"owned","effect":{"action":"producer_process_cutpoint","producer_session_id":"session-1","producer_pid":123,"execution_id":"task-1","before_revision":2,"process_exited":True,"stop_exit":0,"after_socket":"/isolated/herdr.sock"}}
         controller=Controller(); ticks=[0]
         def fake_broker(path, method, params):
-            if method == "native_xcsh_admit": return {"id":"task-1","state":"starting","workspace_id":"w-isolated","tab_id":"tab-1","pane_id":"pane-1","agent_session_id":"session-1"}
+            if method == "native_xcsh_admit": return {"id":"task-1","state":"starting","workspace_id":"w-isolated","tab_id":"tab-1","pane_id":"pane-1","agent_session_id":"session-1", "native_executable": {"canonical_path": params["xcsh_executable"], "sha256": params["xcsh_executable_sha256"]}}
             if method == "consume_native_turns": return {"applied":[{"task_id":"task-1","state":reports[max(0,ticks[0]-1)]["report"]["state"]}]}
             if method == "status": return {"tasks":[{"id":"task-1","pane_id":"pane-1","agent_session_id":"session-1"}],"pending_completions":[{"task_id":"task-1","delivery_state":"consumed"}]}
             raise AssertionError(method)

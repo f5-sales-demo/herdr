@@ -200,6 +200,12 @@ def preflight(manifest: dict[str, Any], catalog: dict[str, Any], *, probe: bool 
     scenarios = catalog.get("scenarios")
     if catalog.get("catalog_version") != 1 or not isinstance(scenarios, list) or not scenarios:
         raise PreflightError("invalid installed prompt catalog")
+    if catalog.get("native_resume_contract") != {
+            "execution_resume_schema": "execution.resume/v2",
+            "herdr_protocol_minimum": 21,
+            "required_herdr_capabilities": ["tracked_executions", "agent_turn_journal"],
+    }:
+        raise PreflightError("catalog does not bind the protocol-21 executable resume contract")
     names = {case.get("id") for case in scenarios}
     expected = {"success", "failure", "waiting_input", "cancel", "continuation", "reconnect_replay", "generation_supersession", "cleanup", "restart_loss"}
     if names != expected:
@@ -213,10 +219,10 @@ def preflight(manifest: dict[str, Any], catalog: dict[str, Any], *, probe: bool 
         broker = unix_request(Path(runtime["broker_socket"]), "ping", {})
         pong = herdr_request(Path(runtime["herdr_socket"]), "ping", {})
         capabilities = (pong or {}).get("capabilities") or {}
-        if (int((pong or {}).get("protocol", 0)) < 20
-                or not capabilities.get("tracked_executions")
-                or not capabilities.get("agent_turn_journal")):
-            raise PreflightError("installed Herdr lacks protocol-20 tracked_executions and agent_turn_journal")
+        contract = catalog["native_resume_contract"]
+        if (int((pong or {}).get("protocol", 0)) < contract["herdr_protocol_minimum"]
+                or any(not capabilities.get(name) for name in contract["required_herdr_capabilities"])):
+            raise PreflightError("installed Herdr lacks protocol-21 executable binding, tracked_executions, and agent_turn_journal")
         broker_capabilities = broker.get("capabilities") or {}
         result["probe"] = {"broker": broker.get("status"), "herdr_protocol": pong.get("protocol"),
                            "tracked_executions": True, "agent_turn_journal": True,
@@ -340,15 +346,27 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
             Path(runtime["xcsh_session_dir"]) / f"{run_id}-{case['id']}-{uuid.uuid4().hex}",
         )
         session_id = session_receipt["session_id"]
+        executable = session_receipt.get("xcsh_executable")
+        executable_sha256 = session_receipt.get("xcsh_executable_sha256")
+        manifest_executable = Path(runtime["xcsh_executable"]).resolve()
+        manifest_sha256 = runtime["xcsh_executable_sha256"]
+        if (not isinstance(executable, str) or not Path(executable).is_absolute()
+                or not isinstance(executable_sha256, str)
+                or executable != str(manifest_executable)
+                or executable_sha256.lower() != manifest_sha256.lower()):
+            raise PreflightError("controller session receipt does not bind the measured installed XCSH executable")
     except Exception as exc:
         raise PreflightError(f"controller could not create a measured XCSH session: {exc}") from exc
     task = unix_request(broker_socket, "native_xcsh_admit", {
         "target": "xcsh-native-uat", "cwd": runtime.get("cwd", "/isolated/xcsh-native-uat"),
         "priority": "routine", "prompt": case["prompt"], "text": prompt,
         "session_id": session_id, "workspace_id": runtime["workspace_id"],
+        "xcsh_executable": executable, "xcsh_executable_sha256": executable_sha256,
         "runtime_identity": {f"{name}_artifact": artifact_id(manifest["artifacts"][name], name) for name in ("xcsh", "herdr", "manager")},
         "idempotency_key": f"installed-xcsh-uat:{run_id}:{case['id']}",
     })
+    if task.get("native_executable") != {"canonical_path": executable, "sha256": executable_sha256}:
+        raise PreflightError("broker admission did not return the measured native executable binding")
     if task.get("state") == "unknown":
         raise PreflightError("native_xcsh_admit returned uncertain launch; reuse the same run_id after reconciliation, never create another task")
     if controller is not None:
@@ -410,7 +428,7 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
                 herdr_socket = Path(socket_after) if isinstance(socket_after, str) else herdr_socket
             pong = herdr_request(herdr_socket, "ping", {})
             if int((pong or {}).get("protocol", 0)) < 20 or not ((pong or {}).get("capabilities") or {}).get("agent_turn_journal"):
-                raise PreflightError("restart controller receipt did not reconnect to protocol-20 journal runtime")
+                raise PreflightError("restart controller receipt did not reconnect to protocol-21 executable-binding journal runtime")
         if states == case["expected_states"] and states[-1] == "waiting_input":
             observed = unix_request(broker_socket, "status", {"task_id": task["id"]})["tasks"][0]
             validate_journal(case, records, observed, None, fixture=fixture)

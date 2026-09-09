@@ -64,6 +64,8 @@ class ControllerTests(unittest.TestCase):
    receipt=controller.probe_xcsh_json_session(binary,hashlib.sha256(binary.read_bytes()).hexdigest(),root,root/'sessions')
    self.assertRegex(receipt['session_id'],r'^[0-9a-f]{16}$')
    self.assertTrue(receipt['json_mode_session_header'])
+   self.assertEqual(receipt['xcsh_executable'],str(binary.resolve()))
+   self.assertEqual(receipt['xcsh_executable_sha256'],hashlib.sha256(binary.read_bytes()).hexdigest())
    # v21.19.0 exposes no prompt-free durable session creation. This is the
    # concrete producer dependency, deliberately not forged by a test shim.
    self.assertFalse(receipt['resume_ready'])
