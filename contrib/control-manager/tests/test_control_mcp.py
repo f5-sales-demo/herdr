@@ -16,11 +16,15 @@ class ControlMcpTests(unittest.TestCase):
 
         with patch.object(control_mcp, "request", side_effect=fake_request):
             result = control_mcp.call_tool(
-                "continue_task", {"task_id": "ctl-test", "text": "follow up"}
+                "continue_task",
+                {"task_id": "ctl-test", "text": "follow up", "idempotency_key": "followup-1"},
             )
 
         self.assertEqual(result["state"], "working")
-        self.assertEqual(calls, [("continue_task", {"task_id": "ctl-test", "text": "follow up"})])
+        self.assertEqual(calls, [("continue_task", {
+            "task_id": "ctl-test", "text": "follow up",
+            "idempotency_key": "followup-1", "supersede_pending": False,
+        })])
 
 
 if __name__ == "__main__":

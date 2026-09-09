@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-from appserver_manager import MANAGER_CWD, MANAGER_EFFORT, MANAGER_MODEL, REQUIRED_CONTROL_TOOLS, activate_refreshed_tools, hold, manager_config, native_pane_health, probe, refresh_tools, resume_once
+from appserver_manager import MANAGER_CWD, MANAGER_EFFORT, MANAGER_MODEL, REQUIRED_CONTROL_TOOLS, activate_refreshed_tools, ensure, hold, manager_config, native_pane_health, probe, refresh_tools, refresh_tools_in_place, resume_once
 
 
 class FakeRefreshServer:
@@ -20,6 +20,10 @@ class FakeRefreshServer:
         self.calls.append((method, params))
         if method == "thread/read":
             return {"thread": {"id": "old-thread", "name": "Control Manager", "cwd": MANAGER_CWD}}
+        if method == "thread/turns/list":
+            return {"data": [{"id": "failed-turn", "status": "failed", "error": "transient transport"}]}
+        if method == "thread/resume":
+            return {"thread": {"id": params["threadId"], "name": "Control Manager", "cwd": MANAGER_CWD}}
         if method == "thread/fork":
             return {"thread": {"id": "new-thread"}}
         if method == "mcpServerStatus/list":
@@ -65,6 +69,20 @@ class ManagerRealtimeConfigTests(unittest.TestCase):
             refresh_tools(server, "old-thread")
         archives = [params["threadId"] for method, params in server.calls if method == "thread/archive"]
         self.assertEqual(archives, ["new-thread"])
+
+    def test_automatic_refresh_surface_preserves_canonical_identity_in_place(self):
+        server = FakeRefreshServer()
+        with patch("appserver_manager.persist_config") as persist:
+            result = refresh_tools_in_place(server, "old-thread")
+        self.assertTrue(result["refreshed_in_place"])
+        self.assertEqual(result["canonical_thread_id"], "old-thread")
+        methods = [method for method, _params in server.calls]
+        self.assertIn("thread/resume", methods)
+        self.assertIn("config/mcpServer/reload", methods)
+        self.assertNotIn("thread/fork", methods)
+        self.assertNotIn("thread/archive", methods)
+        self.assertNotIn("thread/name/set", methods)
+        persist.assert_not_called()
 
     def test_guarded_activation_promotes_only_verified_full_history_candidate(self):
         server=FakeRefreshServer()
@@ -152,6 +170,44 @@ class ManagerRealtimeConfigTests(unittest.TestCase):
                 hold(server, "old-thread")
         diagnostic = next(call for call in printed.call_args_list if str(call.args[0]).startswith("manager response correlated"))
         self.assertIs(diagnostic.kwargs.get("file"), sys.stderr)
+
+    def test_long_history_observer_uses_metadata_heartbeat_and_subscribed_events(self):
+        server = FakeRefreshServer()
+        original = server.request
+        def request(method, params=None):
+            if method == "thread/read" and params.get("includeTurns"):
+                raise RuntimeError("full history read exceeded fixture deadline")
+            return original(method, params)
+        server.request = request
+        messages = iter((__import__("socket").timeout(), RuntimeError("stop observer fixture")))
+        def receive(_timeout):
+            value = next(messages)
+            if isinstance(value, Exception):
+                raise value
+            return value
+        server._receive_json = receive
+        with patch("appserver_manager.CONFIG_PATH") as config, \
+             patch("appserver_manager.report_manager_lifecycle"), \
+             patch("builtins.print"):
+            config.read_text.return_value = "{}"
+            with self.assertRaisesRegex(RuntimeError, "stop observer fixture"):
+                hold(server, "old-thread")
+        reads = [params for method, params in server.calls if method == "thread/read"]
+        self.assertGreaterEqual(len(reads), 2)
+        self.assertTrue(all(params["includeTurns"] is False for params in reads))
+        self.assertNotIn("thread/fork", [method for method, _params in server.calls])
+
+    def test_ensure_persists_nondefault_owned_appserver_remote(self):
+        server = FakeRefreshServer()
+        with tempfile.TemporaryDirectory() as raw:
+            config = Path(raw) / "machine.json"
+            config.write_text(json.dumps({"manager_thread_id": "old-thread"}))
+            with patch("appserver_manager.CONFIG_PATH", config), \
+                 patch("appserver_manager.APP_SERVER_REMOTE", "unix:///owned/appserver.sock"):
+                result = ensure(server)
+            persisted = json.loads(config.read_text())
+        self.assertEqual(result["thread_id"], "old-thread")
+        self.assertEqual(persisted["app_server_remote"], "unix:///owned/appserver.sock")
 
     def test_resume_once_preserves_exact_thread_identity(self):
         server=FakeRefreshServer()

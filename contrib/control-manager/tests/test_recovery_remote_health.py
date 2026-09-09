@@ -19,6 +19,7 @@ class RemoteHealth(unittest.IsolatedAsyncioTestCase):
   class Server:
    def request(self,method,params):
     if method=='thread/read':return {'thread':{'id':'same'}}
+    if method=='thread/turns/list':return {'data':[]}
     if method=='mcpServerStatus/list':return {'data':[]}
     if method=='remoteControl/status/read':raise RuntimeError('unsupported method')
   result=probe(Server(),'same');self.assertEqual(result['thread']['id'],'same');self.assertEqual(result['remote_control']['status'],'unknown')

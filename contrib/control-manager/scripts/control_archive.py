@@ -153,7 +153,14 @@ def attest(args: argparse.Namespace) -> None:
         installed = destination / "installed"
         state = destination / "state"
         installer = source / "runtime" / "control_portable.py"
-        environment = dict(os.environ, CODEX_CONTROL_ROOT=str(installed), CODEX_CONTROL_STATE_DIR=str(state))
+        owned_appserver = destination / "owned-appserver.sock"
+        environment = dict(
+            os.environ,
+            CODEX_CONTROL_ROOT=str(installed),
+            CODEX_CONTROL_STATE_DIR=str(state),
+            CODEX_APP_SERVER_SOCKET=str(owned_appserver),
+            CODEX_APP_SERVER_REMOTE=f"unix://{owned_appserver}",
+        )
         subprocess.run(
             [sys.executable, str(installer), "install", "--source", str(source), "--target", str(installed)],
             env=environment, check=True, stdout=subprocess.PIPE, text=True,

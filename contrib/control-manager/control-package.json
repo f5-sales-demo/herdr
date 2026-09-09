@@ -1,7 +1,7 @@
 {
   "name": "control-manager",
-  "package_version": 20,
-  "state_schema_version": 10,
+  "package_version": 21,
+  "state_schema_version": 11,
   "policy": "POLICY.md",
   "shared_policy": "control-policy.json",
   "commit_message_policy": "autonomous_conventional",

@@ -76,15 +76,17 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "continue_task",
-        "description": "Queue a follow-up into the identical tracked Codex session and return promptly; if its owned tab was cleaned up, resume that native session in a new visible tab. Use wait_seconds=0 while a task is working.",
-        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False},
+        "description": "Apply a correction to the exact tracked Codex task. While its turn is active this uses same-turn AppServer steering and never queues future work or increments the run generation. Reuse idempotency_key after response uncertainty; uncertain delivery is retained and never replayed. Set supersede_pending=true only to preserve then remove this task's broker-owned legacy queued followups. Dispatch future independent work as a distinct task or feature stage.",
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["task_id", "text"],
+            "required": ["task_id", "text", "idempotency_key"],
             "properties": {
                 "task_id": {"type": "string", "maxLength": 80},
                 "text": {"type": "string", "maxLength": 16000},
+                "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 160, "description": "Stable caller-generated delivery key. Reuse only with identical arguments."},
+                "supersede_pending": {"type": "boolean", "default": False, "description": "Explicitly preserve and remove only broker-owned legacy queued followups for this task before steering."},
                 "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 3600, "default": 0},
             },
         },
@@ -202,7 +204,12 @@ def call_tool(name: str, arguments: dict[str, Any]) -> Any:
                 "command": arguments.get("command"),
             }
         else:
-            params = {"task_id": arguments.get("task_id"), "text": arguments.get("text")}
+            params = {
+                "task_id": arguments.get("task_id"),
+                "text": arguments.get("text"),
+                "idempotency_key": arguments.get("idempotency_key"),
+                "supersede_pending": arguments.get("supersede_pending", False),
+            }
         if name in {"dispatch", "run_command"} and "idempotency_key" in arguments:
             params["idempotency_key"] = arguments["idempotency_key"]
         task = request(name, params)

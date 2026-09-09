@@ -264,6 +264,7 @@ async def appserver_probe(cfg: dict[str, Any], config_path: Path) -> tuple[bool,
     command=cfg.get("appserver_probe_command") or ["/usr/bin/python3",str(runtime_root() / "appserver_manager.py"),"probe",thread]
     if not isinstance(command,list) or not all(isinstance(item,str) for item in command): return False,"invalid appserver_probe_command",{}
     env=os.environ | {"CODEX_APP_SERVER_SOCKET":str(cfg["app_server_socket"]),"CODEX_CONTROL_CONFIG_PATH":str(config_path)}
+    if cfg.get("app_server_remote"): env["CODEX_APP_SERVER_REMOTE"]=str(cfg["app_server_remote"])
     try:
         code,out,err=await bounded_process(command,env)
         if code: return False,f"app-server probe exit {code}: {(err or out)[-400:]}",{}
@@ -291,6 +292,7 @@ async def native_manager_probe(cfg: dict[str, Any], config_path: Path) -> tuple[
     env=os.environ | {"CODEX_CONTROL_CONFIG_PATH":str(config_path)}
     if cfg.get("herdr_socket"): env["CODEX_CONTROL_HERDR_SOCKET"]=str(cfg["herdr_socket"])
     if cfg.get("app_server_socket"): env["CODEX_APP_SERVER_SOCKET"]=str(cfg["app_server_socket"])
+    if cfg.get("app_server_remote"): env["CODEX_APP_SERVER_REMOTE"]=str(cfg["app_server_remote"])
     try:
         code,out,err=await bounded_process(command,env)
         if code: return "unavailable",f"native manager pane probe exit {code}: {(err or out)[-400:]}",{}
@@ -450,6 +452,7 @@ class Supervisor:
                 env=os.environ.copy()
                 bindings={
                     "CODEX_APP_SERVER_SOCKET": cfg.get("app_server_socket"),
+                    "CODEX_APP_SERVER_REMOTE": cfg.get("app_server_remote"),
                     "CODEX_CONTROL_CONFIG_PATH": str(self.config),
                     "CODEX_CONTROL_HERDR_SOCKET": cfg.get("herdr_socket"),
                     "CONTROL_BROKER_SOCKET": cfg.get("broker_socket"),
@@ -647,6 +650,7 @@ class Supervisor:
                 return {"state":"blocked","reason":"exact failed turn id was not retained for authoritative reread"}
             argv=["/usr/bin/python3",str(runtime_root() / "appserver_manager.py"),"resume",thread,failed_turn]
             env=os.environ | {"CODEX_APP_SERVER_SOCKET":str(cfg.get("app_server_socket") or ""),"CODEX_CONTROL_CONFIG_PATH":str(self.config)}
+            if cfg.get("app_server_remote"): env["CODEX_APP_SERVER_REMOTE"]=str(cfg["app_server_remote"])
             try:
                 code,out,err=await bounded_process(argv,env,timeout=float(cfg.get("recovery_action_timeout",30)))
             except Exception as exc: return {"state":"failed","reason":str(exc)}
@@ -655,12 +659,15 @@ class Supervisor:
             thread=str(cfg.get("manager_thread_id") or "")
             if not allowed:
                 return {"state":"waiting_rollout","reason":"capability candidate refresh requires isolated_active or explicitly enabled guarded_live mode"}
-            command="refresh-tools-activate" if mode == "guarded_live" and cfg.get("recovery_live_enabled") is True else "refresh-tools"
+            # Automatic recovery may refresh only the exact canonical thread.
+            # Candidate creation/promotion remains an explicit manual action.
+            command="refresh-tools-in-place"
             argv=["/usr/bin/python3",str(runtime_root() / "appserver_manager.py"),command,thread]
             env=os.environ | {"CODEX_APP_SERVER_SOCKET":str(cfg.get("app_server_socket") or ""),"CODEX_CONTROL_CONFIG_PATH":str(self.config)}
+            if cfg.get("app_server_remote"): env["CODEX_APP_SERVER_REMOTE"]=str(cfg["app_server_remote"])
             try: code,out,err=await bounded_process(argv,env,timeout=float(cfg.get("recovery_action_timeout",30)))
             except Exception as exc: return {"state":"failed","reason":str(exc)}
-            return {"state":"completed" if code == 0 else "failed","reason":"verified candidate capability refresh completed" if code == 0 else err[-1000:],"stdout":out[-1000:]}
+            return {"state":"completed" if code == 0 else "failed","reason":"canonical manager capabilities refreshed in place" if code == 0 else err[-1000:],"stdout":out[-1000:]}
         commands=cfg.get("recovery_commands") or {}
         argv=commands.get(name)
         # Guarded live mode is deliberately concrete rather than a guessed
@@ -671,7 +678,9 @@ class Supervisor:
                 and cfg.get("recovery_live_enabled") is True):
             component=name.removeprefix("restart_")
             unit=(cfg.get("component_units") or {}).get(component)
-            if isinstance(unit,str) and __import__("re").fullmatch(r"[A-Za-z0-9_.@-]{1,120}(?:\.service)?",unit):
+            if component == "app_server" and isinstance(unit, str) and unit:
+                return {"state":"waiting_rollout","reason":"app_server must use the supported Codex daemon restart; systemd registration units are not runtime daemons"}
+            if component != "app_server" and isinstance(unit,str) and __import__("re").fullmatch(r"[A-Za-z0-9_.@-]{1,120}(?:\.service)?",unit):
                 argv=["systemctl","--user","restart",unit]
             elif component == "app_server":
                 # Codex can own the app-server as its supported daemon rather
@@ -740,8 +749,9 @@ class Supervisor:
                     outcome[f"restart:{name}"]={"state":"degraded","reason":"missing positive infrastructure evidence; authentication/quota/provider/unknown errors forbid local restart"}
                     continue
                 outcome[f"restart:{name}"]=await self._run_action(cfg,action,f"restart_{name}")
-        # Missing tools are a capability gap, never an app-server restart. A
-        # guarded refresh forks only a verified candidate via appserver_manager.
+        # Missing tools are a capability gap, never an app-server restart.
+        # Automatic refresh resumes and reloads only the canonical thread;
+        # candidate creation/promotion is an explicitly manual operation.
             tools_item=after_by.get("broker_tools",{})
             inventory=(after.get("authoritative") or {}).get("control_broker") or {}
             inventory_confirmed=(after_by.get("app_server",{}).get("status") == "healthy"

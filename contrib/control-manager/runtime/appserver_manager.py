@@ -29,6 +29,7 @@ CONFIG_PATH = machine_config_path()
 APP_SERVER_SOCKET = os.environ.get(
     "CODEX_APP_SERVER_SOCKET", str(Path.home() / ".codex/app-server-control/app-server-control.sock")
 )
+APP_SERVER_REMOTE = os.environ.get("CODEX_APP_SERVER_REMOTE") or f"unix://{APP_SERVER_SOCKET}"
 HERDR_SOCKET = os.environ.get("CODEX_CONTROL_HERDR_SOCKET", str(Path.home() / ".config/herdr/herdr.sock"))
 BROKER_SOCKET = os.environ.get("CONTROL_BROKER_SOCKET", str(state_root() / "control.sock"))
 MANAGER_MODEL = "gpt-6-astra"
@@ -38,6 +39,10 @@ REQUIRED_CONTROL_TOOLS = {
     "continue_task", "status", "reply", "request_stop", "create_feature",
     "feature_status", "record_feature_evidence",
 }
+
+
+class AppServerResponseError(RuntimeError):
+    """A definite JSON-RPC rejection, distinct from transport uncertainty."""
 
 
 def manager_config() -> dict[str, Any]:
@@ -262,7 +267,9 @@ class AppServer:
                 continue
             if "error" in message:
                 error = message["error"]
-                raise RuntimeError(f"app-server {error.get('code', 'error')}: {error.get('message', error)}")
+                raise AppServerResponseError(
+                    f"app-server {error.get('code', 'error')}: {error.get('message', error)}"
+                )
             return message.get("result")
 
     def _queue_notification(self, message: dict[str, Any]) -> None:
@@ -351,7 +358,7 @@ def persist_config(thread_id: str) -> None:
         "manager_thread_id": thread_id,
         "manager_thread_name": MANAGER_NAME,
         "manager_cwd": MANAGER_CWD,
-        "app_server_remote": "unix://",
+        "app_server_remote": APP_SERVER_REMOTE,
         "profile": "control-manager",
         "updated_at": int(time.time()),
     }
@@ -618,6 +625,52 @@ def refresh_tools(server: AppServer, thread_id: str) -> dict[str, Any]:
         "promotion": "requires separate authorized install/rollout action",
     }
 
+
+def refresh_tools_in_place(server: AppServer, thread_id: str) -> dict[str, Any]:
+    """Reload the canonical manager's MCP inventory without changing identity."""
+    source = server.request(
+        "thread/read", {"threadId": thread_id, "includeTurns": False}
+    )["thread"]
+    if source.get("id") != thread_id or source.get("name") != MANAGER_NAME or source.get("cwd") != MANAGER_CWD:
+        raise RuntimeError("tool refresh source is not the canonical Control Manager")
+    resumed = server.request(
+        "thread/resume",
+        {
+            "threadId": thread_id,
+            "cwd": MANAGER_CWD,
+            "approvalPolicy": "never",
+            "model": MANAGER_MODEL,
+            "config": manager_config(),
+            "excludeTurns": True,
+        },
+    )["thread"]
+    if resumed.get("id") != thread_id or resumed.get("cwd") != MANAGER_CWD:
+        raise RuntimeError("in-place tool refresh changed canonical manager identity")
+    server.request("config/mcpServer/reload", None)
+    status = server.request(
+        "mcpServerStatus/list",
+        {"threadId": thread_id, "detail": "toolsAndAuthOnly"},
+    )
+    control = next(
+        (item for item in status.get("data", []) if item.get("name") == "control_broker"),
+        None,
+    )
+    tools = set((control or {}).get("tools", {}))
+    missing = REQUIRED_CONTROL_TOOLS - tools
+    if control is None or control.get("runtimeStatus") != "connected" or missing:
+        raise RuntimeError(f"canonical control broker inventory is incomplete: missing={sorted(missing)}")
+    verified = server.request(
+        "thread/read", {"threadId": thread_id, "includeTurns": False}
+    )["thread"]
+    if verified.get("id") != thread_id or verified.get("name") != MANAGER_NAME or verified.get("cwd") != MANAGER_CWD:
+        raise RuntimeError("canonical manager identity changed during in-place tool refresh")
+    return {
+        "canonical_thread_id": thread_id,
+        "tools": sorted(tools),
+        "canonical_unchanged": True,
+        "refreshed_in_place": True,
+    }
+
 def activate_refreshed_tools(server: AppServer, thread_id: str) -> dict[str,Any]:
     """Verify a full-history candidate, then atomically select it as canonical.
 
@@ -648,7 +701,11 @@ def activate_refreshed_tools(server: AppServer, thread_id: str) -> dict[str,Any]
 
 def probe(server: AppServer, thread_id: str) -> dict[str, Any]:
     """Read one exact canonical thread and MCP inventory without mutation."""
-    thread = server.request("thread/read", {"threadId": thread_id, "includeTurns": True})["thread"]
+    thread = server.request("thread/read", {"threadId": thread_id, "includeTurns": False})["thread"]
+    recent = server.request(
+        "thread/turns/list",
+        {"threadId": thread_id, "limit": 1, "sortDirection": "desc", "itemsView": "notLoaded"},
+    )
     # The exact-thread read is the transport/readiness authority.  Inventory
     # lookup can fail for a loaded thread (including thread-not-found during an
     # MCP refresh) and must not recategorize a healthy app-server as down.
@@ -660,7 +717,7 @@ def probe(server: AppServer, thread_id: str) -> dict[str, Any]:
     except Exception as exc:
         control_state = {"inventory_verified": False, "runtime_status": "unknown", "tools": [],
                          "inventory_error": f"{type(exc).__name__}: {exc}"[:500]}
-    turns = thread.get("turns") or []
+    turns = recent.get("data") or []
     last = turns[-1] if turns else {}
     # Remote transport is independent of manager readiness. Unsupported or
     # failed status RPCs must not turn a healthy app-server into a restart.
@@ -767,8 +824,11 @@ def resume_once(server: AppServer, thread_id: str, expected_failed_turn_id: str)
         raise RuntimeError("manager recovery requires the exact failed turn id")
     # Re-read immediately before mutation.  A stale supervisor observation
     # must not append a recovery turn after a user/new manager turn won a race.
-    authoritative = server.request("thread/read", {"threadId": thread_id, "includeTurns": True})["thread"]
-    turns = authoritative.get("turns") or []
+    authoritative = server.request("thread/read", {"threadId": thread_id, "includeTurns": False})["thread"]
+    turns = server.request(
+        "thread/turns/list",
+        {"threadId": thread_id, "limit": 1, "sortDirection": "desc", "itemsView": "notLoaded"},
+    ).get("data") or []
     last = turns[-1] if turns else {}
     if last.get("id") != expected_failed_turn_id or last.get("status") != "failed":
         raise RuntimeError("authoritative failed turn changed before recovery continuation")
@@ -808,11 +868,14 @@ def hold(server: AppServer, thread_id: str) -> None:
     # Resume attaches the observer to the canonical native thread; this read is
     # authoritative and does not replay a turn or alter its identity/history.
     authoritative = server.request(
-        "thread/read", {"threadId": thread_id, "includeTurns": True}
+        "thread/read", {"threadId": thread_id, "includeTurns": False}
     )["thread"]
     if authoritative.get("id") != thread_id:
         raise RuntimeError("manager observer read returned a different thread")
-    turns = authoritative.get("turns") or []
+    turns = server.request(
+        "thread/turns/list",
+        {"threadId": thread_id, "limit": 1, "sortDirection": "desc", "itemsView": "notLoaded"},
+    ).get("data") or []
     latest_turn = turns[-1] if turns else {}
     latest_status = latest_turn.get("status") or authoritative.get("status") or "idle"
     latest_error = latest_turn.get("error")
@@ -851,12 +914,10 @@ def hold(server: AppServer, thread_id: str) -> None:
             # transport liveness and the exact native thread's current state.
             try:
                 observed = server.request(
-                    "thread/read", {"threadId": thread_id, "includeTurns": True}
+                    "thread/read", {"threadId": thread_id, "includeTurns": False}
                 )["thread"]
-                observed_turns = observed.get("turns") or []
-                observed_last = observed_turns[-1] if observed_turns else {}
-                latest_status = observed_last.get("status") or observed.get("status") or "idle"
-                latest_error = observed_last.get("error")
+                if observed.get("id") != thread_id:
+                    raise RuntimeError("manager heartbeat read returned a different thread")
                 emit_heartbeat(latest_status, latest_error)
             except Exception as exc:
                 emit_heartbeat("transport_error", {
@@ -925,7 +986,7 @@ def hold(server: AppServer, thread_id: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "command", choices=("ensure", "verify", "candidate", "replace", "refresh-tools", "refresh-tools-activate", "hold", "probe", "native-pane-health", "resume"), nargs="?", default="ensure"
+        "command", choices=("ensure", "verify", "candidate", "replace", "refresh-tools", "refresh-tools-in-place", "refresh-tools-activate", "hold", "probe", "native-pane-health", "resume"), nargs="?", default="ensure"
     )
     parser.add_argument("thread_id", nargs="?")
     parser.add_argument("expected_failed_turn_id", nargs="?")
@@ -956,6 +1017,12 @@ def main() -> int:
             if not args.thread_id:
                 raise RuntimeError("refresh-tools requires a thread id")
             result = refresh_tools(server, args.thread_id)
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
+        if args.command == "refresh-tools-in-place":
+            if not args.thread_id:
+                raise RuntimeError("refresh-tools-in-place requires a thread id")
+            result = refresh_tools_in_place(server, args.thread_id)
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0
         if args.command == "refresh-tools-activate":
