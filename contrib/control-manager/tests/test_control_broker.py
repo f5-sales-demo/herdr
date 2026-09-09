@@ -46,7 +46,7 @@ class FakeHerdr:
             execution = {"execution_id": backend, "backend_execution_id": backend,
                          "semantic_execution_id": semantic, "generation": generation,
                          "native_producer": "xcsh", "producer_session_id": launch["session_header"]["id"], "workspace_id": wid,
-                         "cwd": params["cwd"], "command": {"mode": "argv", "argv": [launch["xcsh_executable"], "--mode", "json", "--session-dir", launch["session_dir"], "--resume", launch["session_path"], "--model", launch["model"], "--tools", "read", "--no-mcp", "--no-lsp", "--no-pty"] + ([] if launch["interactive"] else ["--print"]) + [params["text"]]},
+                         "cwd": params["cwd"], "command": {"mode": "argv", "argv": [launch["xcsh_executable"]] + ([] if launch["interactive"] else ["--mode", "json"]) + ["--session-dir", launch["session_dir"], "--resume", launch["session_path"], "--model", launch["model"], "--tools", "read", "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty"] + ([] if launch["interactive"] else ["--print"]) + [params["text"]]},
                          "native_executable": {"canonical_path": launch["xcsh_executable"],
                                                "sha256": hashlib.sha256(Path(launch["xcsh_executable"]).read_bytes()).hexdigest()},
                          "native_launch": launch,
@@ -89,6 +89,18 @@ class FakeHerdr:
             return {"protocol": 22, "capabilities": {"tracked_executions": True, "agent_turn_journal": True}}
         if method == "agent.turn.list":
             since = params.get("since_revision", 0)
+            # Synthetic component model of PR49's cross-ledger settlement:
+            # an authenticated cancelled turn changes the tracked execution
+            # only after its cooperative cancellation request.
+            for turn in self.agent_turns:
+                report = turn.get("report", turn)
+                if report.get("state") != "cancelled":
+                    continue
+                for execution in self.executions.values():
+                    if (execution.get("semantic_execution_id") == report.get("execution_id")
+                            and execution.get("generation") == report.get("generation")
+                            and execution.get("cancel_requested") is True):
+                        execution["state"] = "cancelled"
             return {"turns": [turn for turn in self.agent_turns if turn["revision"] > since]}
         if method == "workspace.get":
             workspace = self.workspaces.get(params["workspace_id"])
@@ -637,7 +649,7 @@ class StateTests(unittest.TestCase):
             request = {"execution_id": task["id"], "generation": 0, "native_launch": launch, "workspace_id": "w1", "cwd": raw, "text": "x", "xcsh_executable_sha256": executable_sha256}
             encoded = json.dumps(request, sort_keys=True, separators=(",", ":"))
             db.claim_native_generation(task["id"], generation=0, session_id=launch["session_header"]["id"], workspace_id="w1", request_sha256=hashlib.sha256(encoded.encode()).hexdigest(), request_json=encoded)
-            argv = [executable,"--mode","json","--session-dir",str(session_dir),"--resume",str(session_path),"--model","test/model","--tools","read","--no-mcp","--no-lsp","--no-pty","--print","x"]
+            argv = [executable,"--mode","json","--session-dir",str(session_dir),"--resume",str(session_path),"--model","test/model","--tools","read","--no-mcp","--no-lsp","--no-memories","--no-skills","--no-rules","--no-pty","--print","x"]
             db.admit_native_generation(task["id"], 0, {"execution_id": "backend-1", "backend_execution_id": "backend-1", "semantic_execution_id": task["id"], "generation": 0, "native_producer": "xcsh", "producer_session_id": launch["session_header"]["id"], "workspace_id": "w1", "cwd": raw, "native_launch": launch, "command": {"mode": "argv", "argv": argv}, "native_executable": {"canonical_path": executable, "sha256": executable_sha256}, "injected_env": {"HERDR_EXECUTION_ID": task["id"], "HERDR_EXECUTION_GENERATION": "0"}, "tab_id": "tab-1", "pane_id": "pane-1"})
             base = {"execution_id": "xcsh-turn", "pane_id": "pane-1", "producer": "xcsh", "session_id": launch["session_header"]["id"], "turn_id": "turn-1", "generation": 0}
             self.assertEqual(db.apply_native_turn({"revision": 1, "report": base | {"event_revision": 1, "state": "starting"}}), ("xcsh-turn", "starting"))
@@ -1077,7 +1089,23 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         execution = self.broker.herdr.executions[task["backend_execution_id"]]
         self.assertEqual(execution["command"]["argv"], [self.xcsh_executable, "--mode", "json", "--session-dir",
             self.native_launch["session_dir"], "--resume", self.native_launch["session_path"], "--model", "test/model",
-            "--tools", "read", "--no-mcp", "--no-lsp", "--no-pty", "--print", "semantic text"])
+            "--tools", "read", "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty", "--print", "semantic text"])
+        interactive_launch = self.native_launch | {"interactive": True}
+        interactive = await self.broker.native_xcsh_admit({
+            "target": "xcsh-v3-interactive", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
+            "text": "interactive semantic text", "session_id": interactive_launch["session_header"]["id"],
+            "workspace_id": workspace["workspace"]["workspace_id"], "native_launch": interactive_launch,
+            "xcsh_executable_sha256": self.xcsh_executable_sha256,
+            "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m", "xcsh_model": "test/model"},
+            "idempotency_key": "v3-interactive-argv",
+        })
+        interactive_argv = self.broker.herdr.executions[interactive["backend_execution_id"]]["command"]["argv"]
+        self.assertEqual(interactive_argv, [self.xcsh_executable, "--session-dir", self.native_launch["session_dir"],
+            "--resume", self.native_launch["session_path"], "--model", "test/model", "--tools", "read",
+            "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty",
+            "interactive semantic text"])
+        self.assertNotIn("--mode", interactive_argv)
+        self.assertNotIn("--print", interactive_argv)
 
     async def test_native_xcsh_resume_targets_durable_workspace_not_active_fallback(self):
         """Synthetic component fixture for immutable workspace routing."""
@@ -1402,6 +1430,42 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recovered["state"], "completed")
         cancels = [call for call in self.broker.herdr.calls if call[0] == "execution.cancel"]
         self.assertEqual({call[1]["execution_id"] for call in cancels}, {binding["backend_execution_id"]})
+
+    async def test_xcsh_cancelled_turn_waits_for_settled_backend_execution(self):
+        """Synthetic component fixture for PR49's cross-ledger cancel settlement."""
+        workspace = await self.configure_control_workspace()
+        self.broker.config_path.write_text(json.dumps({"agent_turn_consumer_enabled": True, "agent_turn_producer": "xcsh"}))
+        task = await self.admit_native_xcsh({
+            "target": "xcsh-cancel-settlement", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
+            "text": "safe", "session_id": "session-cancel-settlement", "workspace_id": workspace["workspace"]["workspace_id"],
+            "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"},
+            "idempotency_key": "cancel-settlement",
+        })
+        binding = self.broker.db.current_native_generation(task["id"])
+        base = {"execution_id": task["id"], "pane_id": binding["pane_id"], "producer": "xcsh",
+                "session_id": binding["session_id"], "turn_id": "turn-cancel-settlement", "generation": 0}
+        await self.broker.request_stop({"task_id": task["id"]})
+        self.broker.herdr.agent_turns = [
+            {"revision": 1, "report": base | {"event_revision": 1, "state": "starting"}},
+            {"revision": 2, "report": base | {"event_revision": 2, "state": "cancelled", "reason": "native cancel"}},
+        ]
+        original_request = self.broker.herdr.request
+
+        async def unsettled_get(method, params=None, timeout=65):
+            result = await original_request(method, params, timeout)
+            if method == "execution.get":
+                execution = dict(result["execution"])
+                execution["state"] = "running"
+                return {"execution": execution}
+            return result
+
+        self.broker.herdr.request = unsettled_get
+        with self.assertRaisesRegex(RuntimeError, "not yet backed by a settled"):
+            await self.broker.consume_native_turns()
+        self.broker.herdr.request = original_request
+        applied = await self.broker.consume_native_turns()
+        self.assertIn({"task_id": task["id"], "state": "cancelled"}, applied["applied"])
+        self.assertEqual(self.broker.db.task(task["id"])["state"], "cancelled")
 
     async def test_xcsh_cancel_receipt_requires_exact_cooperative_generation_binding(self):
         """Synthetic component fixture for protocol-22 cancel receipt validation."""
@@ -2249,7 +2313,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         request = {"execution_id": task["id"], "generation": 0, "native_launch": self.native_launch, "workspace_id": "w1", "cwd": str(self.root), "text": "native", "xcsh_executable_sha256": executable_sha256}
         encoded = json.dumps(request, sort_keys=True, separators=(",", ":"))
         self.broker.db.claim_native_generation(task["id"], generation=0, session_id=self.native_launch["session_header"]["id"], workspace_id="w1", request_sha256=hashlib.sha256(encoded.encode()).hexdigest(), request_json=encoded)
-        argv = [executable,"--mode","json","--session-dir",self.native_launch["session_dir"],"--resume",self.native_launch["session_path"],"--model",self.native_launch["model"],"--tools","read","--no-mcp","--no-lsp","--no-pty","--print","native"]
+        argv = [executable,"--mode","json","--session-dir",self.native_launch["session_dir"],"--resume",self.native_launch["session_path"],"--model",self.native_launch["model"],"--tools","read","--no-mcp","--no-lsp","--no-memories","--no-skills","--no-rules","--no-pty","--print","native"]
         self.broker.db.admit_native_generation(task["id"], 0, {"execution_id": "backend-journal", "backend_execution_id": "backend-journal", "semantic_execution_id": task["id"], "generation": 0, "native_producer": "xcsh", "producer_session_id": self.native_launch["session_header"]["id"], "workspace_id": "w1", "cwd": str(self.root), "native_launch": self.native_launch, "command": {"mode": "argv", "argv": argv}, "native_executable": {"canonical_path": executable, "sha256": executable_sha256}, "injected_env": {"HERDR_EXECUTION_ID": task["id"], "HERDR_EXECUTION_GENERATION": "0"}, "tab_id": "w1:t1", "pane_id": "w1:p1"})
         self.broker.db.create_feature({"feature_id": "journal-feature", "target": "journal-feature", "cwd": str(self.root),
                                        "title": "Journal", "scope": "end_to_end", "required_stages": ["implementation", "tests"],

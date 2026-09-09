@@ -1763,9 +1763,21 @@ class StateDB:
         if not isinstance(launch, dict):
             raise ValueError("native generation lacks immutable native_launch")
         executable, executable_sha256 = launch.get("xcsh_executable"), request.get("xcsh_executable_sha256")
-        expected_argv = [executable, "--mode", "json", "--session-dir", launch.get("session_dir"),
-                         "--resume", launch.get("session_path"), "--model", launch.get("model"),
-                         "--tools", "read", "--no-mcp", "--no-lsp", "--no-pty"]
+        # Protocol-22 v3 keeps an interactive child in its normal UI mode.
+        # JSON framing and --print are only the supported noninteractive
+        # form; neither may leak into an interactive managed child.  The
+        # reduced-v1 policy is complete and order-sensitive in Herdr's typed
+        # argv receipt.
+        expected_argv = [executable]
+        if not launch.get("interactive"):
+            expected_argv.extend(["--mode", "json"])
+        expected_argv.extend([
+            "--session-dir", launch.get("session_dir"),
+            "--resume", launch.get("session_path"),
+            "--model", launch.get("model"),
+            "--tools", "read",
+            "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty",
+        ])
         if not launch.get("interactive"):
             expected_argv.append("--print")
         expected_argv.append(request.get("text"))
@@ -3026,6 +3038,7 @@ class Broker:
                 self.db.conn.commit()
                 cursor = revision
                 continue
+            await self._verify_native_cancel_settlement(report)
             changed = self.db.apply_native_turn(record)
             cursor = revision
             if changed:
@@ -3039,6 +3052,35 @@ class Broker:
                         await self._verified_terminal(task_id)
                 applied.append({"task_id": task_id, "state": state})
         return {"enabled": True, "applied": applied, "last_revision": self.db.native_turn_cursor(cursor_key)}
+
+    async def _verify_native_cancel_settlement(self, report: dict[str, Any]) -> None:
+        """Require backend settlement before consuming a native cancellation.
+
+        Protocol-22 intentionally keeps the capability-only action get/ack
+        API out of the manager.  Its safe manager-visible consequence is the
+        authenticated cancelled report *and* its matching tracked execution
+        state.  This checks the latter from the normal execution API, rather
+        than inventing a capability, producer callback, or PTY-exit rule.
+        """
+        if report.get("state") != "cancelled":
+            return
+        task_id, generation = report.get("execution_id"), report.get("generation")
+        if not isinstance(task_id, str) or not isinstance(generation, int):
+            return
+        binding = self.db.native_generation(task_id, generation)
+        if binding is None or binding["backend_execution_id"] is None:
+            # The provenance validator below will reject this report. Avoid a
+            # foreign execution lookup before that durable binding exists.
+            return
+        result = await self.herdr.request(
+            "execution.get", {"execution_id": binding["backend_execution_id"]}, timeout=10
+        )
+        execution = result.get("execution", result)
+        self._validate_native_xcsh_cancel_receipt(binding, execution)
+        if execution.get("state") != "cancelled":
+            raise RuntimeError(
+                "Herdr cancelled turn is not yet backed by a settled native execution receipt"
+            )
 
     def status(self, task_id: str | None) -> dict[str, Any]:
         if task_id is not None:

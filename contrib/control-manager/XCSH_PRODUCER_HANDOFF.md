@@ -45,15 +45,18 @@ effect/replay, and validates the complete returned launch, binding, exact argv,
 environment, generation, workspace/tab/pane, and producer session provenance.
 It never falls back to bare `xcsh`.
 
-The preliminary protocol-22 source also exposes request-only native
-capabilities and `agent.turn.action.get`/`agent.turn.action.ack`, but its
-first-report registration, authenticated cancelled-report linkage, pending
-action timeout recovery, and cooperative supersession are under repair in
-backend issue 47/PR49. Do not use that interim surface as acceptance evidence
-or substitute a PTY exit for producer cancellation. The manager does not
-receive, persist, or invent the one-time `HERDR_NATIVE_CAPABILITY`; its
-controller will validate real journal/action receipts only after the corrected
-backend and producer adapter are independently reviewed and released.
+Reviewed but unreleased backend PR49 source
+`bedb87c7253dbde84b456ea451b854de9c2f4ec8` exposes request-only native
+capabilities and `agent.turn.action.get`/`agent.turn.action.ack` with
+authenticated durable starting registration, safe-point-bound cancellation,
+deadline reconciliation, and cooperative supersession. Producer PR3792 source
+`60f0fe768ba4530d65e100e676cd0a0b59b0d876` is merged, but its release remains
+pending. Do not use either source state as acceptance evidence or substitute a
+PTY exit for producer cancellation. The manager does not receive, persist, or
+invent the one-time `HERDR_NATIVE_CAPABILITY`; it verifies the normal
+manager-visible cross-ledger consequence (the immutable tracked execution
+receipt) and needs a released producer/runtime callback surface for the real
+action, reply-loss, and restart oracles.
 
 - A supported deterministic offline backend/test executor, selected by an
   explicit documented argv/configuration surface. Prompt wording must not be

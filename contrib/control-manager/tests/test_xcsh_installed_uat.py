@@ -150,6 +150,7 @@ class InstalledPromptUatTests(unittest.TestCase):
         self.assertEqual(calls[0][0], "native_xcsh_admit")
         self.assertEqual(calls[0][1]["native_launch"]["xcsh_executable"], "/isolated/xcsh")
         self.assertEqual(calls[0][1]["xcsh_executable_sha256"], "a" * 64)
+        self.assertTrue(calls[0][1]["native_launch"]["interactive"])
         self.assertFalse(any(method == "ack_completion" for method, _ in calls))
 
     def test_restart_boundary_requires_and_records_authenticated_controller_action(self):

@@ -365,7 +365,7 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
             "version": 3, "xcsh_executable": executable,
             "session_dir": session_receipt.get("session_dir"), "session_path": session_receipt.get("session_path"),
             "session_header": session_receipt.get("session_header"), "model": model,
-            "discovery": "reduced-v1", "tools": "read", "interactive": False,
+            "discovery": "reduced-v1", "tools": "read", "interactive": True,
             "lifecycle_mode": "managed_turn_v1",
         }
     except Exception as exc:

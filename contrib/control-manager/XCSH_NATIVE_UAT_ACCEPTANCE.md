@@ -34,18 +34,21 @@ producer action/replay receipts remain pending corrected backend action
 semantics, a released producer adapter, and installed runtime evidence. This
 is not an installed-UAT acceptance claim.
 
-PR49 comparison source `2c838cf` further defines cooperative cancellation:
-only a starting frame that is durable in the server journal authorizes the
-producer action capability; the server timer settles an unacknowledged action
-as `timed_out`; and a safe-point-bound authenticated `cancelled` report settles
-the action and execution. The manager source validates an `execution.cancel`
-receipt against the immutable generation/executable/session/workspace launch
-binding and requires `cancel_requested`; it does not treat PTY exit as a
-cancellation. PR49 is still under independent review and is not release or
-installed-UAT evidence. The outstanding installed matrix still requires a
-released producer to cause real report reply-loss/redelivery and process
-cutpoint/restart records, then the manager must observe exactly one resulting
-server journal revision and one consumer application receipt per causal action.
+Reviewed PR49 source `bedb87c7253dbde84b456ea451b854de9c2f4ec8` further
+defines cooperative cancellation: only an authenticated starting frame durable
+in the server journal authorizes the producer action capability; the active
+server timer settles an unacknowledged action as `timed_out`; and a
+safe-point-bound authenticated `cancelled` report settles the action and
+tracked execution. The manager validates an `execution.cancel` receipt against
+the immutable generation/executable/session/workspace launch binding, requires
+`cancel_requested`, and consumes a cancelled journal turn only after the
+matching tracked execution is `cancelled`; it does not treat PTY exit as a
+cancellation. PR49 remains unmerged and unreleased, so this is source-contract
+evidence, not release or installed-UAT evidence. The outstanding installed
+matrix still requires a released producer to cause real report
+reply-loss/redelivery and process-cutpoint/restart records, then the manager
+must observe exactly one resulting server journal revision and one consumer
+application receipt per causal action.
 The disposable controller deliberately refuses to turn a server status read or
 server restart into either receipt; it records no action claim until a
 producer-owned adapter supplies that actual causal evidence.

@@ -9,14 +9,14 @@
   "scope": "recovery_manager_with_native_xcsh_uat_source",
   "excluded_product_modules": ["XCSH native synthetic fixture runner", "test/dev state and receipts", "installed prompt UAT evidence", "live-release UAT drivers"],
   "native_uat_source_handoff": {
-    "control_broker.py": "f21f6d5e2a238eb4f98787034d1b00af3fd2bf893130b6c5e671e76dd4b18fd1",
+    "control_broker.py": "9755e7b321de2409e9048878e2c773a41945acc25b7a69cd0280f853401733d7",
     "control_mcp.py": "f19fa2924b525e5cec98e35f1f2f58c1f967c38ed9792da905566d37a7657b01",
     "control_portable.py": "0838930ac20ed0ac20eb7c52657b2e53d339b607c3323c6eb681be134e093624",
     "runtime/xcsh_isolated_uat_controller.py": "f67530b3b8ebf7a19e39bf9d6f17891dba15c5535b8e9c8fa22426040df83d3f",
-    "runtime/xcsh_installed_uat.py": "8c8cb267d8efff4a1f6d0b9ea4eeb43d64b657014ec59eff4ceff85e4f5e742b",
+    "runtime/xcsh_installed_uat.py": "d9f2723e193a8ab4af878cca56fc4fd791f77738ee3d56532559aee586ab0b64",
     "runtime/xcsh-installed-uat/manifest.example.json": "ad028b60cdafc7804fb76c717b3f2f5e14f62124409dcd04f961a114ae6317f0",
     "runtime/xcsh-installed-uat/scenarios-v1.json": "fbb70cf474112abd47e27cd2b8e9d92a96670fbd5cc7e23454d215c5a0ca8040",
-    "XCSH_NATIVE_UAT_ACCEPTANCE.md": "45e04dcb5d0bd7d275d73d20f393118c36fdce4ed3d87f238f14fc64ff142e1d"
+    "XCSH_NATIVE_UAT_ACCEPTANCE.md": "dc96b3459f6372ad73fb93ba2e16ec7708bd17a7c7b0975bcaa6f78b36e4a679"
   },
   "contains_credentials": false,
   "contains_runtime_sessions": false,
