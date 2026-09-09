@@ -16,7 +16,7 @@
     "runtime/xcsh_installed_uat.py": "d9f2723e193a8ab4af878cca56fc4fd791f77738ee3d56532559aee586ab0b64",
     "runtime/xcsh-installed-uat/manifest.example.json": "ad028b60cdafc7804fb76c717b3f2f5e14f62124409dcd04f961a114ae6317f0",
     "runtime/xcsh-installed-uat/scenarios-v1.json": "fbb70cf474112abd47e27cd2b8e9d92a96670fbd5cc7e23454d215c5a0ca8040",
-    "XCSH_NATIVE_UAT_ACCEPTANCE.md": "dc96b3459f6372ad73fb93ba2e16ec7708bd17a7c7b0975bcaa6f78b36e4a679"
+    "XCSH_NATIVE_UAT_ACCEPTANCE.md": "2945def1a91f6ace1836e7bc5e875f7fe0de720b4a162cf7a17a5bd76e7658d3"
   },
   "contains_credentials": false,
   "contains_runtime_sessions": false,

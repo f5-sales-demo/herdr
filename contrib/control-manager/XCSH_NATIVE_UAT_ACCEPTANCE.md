@@ -24,8 +24,8 @@ controller returns the canonical measured XCSH path/hash with its real session
 receipt, the manager durably carries that identity through every generation,
 and resume/reconciliation reject any changed path, digest, backend binding, or
 `argv[0]`. This remains source evidence, not installed-UAT acceptance.
-Source package v23 advances only the manager core to the committed but
-unreleased protocol-22
+Source package v23 advances only the manager core to the merged but unreleased
+protocol-22
 `native_launch` v3 contract: it measures a canonical session directory and
 direct child JSONL path, hashes the raw first header line including its LF,
 binds the configured nonsecret model and reduced read-only policy, and rejects
@@ -43,8 +43,9 @@ tracked execution. The manager validates an `execution.cancel` receipt against
 the immutable generation/executable/session/workspace launch binding, requires
 `cancel_requested`, and consumes a cancelled journal turn only after the
 matching tracked execution is `cancelled`; it does not treat PTY exit as a
-cancellation. PR49 remains unmerged and unreleased, so this is source-contract
-evidence, not release or installed-UAT evidence. The outstanding installed
+cancellation. PR49 merged at `bc78d41b182a791eec1f2178d9933c1260a4ca8d` but
+remains unreleased, so this is source-contract evidence, not release or
+installed-UAT evidence. The outstanding installed
 matrix still requires a released producer to cause real report
 reply-loss/redelivery and process-cutpoint/restart records, then the manager
 must observe exactly one resulting server journal revision and one consumer

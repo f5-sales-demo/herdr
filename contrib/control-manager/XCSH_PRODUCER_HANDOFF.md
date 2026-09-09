@@ -45,8 +45,9 @@ effect/replay, and validates the complete returned launch, binding, exact argv,
 environment, generation, workspace/tab/pane, and producer session provenance.
 It never falls back to bare `xcsh`.
 
-Reviewed but unreleased backend PR49 source
-`bedb87c7253dbde84b456ea451b854de9c2f4ec8` exposes request-only native
+Merged but unreleased backend PR49
+`bc78d41b182a791eec1f2178d9933c1260a4ca8d` (reviewed source
+`bedb87c7253dbde84b456ea451b854de9c2f4ec8`) exposes request-only native
 capabilities and `agent.turn.action.get`/`agent.turn.action.ack` with
 authenticated durable starting registration, safe-point-bound cancellation,
 deadline reconciliation, and cooperative supersession. Producer PR3792 source
