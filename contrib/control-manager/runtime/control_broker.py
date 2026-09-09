@@ -26,6 +26,7 @@ import stat
 import struct
 import subprocess
 import time
+import unicodedata
 import uuid
 from pathlib import Path
 from typing import Any
@@ -290,6 +291,26 @@ def measure_xcsh_executable(raw: str | None, *, expected_sha256: str | None = No
     return {"canonical_path": str(canonical), "sha256": measured}
 
 
+def native_model_selector(raw: Any, field: str) -> str:
+    """Match Herdr's non-secret native-launch model selector boundary.
+
+    Rust's ``String::len`` is UTF-8 bytes and ``char::is_control`` is the
+    Unicode general category ``Cc``. Keep the manager's durable admission
+    boundary identical so an accepted local claim cannot be rejected only
+    after the backend effect.
+    """
+    if not isinstance(raw, str):
+        raise ValueError(f"{field} must be a string")
+    model = raw.strip()
+    if not model:
+        raise ValueError(f"{field} is required")
+    if len(model.encode("utf-8")) > 256:
+        raise ValueError(f"{field} exceeds 256 UTF-8 bytes")
+    if any(unicodedata.category(char) == "Cc" for char in model):
+        raise ValueError(f"{field} must be a configured nonsecret selector")
+    return model
+
+
 def measure_native_launch(raw: Any, *, expected_executable_sha256: str | None = None) -> dict[str, Any]:
     """Validate and independently measure the protocol-22 ``native_launch`` v3.
 
@@ -343,10 +364,7 @@ def measure_native_launch(raw: Any, *, expected_executable_sha256: str | None = 
             or not re.fullmatch(r"[0-9a-f]{64}", declared_header["sha256"])
             or not hmac.compare_digest(hashlib.sha256(first_line).hexdigest(), declared_header["sha256"])):
         raise ValueError("native_launch session_header conflicts with the first JSONL header line")
-    model = bounded(raw.get("model"), 512, "native_launch.model", required=True)
-    assert model is not None
-    if any(char in model for char in "\r\n\x00"):
-        raise ValueError("native_launch.model must be a configured nonsecret selector")
+    model = native_model_selector(raw.get("model"), "native_launch.model")
     if raw.get("discovery") != "reduced-v1" or raw.get("tools") != "read":
         raise ValueError("native_launch supports only discovery=reduced-v1 and tools=read")
     if not isinstance(raw.get("interactive"), bool):
@@ -2690,7 +2708,7 @@ class Broker:
         required_identity = ("xcsh_artifact", "herdr_artifact", "manager_artifact")
         if any(not isinstance(runtime_identity.get(key), str) or not runtime_identity[key] for key in required_identity):
             raise ValueError("runtime_identity must bind xcsh_artifact, herdr_artifact, and manager_artifact")
-        configured_model = bounded(runtime_identity.get("xcsh_model"), 512, "runtime_identity.xcsh_model", required=True)
+        configured_model = native_model_selector(runtime_identity.get("xcsh_model"), "runtime_identity.xcsh_model")
         if not isinstance(params.get("xcsh_executable_sha256"), str):
             raise ValueError("xcsh_executable_sha256 controller measurement is required")
         launch = measure_native_launch(
@@ -2754,7 +2772,7 @@ class Broker:
         launch = measure_native_launch(request.get("native_launch"), expected_executable_sha256=request.get("xcsh_executable_sha256"))
         if launch != request.get("native_launch"):
             raise RuntimeError("persisted native_launch is not canonical")
-        fields = ("execution_id", "generation", "native_launch", "text", "cwd")
+        fields = ("execution_id", "generation", "native_launch", "text", "cwd", "workspace_id")
         return {field: request[field] for field in fields}
 
     @staticmethod

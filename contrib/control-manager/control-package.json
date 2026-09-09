@@ -9,7 +9,7 @@
   "scope": "recovery_manager_with_native_xcsh_uat_source",
   "excluded_product_modules": ["XCSH native synthetic fixture runner", "test/dev state and receipts", "installed prompt UAT evidence", "live-release UAT drivers"],
   "native_uat_source_handoff": {
-    "control_broker.py": "ea7c555ed6c0cbf4ea9dca9fc3296e1c7e3007d64e3d4e7be9ee50f3656ef3f6",
+    "control_broker.py": "93a4dd4aebcdd71af9057b98f57c0dd2eff8513d5cfc0bc1e2597db63855eef9",
     "control_mcp.py": "f19fa2924b525e5cec98e35f1f2f58c1f967c38ed9792da905566d37a7657b01",
     "control_portable.py": "0838930ac20ed0ac20eb7c52657b2e53d339b607c3323c6eb681be134e093624",
     "runtime/xcsh_isolated_uat_controller.py": "8417b005cb83a2a45efc4b74e36e66382cd57eab124779b7cc59f6dd03b1266d",

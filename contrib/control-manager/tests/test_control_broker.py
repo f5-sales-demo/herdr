@@ -22,6 +22,7 @@ class FakeHerdr:
         self.calls: list[tuple[str, dict]] = []
         self.executions: dict[str, dict] = {}
         self.agent_turns: list[dict] = []
+        self.active_workspace_id: str | None = None
         self.seq = 0
 
     async def request(self, method, params=None, timeout=65):
@@ -35,7 +36,9 @@ class FakeHerdr:
             if existing:
                 return {"execution": existing, "admitted": False}
             self.seq += 1
-            wid = next(iter(self.workspaces))
+            wid = params.get("workspace_id", self.active_workspace_id)
+            if not isinstance(wid, str) or wid not in self.workspaces:
+                raise RuntimeError("workspace_not_found")
             tid, pid = f"{wid}:t{self.seq}", f"{wid}:p{self.seq}"
             backend = f"backend-{semantic}-{generation}"
             self.tabs[tid] = {"tab_id": tid, "workspace_id": wid, "label": params.get("label"), "number": 1, "pane_count": 1}
@@ -97,6 +100,7 @@ class FakeHerdr:
             self.workspaces[wid] = workspace
             self.tabs[tid] = tab
             self.panes[pid] = pane
+            self.active_workspace_id = wid
             return {"workspace": workspace, "tab": tab, "root_pane": pane}
         if method == "tab.create":
             self.seq += 1
@@ -995,6 +999,9 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay["id"], first["id"])
         self.assertTrue(replay["idempotency_replayed"])
         self.assertEqual(len(self.broker.herdr.executions), 1)
+        resumes = [item for method, item in self.broker.herdr.calls if method == "execution.resume"]
+        self.assertGreaterEqual(len(resumes), 2)
+        self.assertTrue(all(item["workspace_id"] == workspace["workspace"]["workspace_id"] for item in resumes))
 
     async def test_native_xcsh_atomic_gen0_claim_requires_key_and_replays_one_child(self):
         """Synthetic component fixture for the task/key/generation transaction."""
@@ -1058,12 +1065,64 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
             "idempotency_key": "v3-argv",
         })
         request = next(params for method, params in self.broker.herdr.calls if method == "execution.resume")
-        self.assertEqual(set(request), {"execution_id", "generation", "native_launch", "text", "cwd"})
+        self.assertEqual(set(request), {"execution_id", "generation", "native_launch", "text", "cwd", "workspace_id"})
         self.assertEqual(request["native_launch"], self.native_launch)
+        self.assertEqual(request["workspace_id"], workspace["workspace"]["workspace_id"])
         execution = self.broker.herdr.executions[task["backend_execution_id"]]
         self.assertEqual(execution["command"]["argv"], [self.xcsh_executable, "--mode", "json", "--session-dir",
             self.native_launch["session_dir"], "--resume", self.native_launch["session_path"], "--model", "test/model",
             "--tools", "read", "--no-mcp", "--no-lsp", "--no-pty", "--print", "semantic text"])
+
+    async def test_native_xcsh_resume_targets_durable_workspace_not_active_fallback(self):
+        """Synthetic component fixture for immutable workspace routing."""
+        admitted_workspace = await self.configure_control_workspace()
+        foreign_workspace = await self.broker.herdr.request("workspace.create", {
+            "cwd": str(self.root), "label": "active-but-foreign",
+        })
+        admitted_id = admitted_workspace["workspace"]["workspace_id"]
+        foreign_id = foreign_workspace["workspace"]["workspace_id"]
+        foreign_tabs_before = {tab_id for tab_id, tab in self.broker.herdr.tabs.items()
+                               if tab["workspace_id"] == foreign_id}
+        task = await self.admit_native_xcsh({
+            "target": "xcsh-workspace-routing", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
+            "text": "semantic text", "session_id": self.native_launch["session_header"]["id"],
+            "workspace_id": admitted_id,
+            "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m", "xcsh_model": "test/model"},
+            "idempotency_key": "workspace-routing",
+        })
+        requests = [params for method, params in self.broker.herdr.calls if method == "execution.resume"]
+        self.assertEqual([request["workspace_id"] for request in requests], [admitted_id])
+        self.assertEqual(task["workspace_id"], admitted_id)
+        self.assertEqual(self.broker.herdr.executions[task["backend_execution_id"]]["workspace_id"], admitted_id)
+        self.assertEqual({tab_id for tab_id, tab in self.broker.herdr.tabs.items()
+                          if tab["workspace_id"] == foreign_id}, foreign_tabs_before)
+
+    async def test_native_launch_model_matches_backend_utf8_and_control_boundary_preclaim(self):
+        """Synthetic component fixture for the protocol-22 model contract."""
+        workspace = await self.configure_control_workspace()
+        base = {"target": "xcsh-model", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
+                "text": "safe", "session_id": self.native_launch["session_header"]["id"],
+                "workspace_id": workspace["workspace"]["workspace_id"],
+                "xcsh_executable_sha256": self.xcsh_executable_sha256}
+
+        async def admit(model: str, key: str, *, runtime_model: str | None = None):
+            return await self.broker.native_xcsh_admit(base | {
+                "native_launch": self.native_launch | {"model": model},
+                "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m",
+                                     "xcsh_model": runtime_model if runtime_model is not None else model},
+                "idempotency_key": key,
+            })
+
+        accepted = await admit("m" * 256, "model-256")
+        self.assertEqual(accepted["state"], "starting")
+        for model, key, field in (("m" * 257, "model-257", "native_launch.model"),
+                                  ("é" * 129, "model-utf8", "native_launch.model"),
+                                  ("safe\u0085selector", "model-control", "native_launch.model")):
+            with self.assertRaisesRegex(ValueError, field):
+                await admit(model, key, runtime_model="test/model")
+        with self.assertRaisesRegex(ValueError, "runtime_identity.xcsh_model"):
+            await admit("test/model", "runtime-control", runtime_model="safe\u0085selector")
+        self.assertEqual(len([row for row in self.broker.db.list_tasks() if row["work_kind"] == "xcsh"]), 1)
 
     async def test_native_xcsh_rejects_protocol20_before_durable_generation_claim(self):
         workspace = await self.configure_control_workspace()
@@ -1285,6 +1344,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
                    if method == "execution.resume" and params["generation"] == 1]
         self.assertGreaterEqual(len(resumes), 2)
         self.assertTrue(all(item["native_launch"]["xcsh_executable"] == self.xcsh_executable for item in resumes))
+        self.assertTrue(all(item["workspace_id"] == workspace["workspace"]["workspace_id"] for item in resumes))
         self.assertTrue(all("xcsh_executable_sha256" not in item for item in resumes))
 
     async def test_xcsh_cancel_claim_recovers_after_ambiguous_backend_response(self):
