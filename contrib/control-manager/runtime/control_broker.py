@@ -3727,7 +3727,7 @@ class Broker:
     async def _manager_terminal_disconnect_evidence(
         self, pane_id: str, config: dict[str, Any],
     ) -> dict[str, Any]:
-        """Prove that the exact idle canonical Codex client cannot reconnect."""
+        """Prove that the exact canonical Codex client reached its fatal reconnect screen."""
         try:
             agent_result = await self.herdr.request("agent.get", {"target": pane_id}, timeout=5)
             agent = agent_result.get("agent", agent_result)
@@ -3742,8 +3742,8 @@ class Broker:
         if str(session.get("value") or "") != thread_id:
             return {"proven": False, "reason": "native pane does not carry the exact canonical thread"}
         status = str(agent.get("agent_status") or "")
-        if status not in {"idle", "done"}:
-            return {"proven": False, "reason": "canonical pane is busy, blocked, or has ambiguous lifecycle state"}
+        if status not in {"idle", "done", "working"}:
+            return {"proven": False, "reason": "canonical pane is blocked or has ambiguous lifecycle state"}
         try:
             codex = str(Path(configured_codex_binary(config)))
             cwd = normalized_cwd(str(config.get("manager_cwd") or ""))
@@ -3756,17 +3756,23 @@ class Broker:
         if (len(foreground) != 1 or foreground[0].get("name") != "codex"
                 or foreground[0].get("argv") != expected):
             return {"proven": False, "reason": "canonical pane lacks exact remote-process proof"}
-        try:
-            read_result = await self.herdr.request("agent.read", {
-                "target": pane_id, "source": "detection", "lines": 120,
-                "format": "text", "strip_ansi": True,
-            }, timeout=5)
-            terminal = str((read_result.get("read", read_result)).get("text") or "")
-        except Exception as exc:
-            return {"proven": False, "reason": f"canonical terminal evidence is unreadable: {type(exc).__name__}: {exc}"}
-        if not terminal_appserver_disconnect(terminal):
-            return {"proven": False, "reason": "canonical terminal does not show explicit reconnect failure"}
-        return {"proven": True, "reason": "exact idle canonical client shows explicit app-server reconnect failure"}
+        errors: list[str] = []
+        for source in ("visible", "detection"):
+            try:
+                read_result = await self.herdr.request("agent.read", {
+                    "target": pane_id, "source": source, "lines": 120,
+                    "format": "text", "strip_ansi": True,
+                }, timeout=5)
+                terminal = str((read_result.get("read", read_result)).get("text") or "")
+            except Exception as exc:
+                errors.append(f"{source}: {type(exc).__name__}: {exc}")
+                continue
+            if terminal_appserver_disconnect(terminal):
+                return {"proven": True,
+                        "reason": f"exact canonical client shows explicit terminal app-server reconnect failure ({source})"}
+        if len(errors) == 2:
+            return {"proven": False, "reason": "canonical terminal evidence is unreadable: " + "; ".join(errors)}
+        return {"proven": False, "reason": "canonical terminal does not show the complete fatal reconnect screen"}
 
     async def _recover_proven_disconnected_manager(
         self, snapshot: dict[str, Any], *, action_id: str, claim_sha256: str,

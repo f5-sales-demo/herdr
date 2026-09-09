@@ -155,17 +155,23 @@ class ManagerRealtimeConfigTests(unittest.TestCase):
             }))
             def request(method, _params):
                 if method == "agent.get":
-                    return {"agent": {"agent": "codex", "agent_status": "idle",
+                    # The real reconnect spinner is classified as working even
+                    # after Codex has reached its terminal failure footer.
+                    return {"agent": {"agent": "codex", "agent_status": "working",
                                       "agent_session": {"value": thread}}}
                 if method == "pane.process_info":
                     return {"process_info": {"foreground_processes": [{"name": "codex", "argv": argv}]}}
                 if method == "agent.read":
-                    return {"read": {"text": "app-server session could not be restored\nReconnect failed — check the endpoint"}}
+                    return {"read": {"text": "Automatic reconnect could not restore this session.\n"
+                                             "app-server session could not be restored\n"
+                                             "Reconnect failed — check the endpoint, then relaunch\n"
+                                             "Ask Codex to do anything\nctrl+c quit"}}
                 self.fail(method)
             with patch("appserver_manager.CONFIG_PATH", path), patch("appserver_manager.herdr_request", side_effect=request):
                 result = native_pane_health(thread)
             self.assertEqual(result["state"], "unavailable")
             self.assertIs(result["terminal_disconnect_proven"], True)
+            self.assertEqual(result["terminal_source"], "visible")
 
     def test_native_pane_health_keeps_exact_interactive_client_healthy(self):
         with tempfile.TemporaryDirectory() as raw:

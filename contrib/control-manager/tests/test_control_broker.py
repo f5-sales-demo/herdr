@@ -1992,8 +1992,13 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
             "process_name": "codex",
             "process_argv": [str(Path("/bin/true").resolve()), "--disable", "hooks", "--remote", "unix://",
                              "--profile", "control-manager", "-C", str(self.root), "resume", thread],
-            "agent_status": "idle", "agent_session": {"value": thread},
-            "output": "app-server session could not be restored\nReconnect failed — check the endpoint",
+            # Herdr reports the fatal reconnect spinner as working in the real
+            # Codex TUI; the complete terminal footer is the decisive proof.
+            "agent_status": "working", "agent_session": {"value": thread},
+            "output": "Automatic reconnect could not restore this session.\n"
+                      "app-server session could not be restored\n"
+                      "Reconnect failed — check the endpoint, then relaunch\n"
+                      "Ask Codex to do anything\nctrl+c quit",
         })
         self.broker.config_path.write_text(json.dumps({
             "manager_thread_id": thread, "manager_cwd": str(self.root),
