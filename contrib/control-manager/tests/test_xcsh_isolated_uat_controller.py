@@ -50,6 +50,22 @@ class ControllerTests(unittest.TestCase):
     c.act('restart_loss','p1','wrong-execution','token',wrong)
    c.close()
 
+ def test_disposable_controller_refuses_noncausal_restart_or_reconnect_before_claim(self):
+  """Synthetic component fixture; it is not installed-UAT evidence."""
+  with tempfile.TemporaryDirectory() as raw:
+   root=Path(raw); binary=root/'herdr'; binary.write_bytes(b'fixture')
+   own={'session_id':'xcsh-uat-a','service_id':'xcsh-uat-a','workspace_id':'w1','pane_ids':['p1']}
+   c=DisposableHerdrController(root/'actions.sqlite',own,'token',binary)
+   IsolatedController.register_execution(c,{'id':'e1','workspace_id':'w1','tab_id':'t1','pane_id':'p1'})
+   # This unit fixture has no live service; the assertion isolates the
+   # pre-claim boundary rather than pretending a status read is causality.
+   c.verify_live_ownership=lambda: None
+   for kind in ('reconnect_replay','restart_loss'):
+    with self.assertRaisesRegex(ControllerError,'producer-owned causal'):
+     c.real_action(kind,'p1',f'{kind}-without-producer',c.token)
+   self.assertEqual(c.conn.execute('SELECT count(*) FROM uat_actions').fetchone()[0],0)
+   c.close()
+
  def test_real_v21190_binary_probes_documented_json_session_header(self):
   """Real released-binary smoke; it is source evidence, not installed UAT."""
   archive=Path('/data/robin-GIT/xcsh-codex-login/xcsh/.local/native-lifecycle-artifacts/v21.19.0/xcsh-linux-x64.tar.gz')
@@ -107,12 +123,13 @@ class ControllerTests(unittest.TestCase):
     reopened=DisposableHerdrController.open_receipt(Path(raw)/'actions.sqlite',receipt_path)
     self.assertEqual(saved['workspace_id'],reopened.ownership['workspace_id'])
     reopened.close()
-    reconnect=c.real_action('reconnect_replay',pane,'real-reconnect',c.token)
-    restart=c.real_action('restart_loss',pane,'real-restart',c.token)
-    self.assertEqual(c.real_action('restart_loss',pane,'real-restart',c.token),restart)
-    self.assertTrue(reconnect['effect']['reconnected'])
+    # A server status/restart alone is not a producer reply-loss or cutpoint
+    # action. Real installed UAT must provide the released producer adapter.
+    with self.assertRaisesRegex(ControllerError,'producer-owned causal'):
+     c.real_action('reconnect_replay',pane,'real-reconnect',c.token)
+    with self.assertRaisesRegex(ControllerError,'producer-owned causal'):
+     c.real_action('restart_loss',pane,'real-restart',c.token)
     with self.assertRaises(ControllerError): c.real_action('cleanup',pane,'real-cleanup',c.token)
-    self.assertEqual(restart['effect']['server_version'],'0.10.1')
    finally:
     subprocess.run([raw_binary,'--session',c.ownership['session_id'],'server','stop'],check=False,capture_output=True,text=True)
     c.close()

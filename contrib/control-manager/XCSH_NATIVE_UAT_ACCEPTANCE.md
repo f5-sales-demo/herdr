@@ -46,6 +46,9 @@ installed-UAT evidence. The outstanding installed matrix still requires a
 released producer to cause real report reply-loss/redelivery and process
 cutpoint/restart records, then the manager must observe exactly one resulting
 server journal revision and one consumer application receipt per causal action.
+The disposable controller deliberately refuses to turn a server status read or
+server restart into either receipt; it records no action claim until a
+producer-owned adapter supplies that actual causal evidence.
 
 | Requirement | Required authoritative evidence | Current evidence | Status |
 | --- | --- | --- | --- |

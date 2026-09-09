@@ -233,30 +233,29 @@ class DisposableHerdrController(IsolatedController):
                 "xcsh_executable": receipt["xcsh_executable"],
                 "xcsh_executable_sha256": receipt["xcsh_executable_sha256"]}
 
-    def _restart(self) -> dict[str,Any]:
-        session,service=self.ownership["session_id"],self.ownership["service_id"]
-        before=self._owned_call("status","server","--json")
-        stopped=subprocess.run([str(self.binary),"--session",session,"server","stop"],check=False,capture_output=True,text=True)
-        if stopped.returncode: raise ControllerError(f"owned Herdr stop failed: {stopped.stderr.strip()}")
-        subprocess.run(["systemd-run","--user","--unit",service,"--collect",str(self.binary),"--session",session,"server"],check=True,capture_output=True,text=True)
-        deadline=time.monotonic()+12
-        while time.monotonic()<deadline:
-            try:
-                after=self._owned_call("status","server","--json")
-                if after.get("running") and after.get("session")==session:
-                    return {"before_socket":before.get("socket"),"after_socket":after.get("socket"),"server_version":after.get("version"),"stop_exit":stopped.returncode}
-            except ControllerError: pass
-            time.sleep(.15)
-        raise ControllerError("owned Herdr did not reconnect after restart")
-
     def real_action(self,kind: str,pane_id: str,key: str,token: str,external: Callable[[],dict[str,Any]]|None=None) -> dict[str,Any]:
-        """Perform a concrete owned action; external is only a real broker continuation."""
+        """Claim one owned action around a real producer/controller effect.
+
+        A Herdr socket read or an owned server restart cannot demonstrate
+        producer report reply-loss/redelivery or a producer process cutpoint.
+        Those lifecycle effects must be supplied by the released producer
+        adapter as an authenticated, provenance-bound receipt.  Keeping the
+        callback at this local controller boundary avoids inventing a Herdr
+        RPC, CLI flag, or capability transport before that adapter exists.
+        """
         self.verify_live_ownership()
+        if kind in {"reconnect_replay", "restart_loss"} and external is None:
+            raise ControllerError(
+                f"{kind} requires a real producer-owned causal action receipt; "
+                "socket observation and server restart are not evidence"
+            )
         def hook(_: str,target: dict[str,Any]) -> dict[str,Any]:
-            if kind=="reconnect_replay":
-                status=self._owned_call("status","server","--json"); workspaces=self._owned_call("workspace","list")
-                effect={"reconnected":bool(status.get("running")),"socket":status.get("socket"),"workspace_count":len(workspaces.get("workspaces",[])),"execution_id":target["execution_id"]}
-            elif kind=="restart_loss": effect=self._restart()
+            if kind in {"reconnect_replay", "restart_loss"}:
+                assert external is not None
+                producer_receipt = external()
+                if not isinstance(producer_receipt, dict) or not isinstance(producer_receipt.get("effect"), dict):
+                    raise ControllerError("producer action adapter returned no causal receipt")
+                effect = producer_receipt["effect"]
             else:
                 if external is None: raise ControllerError("generation supersession requires the real broker continuation")
                 broker_receipt=external()
