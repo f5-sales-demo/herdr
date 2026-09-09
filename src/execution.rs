@@ -148,6 +148,7 @@ impl ExecutionManager {
         state.revision += 1;
         let record = ExecutionRecord {
             execution_id: params.execution_id.clone(),
+            workspace_id: params.workspace_id.clone(),
             backend_execution_id: None,
             semantic_execution_id: None,
             generation: None,
@@ -224,6 +225,7 @@ impl ExecutionManager {
         }) {
             if existing.backend_execution_id.as_deref() == Some(&backend_execution_id)
                 && existing.cwd == params.cwd
+                && existing.workspace_id == params.workspace_id
                 && existing.command == command
                 && existing.producer_session_id.as_deref() == Some(&session_header.id)
                 && existing.native_executable.as_ref() == Some(&executable)
@@ -300,6 +302,7 @@ impl ExecutionManager {
             .insert(backend_execution_id.clone(), native_capability);
         let record = ExecutionRecord {
             execution_id: backend_execution_id.clone(),
+            workspace_id: params.workspace_id.clone(),
             backend_execution_id: Some(backend_execution_id.clone()),
             semantic_execution_id: Some(params.execution_id.clone()),
             generation: Some(params.generation),
@@ -1321,7 +1324,7 @@ fn is_canonical_xcsh_session_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
-/// The complete supported XCSH argv derived from protocol-22's typed launch.
+/// The complete supported XCSH argv derived from protocol-23's typed launch.
 /// No caller-controlled argv or environment reaches the child. `managed_turn_v1`
 /// is a durable Herdr/producer lifecycle contract, not an undocumented XCSH
 /// command-line option.
@@ -1475,7 +1478,8 @@ mod tests {
     fn native_generation_admission_is_idempotent_and_preserves_provenance() {
         let path = temp("native-idempotency");
         let manager = ExecutionManager::load_at(path.clone());
-        let params = resume_params(4);
+        let mut params = resume_params(4);
+        params.workspace_id = Some("w1".into());
         let (first, admitted, old) = manager.admit_xcsh_resume(&params).unwrap();
         assert!(admitted);
         assert!(old.is_none());
@@ -1485,6 +1489,7 @@ mod tests {
             Some("semantic-task")
         );
         assert_eq!(first.generation, Some(4));
+        assert_eq!(first.workspace_id.as_deref(), Some("w1"));
         assert_eq!(first.native_producer.as_deref(), Some("xcsh"));
         let executable = first.native_executable.as_ref().expect("native executable");
         assert!(Path::new(&executable.canonical_path).is_absolute());
@@ -1494,6 +1499,12 @@ mod tests {
         let (retry, admitted, _) = manager.admit_xcsh_resume(&params).unwrap();
         assert!(!admitted);
         assert_eq!(retry.execution_id, first.execution_id);
+        let mut workspace_conflict = params.clone();
+        workspace_conflict.workspace_id = Some("w2".into());
+        assert!(manager
+            .admit_xcsh_resume(&workspace_conflict)
+            .unwrap_err()
+            .contains("generation_conflict"));
         let mut conflict = params;
         conflict.text = "different replay".into();
         assert!(manager
@@ -1983,6 +1994,7 @@ mod tests {
             native_actions: BTreeMap::new(),
             records: vec![ExecutionRecord {
                 execution_id: "old".into(),
+                workspace_id: None,
                 backend_execution_id: None,
                 semantic_execution_id: None,
                 generation: None,

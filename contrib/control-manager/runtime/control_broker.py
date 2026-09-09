@@ -314,7 +314,7 @@ def native_model_selector(raw: Any, field: str) -> str:
 
 
 def measure_native_launch(raw: Any, *, expected_executable_sha256: str | None = None) -> dict[str, Any]:
-    """Validate and independently measure the protocol-22 ``native_launch`` v3.
+    """Validate and independently measure the protocol-23 ``native_launch`` v3.
 
     The launch is a closed typed value, not a transport for arbitrary XCSH
     argv, environment, identity, or secrets.  Its session header hash covers
@@ -326,7 +326,7 @@ def measure_native_launch(raw: Any, *, expected_executable_sha256: str | None = 
     allowed = {"version", "xcsh_executable", "session_dir", "session_path", "session_header",
                "model", "discovery", "tools", "interactive", "lifecycle_mode"}
     if set(raw) != allowed:
-        raise ValueError("native_launch must contain exactly the protocol-22 v3 fields")
+        raise ValueError("native_launch must contain exactly the protocol-23 v3 fields")
     if raw.get("version") != 3:
         raise ValueError("native_launch.version must be 3")
     executable = measure_xcsh_executable(raw.get("xcsh_executable"), expected_sha256=expected_executable_sha256)
@@ -2696,7 +2696,7 @@ class Broker:
 
         This is intentionally separate from Codex dispatch.  It records a
         durable task/idempotency claim before ``execution.resume`` and waits for
-        protocol-22 typed-native-launch binding plus semantic reports to settle it; process exit/output is not
+        protocol-23 typed-native-launch binding plus semantic reports to settle it; process exit/output is not
         task success evidence.
         """
         if params.get("idempotency_key") is None:
@@ -2767,18 +2767,20 @@ class Broker:
                                                    text=text or "", label="xcsh-native-uat")
 
     async def _require_native_xcsh_resume_contract(self) -> None:
-        """Require protocol-22's typed native-launch response contract.
+        """Require protocol-23's typed native-launch response contract.
 
-        The authoritative compatibility boundary is protocol 22 plus the existing tracked execution and
-        semantic-journal capabilities. Receipt validation below proves the
-        required response schema at every admission.
+        The authoritative compatibility boundary is protocol 23 plus the existing tracked execution and
+        semantic-journal capabilities. Protocol 23 adds the immutable
+        workspace receipt needed to bind the returned pane/tab to the claimed
+        workspace. Receipt validation below proves the required response
+        schema at every admission.
         """
         pong = await self.herdr.request("ping", {}, timeout=10)
         caps = (pong or {}).get("capabilities") or {}
-        if (int((pong or {}).get("protocol", 0)) < 22
+        if (int((pong or {}).get("protocol", 0)) < 23
                 or not caps.get("tracked_executions")
                 or not caps.get("agent_turn_journal")):
-            raise ValueError("Herdr lacks the protocol-22 typed-native-launch, tracked-executions, and semantic-journal contract required for execution.resume")
+            raise ValueError("Herdr lacks the protocol-23 workspace-bound typed-native-launch, tracked-executions, and semantic-journal contract required for execution.resume")
 
     @staticmethod
     def _native_xcsh_effect_request(request: dict[str, Any], label: str) -> dict[str, Any]:

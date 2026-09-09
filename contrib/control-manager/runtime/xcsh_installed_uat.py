@@ -205,10 +205,10 @@ def preflight(manifest: dict[str, Any], catalog: dict[str, Any], *, probe: bool 
         raise PreflightError("invalid installed prompt catalog")
     if catalog.get("native_resume_contract") != {
             "execution_resume_schema": "execution.resume/v3",
-            "herdr_protocol_minimum": 22,
+            "herdr_protocol_minimum": 23,
             "required_herdr_capabilities": ["tracked_executions", "agent_turn_journal"],
     }:
-        raise PreflightError("catalog does not bind the protocol-22 typed native-launch resume contract")
+        raise PreflightError("catalog does not bind the protocol-23 workspace-bound native-launch resume contract")
     names = {case.get("id") for case in scenarios}
     expected = {"success", "failure", "waiting_input", "cancel", "continuation", "reconnect_replay", "generation_supersession", "cleanup", "restart_loss"}
     if names != expected:
@@ -225,7 +225,7 @@ def preflight(manifest: dict[str, Any], catalog: dict[str, Any], *, probe: bool 
         contract = catalog["native_resume_contract"]
         if (int((pong or {}).get("protocol", 0)) < contract["herdr_protocol_minimum"]
                 or any(not capabilities.get(name) for name in contract["required_herdr_capabilities"])):
-            raise PreflightError("installed Herdr lacks protocol-22 typed native launch, tracked_executions, and agent_turn_journal")
+            raise PreflightError("installed Herdr lacks protocol-23 workspace-bound typed native launch, tracked_executions, and agent_turn_journal")
         broker_capabilities = broker.get("capabilities") or {}
         result["probe"] = {"broker": broker.get("status"), "herdr_protocol": pong.get("protocol"),
                            "tracked_executions": True, "agent_turn_journal": True,
@@ -441,8 +441,8 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
             if socket_after != str(herdr_socket):
                 herdr_socket = Path(socket_after) if isinstance(socket_after, str) else herdr_socket
             pong = herdr_request(herdr_socket, "ping", {})
-            if int((pong or {}).get("protocol", 0)) < 20 or not ((pong or {}).get("capabilities") or {}).get("agent_turn_journal"):
-                raise PreflightError("restart controller receipt did not reconnect to protocol-22 native-launch journal runtime")
+            if int((pong or {}).get("protocol", 0)) < 23 or not ((pong or {}).get("capabilities") or {}).get("agent_turn_journal"):
+                raise PreflightError("restart controller receipt did not reconnect to protocol-23 workspace-bound native-launch journal runtime")
         if states == case["expected_states"] and states[-1] == "waiting_input":
             observed = unix_request(broker_socket, "status", {"task_id": task["id"]})["tasks"][0]
             validate_journal(case, records, observed, None, fixture=fixture)

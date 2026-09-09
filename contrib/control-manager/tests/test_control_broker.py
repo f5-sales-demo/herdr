@@ -86,7 +86,7 @@ class FakeHerdr:
                 execution.update(state="cancelled", signal_name="Interrupt", output_complete=True)
             return {"execution": execution, "admitted": False}
         if method == "ping":
-            return {"protocol": 22, "capabilities": {"tracked_executions": True, "agent_turn_journal": True}}
+            return {"protocol": 23, "capabilities": {"tracked_executions": True, "agent_turn_journal": True}}
         if method == "agent.turn.list":
             since = params.get("since_revision", 0)
             # Synthetic component model of PR49's cross-ledger settlement:
@@ -650,7 +650,22 @@ class StateTests(unittest.TestCase):
             encoded = json.dumps(request, sort_keys=True, separators=(",", ":"))
             db.claim_native_generation(task["id"], generation=0, session_id=launch["session_header"]["id"], workspace_id="w1", request_sha256=hashlib.sha256(encoded.encode()).hexdigest(), request_json=encoded)
             argv = [executable,"--mode","json","--session-dir",str(session_dir),"--resume",str(session_path),"--model","test/model","--tools","read","--no-mcp","--no-lsp","--no-memories","--no-skills","--no-rules","--no-pty","--print","x"]
-            db.admit_native_generation(task["id"], 0, {"execution_id": "backend-1", "backend_execution_id": "backend-1", "semantic_execution_id": task["id"], "generation": 0, "native_producer": "xcsh", "producer_session_id": launch["session_header"]["id"], "workspace_id": "w1", "cwd": raw, "native_launch": launch, "command": {"mode": "argv", "argv": argv}, "native_executable": {"canonical_path": executable, "sha256": executable_sha256}, "injected_env": {"HERDR_EXECUTION_ID": task["id"], "HERDR_EXECUTION_GENERATION": "0"}, "tab_id": "tab-1", "pane_id": "pane-1"})
+            receipt = {"execution_id": "backend-1", "backend_execution_id": "backend-1", "semantic_execution_id": task["id"], "generation": 0, "native_producer": "xcsh", "producer_session_id": launch["session_header"]["id"], "workspace_id": "w1", "cwd": raw, "native_launch": launch, "command": {"mode": "argv", "argv": argv}, "native_executable": {"canonical_path": executable, "sha256": executable_sha256}, "injected_env": {"HERDR_EXECUTION_ID": task["id"], "HERDR_EXECUTION_GENERATION": "0"}, "tab_id": "tab-1", "pane_id": "pane-1"}
+            # Released protocol 22 omitted workspace_id even though the
+            # manager had already claimed it. Keep that precise receipt shape
+            # rejected; protocol 23 must carry the field rather than weaken
+            # the immutable workspace comparison.
+            released_receipt = receipt.copy()
+            del released_receipt["workspace_id"]
+            with self.assertRaisesRegex(ValueError, "immutable native generation provenance"):
+                db.admit_native_generation(task["id"], 0, released_receipt)
+            admitted = db.admit_native_generation(task["id"], 0, receipt)
+            self.assertEqual(admitted["backend_execution_id"], "backend-1")
+            # Reconciliation of the same response remains idempotent and
+            # cannot allocate a duplicate native generation or child.
+            replay = db.admit_native_generation(task["id"], 0, receipt)
+            self.assertEqual(replay["backend_execution_id"], "backend-1")
+            self.assertEqual(db.conn.execute("SELECT COUNT(*) FROM native_execution_generations WHERE task_id=?", (task["id"],)).fetchone()[0], 1)
             base = {"execution_id": "xcsh-turn", "pane_id": "pane-1", "producer": "xcsh", "session_id": launch["session_header"]["id"], "turn_id": "turn-1", "generation": 0}
             self.assertEqual(db.apply_native_turn({"revision": 1, "report": base | {"event_revision": 1, "state": "starting"}}), ("xcsh-turn", "starting"))
             result = "accepted semantic result"
@@ -1073,7 +1088,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(row["work_kind"] == "xcsh" for row in self.broker.db.list_tasks()))
 
     async def test_native_launch_v3_sends_only_typed_request_and_exact_backend_argv(self):
-        """Synthetic component fixture for protocol-22 request/receipt equivalence."""
+        """Synthetic component fixture for protocol-23 request/receipt equivalence."""
         workspace = await self.configure_control_workspace()
         task = await self.admit_native_xcsh({
             "target": "xcsh-v3-argv", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
@@ -1132,7 +1147,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
                           if tab["workspace_id"] == foreign_id}, foreign_tabs_before)
 
     async def test_native_launch_model_matches_backend_utf8_and_control_boundary_preclaim(self):
-        """Synthetic component fixture for the protocol-22 model contract."""
+        """Synthetic component fixture for the protocol-23 model contract."""
         workspace = await self.configure_control_workspace()
         base = {"target": "xcsh-model", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
                 "text": "safe", "session_id": self.native_launch["session_header"]["id"],
@@ -1180,7 +1195,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
 
         self.broker.herdr.request = protocol20
         try:
-            with self.assertRaisesRegex(ValueError, "protocol-22 typed-native-launch"):
+            with self.assertRaisesRegex(ValueError, "protocol-23 workspace-bound"):
                 await self.admit_native_xcsh({
                     "target": "xcsh-protocol", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
                     "text": "safe", "session_id": "session-protocol", "workspace_id": workspace["workspace"]["workspace_id"],
@@ -1192,7 +1207,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(row["work_kind"] == "xcsh" for row in self.broker.db.list_tasks()))
 
     async def test_native_xcsh_rejects_wrong_returned_executable_binding(self):
-        """A protocol-22 receipt may not substitute an executable after claim."""
+        """A protocol-23 receipt may not substitute an executable after claim."""
         workspace = await self.configure_control_workspace()
         original = self.broker.herdr.request
 
@@ -1468,7 +1483,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.broker.db.task(task["id"])["state"], "cancelled")
 
     async def test_xcsh_cancel_receipt_requires_exact_cooperative_generation_binding(self):
-        """Synthetic component fixture for protocol-22 cancel receipt validation."""
+        """Synthetic component fixture for protocol-23 cancel receipt validation."""
         workspace = await self.configure_control_workspace()
         task = await self.admit_native_xcsh({
             "target": "xcsh-cancel-binding", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
