@@ -18,6 +18,18 @@ PACKAGE_VERSION = 21
 STATE_SCHEMA_VERSION = 11
 
 
+def terminal_appserver_disconnect(text: str) -> bool:
+    """Match Codex's explicit terminal state after remote reconnect gives up.
+
+    Both independent controls are required.  A prior connection warning or a
+    sentence in conversation history cannot by itself authorize recovery.
+    Callers must also prove the exact canonical process and thread identity.
+    """
+    lowered = text.lower()
+    return ("app-server session could not be restored" in lowered
+            and "reconnect failed" in lowered)
+
+
 def package_root() -> Path:
     """Return the release-tree root for this installed runtime."""
     configured = os.environ.get("CODEX_CONTROL_ROOT")

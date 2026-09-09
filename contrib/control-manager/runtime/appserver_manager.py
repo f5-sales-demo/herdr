@@ -17,7 +17,13 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
-from control_portable import machine_config_path, package_root, runtime_root, state_root
+from control_portable import (
+    machine_config_path,
+    package_root,
+    runtime_root,
+    state_root,
+    terminal_appserver_disconnect,
+)
 
 
 CONTROL_ROOT = package_root()
@@ -782,6 +788,22 @@ def native_pane_health(thread_id: str) -> dict[str, Any]:
     exact_runtime = (expected is not None and len(foreground) == 1
                      and foreground[0].get("name") == "codex"
                      and foreground[0].get("argv") == expected)
+    if actual == thread_id and exact_runtime and status in {"idle", "done"}:
+        try:
+            read = herdr_request("agent.read", {
+                "target": pane_id, "source": "detection", "lines": 120,
+                "format": "text", "strip_ansi": True,
+            })
+            terminal = str((read.get("read", read) if isinstance(read, dict) else {}).get("text") or "")
+        except Exception as exc:
+            return {"state": "degraded",
+                    "reason": f"canonical native terminal state is unreadable: {type(exc).__name__}: {exc}"[:500],
+                    "pane_id": pane_id, "thread_id": thread_id, "agent_status": status}
+        if terminal_appserver_disconnect(terminal):
+            return {"state": "unavailable",
+                    "reason": "canonical native manager reports terminal app-server reconnect failure",
+                    "pane_id": pane_id, "thread_id": thread_id, "agent_status": status,
+                    "terminal_disconnect_proven": True}
     if actual == thread_id and not exact_runtime:
         # Do not overwrite or interrupt a process that happens to carry stale
         # canonical metadata.  A non-idle process is a user-visible busy pane.

@@ -57,6 +57,12 @@ python3 /opt/control-manager-<version>/runtime/control_broker.py \
   --config /var/lib/control-manager/machine.json
 ```
 
+Guarded recovery also checks the canonical Codex pane's bounded detection
+buffer. If the exact idle remote client explicitly reports that AppServer
+reconnect failed, the supervisor's durable claim may replace that pane and
+resume the same thread. Busy, blocked, foreign, or ambiguous panes are never
+closed by this repair.
+
 ## Validation boundary
 
 `scripts/control_archive.py test` runs the portable recovery/manager unit

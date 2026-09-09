@@ -142,6 +142,53 @@ class ManagerRealtimeConfigTests(unittest.TestCase):
             self.assertEqual(result["state"], "unavailable")
             self.assertIn("no foreground runtime", result["reason"])
 
+    def test_native_pane_health_rejects_terminally_disconnected_exact_client(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            path = root / "config.json"
+            thread = "canonical-thread"
+            argv = [str(Path("/bin/true").resolve()), "--disable", "hooks", "--remote", "unix://",
+                    "--profile", "control-manager", "-C", str(root), "resume", thread]
+            path.write_text(json.dumps({
+                "manager_thread_id": thread, "manager_pane_id": "wE:p1", "manager_cwd": str(root),
+                "codex_binary": "/bin/true", "app_server_remote": "unix://", "profile": "control-manager",
+            }))
+            def request(method, _params):
+                if method == "agent.get":
+                    return {"agent": {"agent": "codex", "agent_status": "idle",
+                                      "agent_session": {"value": thread}}}
+                if method == "pane.process_info":
+                    return {"process_info": {"foreground_processes": [{"name": "codex", "argv": argv}]}}
+                if method == "agent.read":
+                    return {"read": {"text": "app-server session could not be restored\nReconnect failed — check the endpoint"}}
+                self.fail(method)
+            with patch("appserver_manager.CONFIG_PATH", path), patch("appserver_manager.herdr_request", side_effect=request):
+                result = native_pane_health(thread)
+            self.assertEqual(result["state"], "unavailable")
+            self.assertIs(result["terminal_disconnect_proven"], True)
+
+    def test_native_pane_health_keeps_exact_interactive_client_healthy(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            path = root / "config.json"
+            thread = "canonical-thread"
+            argv = [str(Path("/bin/true").resolve()), "--disable", "hooks", "--remote", "unix://",
+                    "--profile", "control-manager", "-C", str(root), "resume", thread]
+            path.write_text(json.dumps({
+                "manager_thread_id": thread, "manager_pane_id": "wE:p1", "manager_cwd": str(root),
+                "codex_binary": "/bin/true", "app_server_remote": "unix://", "profile": "control-manager",
+            }))
+            responses = {
+                "agent.get": {"agent": {"agent": "codex", "agent_status": "idle",
+                                          "agent_session": {"value": thread}}},
+                "pane.process_info": {"process_info": {"foreground_processes": [{"name": "codex", "argv": argv}]}},
+                "agent.read": {"read": {"text": "Ask Codex to do anything"}},
+            }
+            with patch("appserver_manager.CONFIG_PATH", path), \
+                 patch("appserver_manager.herdr_request", side_effect=lambda method, _params: responses[method]):
+                result = native_pane_health(thread)
+            self.assertEqual(result["state"], "healthy")
+
     def test_observer_diagnostics_are_sent_to_stderr_not_ndjson_stdout(self):
         server = FakeRefreshServer()
         original = server.request
