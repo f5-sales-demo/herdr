@@ -44,12 +44,23 @@ pub struct ExecutionResumeParams {
     pub execution_id: String,
     pub generation: u64,
     pub session_id: String,
+    /// Absolute path to the XCSH executable that owns this generation.
+    /// Herdr measures and persists its canonical path and SHA-256 before
+    /// admission; launches do not resolve `xcsh` through the server PATH.
+    pub xcsh_executable: String,
     pub text: String,
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+}
+
+/// Immutable measurement of the XCSH program admitted for a native child.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NativeExecutableBinding {
+    pub canonical_path: String,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -86,6 +97,8 @@ pub struct ExecutionRecord {
     pub generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_producer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_executable: Option<NativeExecutableBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub producer_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

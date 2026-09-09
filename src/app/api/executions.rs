@@ -33,6 +33,33 @@ impl App {
                 },
             );
         }
+        let Some(expected_executable) = claimed.native_executable.as_ref() else {
+            return self.fail_visible_execution(
+                id,
+                &claimed.execution_id,
+                "execution_binding_missing",
+                "native execution is missing its durable XCSH executable binding",
+            );
+        };
+        match crate::execution::verify_xcsh_executable_binding(expected_executable) {
+            Ok(true) => {}
+            Ok(false) => {
+                return self.fail_visible_execution(
+                    id,
+                    &claimed.execution_id,
+                    "execution_binding_changed",
+                    "XCSH executable changed after native execution admission",
+                )
+            }
+            Err(error) => {
+                return self.fail_visible_execution(
+                    id,
+                    &claimed.execution_id,
+                    "execution_binding_unavailable",
+                    &error,
+                )
+            }
+        }
         let ws_idx = if let Some(workspace_id) = params.workspace_id.as_deref() {
             match self.parse_workspace_id(workspace_id) {
                 Some(index) => index,
