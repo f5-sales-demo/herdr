@@ -1,7 +1,8 @@
 use crate::api::client::ApiClient;
 use crate::api::schema::{
     ExecutionCommand, ExecutionListParams, ExecutionResumeParams, ExecutionStartParams,
-    ExecutionTarget, ExecutionWaitParams, Method, Request,
+    ExecutionTarget, ExecutionWaitParams, Method, NativeDiscoveryPolicy, NativeLaunchV3,
+    NativeLifecycleMode, NativeSessionHeaderBinding, NativeToolsPolicy, Request,
 };
 
 pub(super) fn run(args: &[String]) -> std::io::Result<i32> {
@@ -68,10 +69,20 @@ fn parse_resume(args: &[String]) -> std::io::Result<Method> {
         .map_err(|_| std::io::Error::other("generation must be an integer"))?;
     let mut session_id = None;
     let mut xcsh_executable = None;
+    let mut session_dir = None;
+    let mut session_path = None;
+    let mut session_header_sha256 = None;
+    let mut model = None;
     let mut cwd = None;
     let mut text = None;
+    let mut interactive = false;
     let mut index = 0;
     while index < rest.len() {
+        if rest[index] == "--interactive" {
+            interactive = true;
+            index += 1;
+            continue;
+        }
         let value = rest
             .get(index + 1)
             .ok_or_else(|| std::io::Error::other("resume flag requires a value"))?
@@ -79,11 +90,15 @@ fn parse_resume(args: &[String]) -> std::io::Result<Method> {
         match rest[index].as_str() {
             "--session" => session_id = Some(value),
             "--xcsh" => xcsh_executable = Some(value),
+            "--session-dir" => session_dir = Some(value),
+            "--session-path" => session_path = Some(value),
+            "--session-header-sha256" => session_header_sha256 = Some(value),
+            "--model" => model = Some(value),
             "--cwd" => cwd = Some(value),
             "--text" => text = Some(value),
             _ => {
                 return Err(std::io::Error::other(
-                    "expected --session ID --xcsh PATH --cwd PATH --text TEXT",
+                    "expected --session ID --session-dir PATH --session-path PATH --session-header-sha256 SHA256 --xcsh PATH --model MODEL [--interactive] --cwd PATH --text TEXT",
                 ))
             }
         }
@@ -92,9 +107,25 @@ fn parse_resume(args: &[String]) -> std::io::Result<Method> {
     Ok(Method::ExecutionResume(ExecutionResumeParams {
         execution_id: execution_id.clone(),
         generation,
-        session_id: session_id.ok_or_else(|| std::io::Error::other("--session is required"))?,
-        xcsh_executable: xcsh_executable
-            .ok_or_else(|| std::io::Error::other("--xcsh is required"))?,
+        native_launch: NativeLaunchV3 {
+            version: 3,
+            xcsh_executable: xcsh_executable
+                .ok_or_else(|| std::io::Error::other("--xcsh is required"))?,
+            session_dir: session_dir
+                .ok_or_else(|| std::io::Error::other("--session-dir is required"))?,
+            session_path: session_path
+                .ok_or_else(|| std::io::Error::other("--session-path is required"))?,
+            session_header: NativeSessionHeaderBinding {
+                id: session_id.ok_or_else(|| std::io::Error::other("--session is required"))?,
+                sha256: session_header_sha256
+                    .ok_or_else(|| std::io::Error::other("--session-header-sha256 is required"))?,
+            },
+            model: model.ok_or_else(|| std::io::Error::other("--model is required"))?,
+            discovery: NativeDiscoveryPolicy::ReducedV1,
+            tools: NativeToolsPolicy::Read,
+            interactive,
+            lifecycle_mode: NativeLifecycleMode::ManagedTurnV1,
+        },
         cwd: cwd.ok_or_else(|| std::io::Error::other("--cwd is required"))?,
         text: text.ok_or_else(|| std::io::Error::other("--text is required"))?,
         workspace_id: None,
@@ -162,7 +193,7 @@ fn usage_ok() -> std::io::Result<i32> {
     Ok(0)
 }
 fn print_usage() {
-    eprintln!("herdr execution commands:\n  herdr execution start <id> --cwd <absolute-path> [--shell bash|zsh] -- <argv...|command-text>\n  herdr execution resume <semantic-id> <generation> --session <canonical-xcsh-session-header-id> --xcsh <absolute-executable-path> --cwd <absolute-path> --text <text>\n  herdr execution get <backend-id>\n  herdr execution list [--since <revision>]\n  herdr execution wait <after-revision>\n  herdr execution cancel <backend-id>");
+    eprintln!("herdr execution commands:\n  herdr execution start <id> --cwd <absolute-path> [--shell bash|zsh] -- <argv...|command-text>\n  herdr execution resume <semantic-id> <generation> --session <canonical-xcsh-session-header-id> --session-dir <canonical-dir> --session-path <canonical-jsonl> --session-header-sha256 <sha256-first-line-plus-lf> --xcsh <absolute-executable-path> --model <configured-model> [--interactive] --cwd <absolute-path> --text <text>\n  herdr execution get <backend-id>\n  herdr execution list [--since <revision>]\n  herdr execution wait <after-revision>\n  herdr execution cancel <backend-id>");
 }
 
 #[cfg(test)]
@@ -176,8 +207,16 @@ mod tests {
             "7".into(),
             "--session".into(),
             "0123abcd4567ef89".into(),
+            "--session-dir".into(),
+            "/tmp/sessions".into(),
+            "--session-path".into(),
+            "/tmp/sessions/session.jsonl".into(),
+            "--session-header-sha256".into(),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
             "--xcsh".into(),
             "/opt/xcsh/bin/xcsh".into(),
+            "--model".into(),
+            "openai/gpt-5".into(),
             "--cwd".into(),
             "/tmp".into(),
             "--text".into(),
@@ -189,7 +228,12 @@ mod tests {
         };
         assert_eq!(params.execution_id, "semantic");
         assert_eq!(params.generation, 7);
-        assert_eq!(params.session_id, "0123abcd4567ef89");
-        assert_eq!(params.xcsh_executable, "/opt/xcsh/bin/xcsh");
+        assert_eq!(params.native_launch.session_header.id, "0123abcd4567ef89");
+        assert_eq!(params.native_launch.xcsh_executable, "/opt/xcsh/bin/xcsh");
+        assert_eq!(
+            params.native_launch.session_path,
+            "/tmp/sessions/session.jsonl"
+        );
+        assert_eq!(params.native_launch.model, "openai/gpt-5");
     }
 }

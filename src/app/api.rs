@@ -1098,6 +1098,8 @@ impl App {
                 return self.handle_execution_cancel(request.id, target.execution_id)
             }
             Method::AgentTurnReport(_)
+            | Method::AgentTurnActionGet(_)
+            | Method::AgentTurnActionAck(_)
             | Method::AgentTurnGet(_)
             | Method::AgentTurnList(_)
             | Method::AgentTurnWait(_) => {

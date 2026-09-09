@@ -5,8 +5,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::schema::{
+    AgentTurnActionAckParams, AgentTurnActionRecord, AgentTurnActionState, AgentTurnActionTarget,
     ExecutionCommand, ExecutionRecord, ExecutionResumeParams, ExecutionStartParams, ExecutionState,
-    NativeExecutableBinding,
+    NativeExecutableBinding, NativeLaunchV3, NativeProducerRegistration,
+    NativeSessionHeaderBinding,
 };
 
 const MAX_RECORDS: usize = 256;
@@ -20,6 +22,7 @@ struct Inner {
     state: Mutex<State>,
     pane_executions: Mutex<HashMap<u32, String>>,
     pending_pane_output: Mutex<HashMap<u32, CapturedOutput>>,
+    native_capabilities: Mutex<HashMap<String, String>>,
 }
 #[derive(Default)]
 struct CapturedOutput {
@@ -41,6 +44,10 @@ struct State {
     tombstones: Vec<ExecutionTombstone>,
     #[serde(default)]
     expired_id_filter: Vec<u8>,
+    #[serde(default)]
+    native_capability_verifiers: BTreeMap<String, String>,
+    #[serde(default)]
+    native_actions: BTreeMap<String, AgentTurnActionRecord>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ExecutionTombstone {
@@ -62,7 +69,7 @@ impl ExecutionManager {
         Self::load_at(crate::session::data_dir().join("executions.json"))
     }
 
-    fn load_at(path: PathBuf) -> Self {
+    pub(crate) fn load_at(path: PathBuf) -> Self {
         let mut state: State = std::fs::read(&path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
@@ -87,10 +94,15 @@ impl ExecutionManager {
             state: Mutex::new(state),
             pane_executions: Mutex::new(HashMap::new()),
             pending_pane_output: Mutex::new(HashMap::new()),
+            native_capabilities: Mutex::new(HashMap::new()),
         }));
         if changed {
             let _ = manager.persist();
         }
+        // A producer can disappear before acknowledging its durable cancel
+        // request. Reconcile on reload as well as action reads/acks so that a
+        // restart cannot indefinitely preserve a live-looking request.
+        let _ = manager.reconcile_native_action_deadlines();
         manager
     }
 
@@ -141,6 +153,8 @@ impl ExecutionManager {
             generation: None,
             native_producer: None,
             native_executable: None,
+            native_launch: None,
+            native_registration: None,
             producer_session_id: None,
             injected_env: BTreeMap::new(),
             superseded_by_backend_execution_id: None,
@@ -181,15 +195,11 @@ impl ExecutionManager {
         params: &ExecutionResumeParams,
     ) -> Result<(ExecutionRecord, bool, Option<ExecutionRecord>), String> {
         validate_resume(params)?;
-        let executable = measure_xcsh_executable(&params.xcsh_executable)?;
+        let executable = measure_xcsh_executable(&params.native_launch.xcsh_executable)?;
+        let session_header = measure_xcsh_session_header(&params.native_launch)?;
         let backend_execution_id = native_backend_id(&params.execution_id, params.generation);
         let command = ExecutionCommand::Argv {
-            argv: vec![
-                executable.canonical_path.clone(),
-                "--resume".into(),
-                params.session_id.clone(),
-                params.text.clone(),
-            ],
+            argv: native_xcsh_argv(&executable, &params.native_launch, &params.text)?,
         };
         let injected_env = BTreeMap::from([
             ("HERDR_EXECUTION_ID".into(), params.execution_id.clone()),
@@ -215,8 +225,9 @@ impl ExecutionManager {
             if existing.backend_execution_id.as_deref() == Some(&backend_execution_id)
                 && existing.cwd == params.cwd
                 && existing.command == command
-                && existing.producer_session_id.as_deref() == Some(&params.session_id)
+                && existing.producer_session_id.as_deref() == Some(&session_header.id)
                 && existing.native_executable.as_ref() == Some(&executable)
+                && existing.native_launch.as_ref() == Some(&params.native_launch)
                 && existing.injected_env == injected_env
             {
                 return Ok((existing.clone(), false, None));
@@ -278,6 +289,15 @@ impl ExecutionManager {
         state
             .native_reservations
             .insert(params.execution_id.clone(), params.generation);
+        let native_capability = uuid::Uuid::new_v4().simple().to_string();
+        state
+            .native_capability_verifiers
+            .insert(backend_execution_id.clone(), sha256_hex(&native_capability));
+        self.0
+            .native_capabilities
+            .lock()
+            .map_err(|_| "native capability lock poisoned")?
+            .insert(backend_execution_id.clone(), native_capability);
         let record = ExecutionRecord {
             execution_id: backend_execution_id.clone(),
             backend_execution_id: Some(backend_execution_id.clone()),
@@ -285,7 +305,9 @@ impl ExecutionManager {
             generation: Some(params.generation),
             native_producer: Some("xcsh".into()),
             native_executable: Some(executable),
-            producer_session_id: Some(params.session_id.clone()),
+            native_launch: Some(params.native_launch.clone()),
+            native_registration: None,
+            producer_session_id: Some(session_header.id),
             injected_env,
             superseded_by_backend_execution_id: None,
             cwd: params.cwd.clone(),
@@ -317,6 +339,22 @@ impl ExecutionManager {
             old.revision = revision;
             old.clone()
         });
+        if let Some(old) = previous.as_ref() {
+            state
+                .native_actions
+                .entry(old.execution_id.clone())
+                .or_insert(AgentTurnActionRecord {
+                    backend_execution_id: old.execution_id.clone(),
+                    action_id: "cancel".into(),
+                    action_revision: 1,
+                    state: AgentTurnActionState::Requested,
+                    requested_at_unix_ms: now_ms(),
+                    acknowledged_at_unix_ms: None,
+                    turn_id: None,
+                    timed_out_at_unix_ms: None,
+                    settled_at_unix_ms: None,
+                });
+        }
         state.records.push(record.clone());
         self.enforce_retention(&mut state);
         self.persist_locked(&state)?;
@@ -381,14 +419,28 @@ impl ExecutionManager {
                 Some(status) => {
                     if let Some(signal) = status.signal() {
                         record.signal_name = Some(signal.into());
-                        record.state = if record.cancel_requested {
+                        if record.native_launch.is_some()
+                            && record.state == ExecutionState::Cancelled
+                        {
+                            return;
+                        }
+                        record.state = if record.cancel_requested && record.native_launch.is_none()
+                        {
                             ExecutionState::Cancelled
                         } else {
                             ExecutionState::Exited
                         };
                     } else {
                         record.exit_code = i32::try_from(status.exit_code()).ok();
-                        record.state = if record.cancel_requested && !status.success() {
+                        if record.native_launch.is_some()
+                            && record.state == ExecutionState::Cancelled
+                        {
+                            return;
+                        }
+                        record.state = if record.cancel_requested
+                            && !status.success()
+                            && record.native_launch.is_none()
+                        {
                             ExecutionState::Cancelled
                         } else {
                             ExecutionState::Exited
@@ -471,6 +523,354 @@ impl ExecutionManager {
         }
         self.mutate(id, |record| record.cancel_requested = true)?;
         self.get(id).ok_or_else(|| "execution_not_found".into())
+    }
+    pub(crate) fn native_capability(&self, id: &str) -> Option<String> {
+        self.0.native_capabilities.lock().ok()?.get(id).cloned()
+    }
+    pub(crate) fn request_native_cancel(&self, id: &str) -> Result<ExecutionRecord, String> {
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| "execution state lock poisoned")?;
+        let index = state
+            .records
+            .iter()
+            .position(|record| record.execution_id == id)
+            .ok_or("execution_not_found")?;
+        if state.records[index].native_launch.is_none()
+            || !matches!(
+                state.records[index].state,
+                ExecutionState::Starting | ExecutionState::Running
+            )
+        {
+            return Ok(state.records[index].clone());
+        }
+        state.revision += 1;
+        let revision = state.revision;
+        {
+            let record = &mut state.records[index];
+            record.cancel_requested = true;
+            record.revision = revision;
+        }
+        state
+            .native_actions
+            .entry(id.into())
+            .or_insert(AgentTurnActionRecord {
+                backend_execution_id: id.into(),
+                action_id: "cancel".into(),
+                action_revision: 1,
+                state: AgentTurnActionState::Requested,
+                requested_at_unix_ms: now_ms(),
+                acknowledged_at_unix_ms: None,
+                turn_id: None,
+                timed_out_at_unix_ms: None,
+                settled_at_unix_ms: None,
+            });
+        let result = state.records[index].clone();
+        self.persist_locked(&state)?;
+        Ok(result)
+    }
+    pub(crate) fn native_actions(
+        &self,
+        target: &AgentTurnActionTarget,
+    ) -> Result<Vec<AgentTurnActionRecord>, String> {
+        self.reconcile_native_action_deadlines()?;
+        let record = self.authorize_native_action(target)?;
+        let state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| "execution state lock poisoned")?;
+        Ok(state
+            .native_actions
+            .get(&record.execution_id)
+            .filter(|action| action.action_revision > target.after_revision)
+            .cloned()
+            .into_iter()
+            .collect())
+    }
+    pub(crate) fn acknowledge_native_action(
+        &self,
+        params: &AgentTurnActionAckParams,
+    ) -> Result<(AgentTurnActionRecord, bool), String> {
+        self.reconcile_native_action_deadlines()?;
+        let record = self.authorize_native_action(&params.target)?;
+        if params.action_id != "cancel" || params.action_revision != 1 {
+            return Err("agent_turn_action_not_found".into());
+        }
+        if params.state != AgentTurnActionState::SafePoint {
+            return Err(
+                "agent_turn_action_invalid_state: only safe_point acknowledgement is accepted"
+                    .into(),
+            );
+        }
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| "execution state lock poisoned")?;
+        let action = state
+            .native_actions
+            .get_mut(&record.execution_id)
+            .ok_or("agent_turn_action_not_found")?;
+        if action.state == AgentTurnActionState::SafePoint {
+            return Ok((action.clone(), false));
+        }
+        if action.state == AgentTurnActionState::TimedOut {
+            return Err("agent_turn_action_safe_point_timeout".into());
+        }
+        if now_ms().saturating_sub(action.requested_at_unix_ms) > 30_000 {
+            return Err("agent_turn_action_safe_point_timeout".into());
+        }
+        action.state = AgentTurnActionState::SafePoint;
+        action.acknowledged_at_unix_ms = Some(now_ms());
+        action.turn_id = record
+            .native_registration
+            .as_ref()
+            .map(|registered| registered.turn_id.clone());
+        let action = action.clone();
+        self.persist_locked(&state)?;
+        Ok((action, true))
+    }
+    fn authorize_native_action(
+        &self,
+        target: &AgentTurnActionTarget,
+    ) -> Result<ExecutionRecord, String> {
+        let record = self.resolve_agent_turn_execution(
+            &target.execution_id,
+            &target.producer,
+            &target.session_id,
+            target.generation,
+        )?;
+        if record.pane_id.as_deref() != Some(target.pane_id.as_str()) {
+            return Err("agent_turn_provenance_mismatch: pane is not owned by execution".into());
+        }
+        let Some(registered) = record.native_registration.as_ref() else {
+            return Err("agent_turn_native_not_registered: actions require the child's authenticated starting report".into());
+        };
+        if registered.journaled_at_unix_ms.is_none() {
+            return Err("agent_turn_native_not_registered: starting report is not yet durable in the turn journal".into());
+        }
+        if registered.producer != target.producer
+            || registered.session_id != target.session_id
+            || registered.generation != target.generation
+            || registered.pane_id != target.pane_id
+        {
+            return Err("agent_turn_provenance_mismatch: action target differs from authenticated native registration".into());
+        }
+        let state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| "execution state lock poisoned")?;
+        if state.native_capability_verifiers.get(&record.execution_id)
+            != Some(&sha256_hex(&target.native_capability))
+        {
+            return Err("agent_turn_native_capability_mismatch".into());
+        }
+        Ok(record)
+    }
+    pub(crate) fn register_native_start(
+        &self,
+        record: &ExecutionRecord,
+        report: &crate::api::schema::AgentTurnReportParams,
+    ) -> Result<(), String> {
+        if record.native_launch.is_none() {
+            return Ok(());
+        }
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| "execution state lock poisoned")?;
+        let index = state
+            .records
+            .iter()
+            .find(|candidate| candidate.execution_id == record.execution_id)
+            .map(|candidate| candidate.execution_id.clone())
+            .and_then(|id| {
+                state
+                    .records
+                    .iter()
+                    .position(|candidate| candidate.execution_id == id)
+            })
+            .ok_or("execution_not_found")?;
+        let target = &state.records[index];
+        if let Some(existing) = &target.native_registration {
+            if existing.producer == report.producer
+                && existing.session_id == report.session_id
+                && existing.generation == report.generation
+                && existing.pane_id == report.pane_id
+                && existing.turn_id == report.turn_id
+            {
+                return Ok(());
+            }
+            return Err("agent_turn_native_registration_conflict".into());
+        }
+        if report.state != crate::api::schema::AgentTurnState::Starting
+            || report.event_revision != 1
+        {
+            return Err("agent_turn_native_registration_required: first native report must be authenticated starting revision 1".into());
+        }
+        let pid = target.pid.ok_or(
+            "agent_turn_native_registration_pending: native child is not attached to an owned PTY",
+        )?;
+        let registration = NativeProducerRegistration {
+            producer: report.producer.clone(),
+            session_id: report.session_id.clone(),
+            generation: report.generation,
+            pane_id: report.pane_id.clone(),
+            pid,
+            turn_id: report.turn_id.clone(),
+            registered_at_unix_ms: now_ms(),
+            journaled_at_unix_ms: None,
+        };
+        state.revision += 1;
+        let revision = state.revision;
+        let target = &mut state.records[index];
+        target.native_registration = Some(registration);
+        target.revision = revision;
+        self.persist_locked(&state)
+    }
+    pub(crate) fn validate_native_cancelled_report(
+        &self,
+        record: &ExecutionRecord,
+        report: &crate::api::schema::AgentTurnReportParams,
+    ) -> Result<(), String> {
+        if record.native_launch.is_none()
+            || report.state != crate::api::schema::AgentTurnState::Cancelled
+        {
+            return Ok(());
+        }
+        let state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| "execution state lock poisoned")?;
+        let action = state
+            .native_actions
+            .get(&record.execution_id)
+            .ok_or("agent_turn_native_cancel_not_requested")?;
+        if action.state != AgentTurnActionState::SafePoint
+            || action.turn_id.as_deref() != Some(report.turn_id.as_str())
+        {
+            return Err("agent_turn_native_cancel_not_at_authenticated_safe_point".into());
+        }
+        Ok(())
+    }
+    pub(crate) fn confirm_native_start_journaled(
+        &self,
+        record: &ExecutionRecord,
+        report: &crate::api::schema::AgentTurnReportParams,
+    ) -> Result<(), String> {
+        if record.native_launch.is_none()
+            || report.state != crate::api::schema::AgentTurnState::Starting
+        {
+            return Ok(());
+        }
+        self.mutate(&record.execution_id, |current| {
+            if let Some(registration) = current.native_registration.as_mut() {
+                if registration.turn_id == report.turn_id
+                    && registration.producer == report.producer
+                {
+                    registration.journaled_at_unix_ms.get_or_insert(now_ms());
+                }
+            }
+        })
+    }
+
+    pub(crate) fn settle_native_cancelled_report(
+        &self,
+        record: &ExecutionRecord,
+        report: &crate::api::schema::AgentTurnReportParams,
+    ) -> Result<(), String> {
+        if record.native_launch.is_none()
+            || report.state != crate::api::schema::AgentTurnState::Cancelled
+        {
+            return Ok(());
+        }
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| "execution state lock poisoned")?;
+        let index = state
+            .records
+            .iter()
+            .position(|candidate| candidate.execution_id == record.execution_id)
+            .ok_or("execution_not_found")?;
+        let action = state
+            .native_actions
+            .get_mut(&record.execution_id)
+            .ok_or("agent_turn_native_cancel_not_requested")?;
+        if action.state != AgentTurnActionState::SafePoint
+            || action.turn_id.as_deref() != Some(report.turn_id.as_str())
+        {
+            return Err("agent_turn_native_cancel_not_at_authenticated_safe_point".into());
+        }
+        if action.settled_at_unix_ms.is_some() {
+            return Ok(());
+        }
+        action.settled_at_unix_ms = Some(now_ms());
+        state.revision += 1;
+        let revision = state.revision;
+        let current = &mut state.records[index];
+        current.state = ExecutionState::Cancelled;
+        current.finished_at_unix_ms = Some(now_ms());
+        current.revision = revision;
+        self.persist_locked(&state)
+    }
+
+    pub(crate) fn reconcile_native_action_deadlines(&self) -> Result<(), String> {
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| "execution state lock poisoned")?;
+        let now = now_ms();
+        let mut changed = false;
+        for action in state.native_actions.values_mut() {
+            if action.state == AgentTurnActionState::Requested
+                && now.saturating_sub(action.requested_at_unix_ms) > 30_000
+            {
+                action.state = AgentTurnActionState::TimedOut;
+                action.timed_out_at_unix_ms = Some(now);
+                changed = true;
+            }
+        }
+        if changed {
+            self.persist_locked(&state)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn authorize_native_report_capability(
+        &self,
+        record: &ExecutionRecord,
+        capability: Option<&str>,
+    ) -> Result<(), String> {
+        if record.native_launch.is_none() {
+            return if capability.is_some() {
+                Err("agent_turn_native_capability_unexpected".into())
+            } else {
+                Ok(())
+            };
+        }
+        let state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| "execution state lock poisoned")?;
+        if state
+            .native_capability_verifiers
+            .get(&record.execution_id)
+            .map(String::as_str)
+            == capability.map(sha256_hex).as_deref()
+        {
+            Ok(())
+        } else {
+            Err("agent_turn_native_capability_mismatch".into())
+        }
     }
     pub(crate) fn mark_start_failed(&self, id: &str, message: &str) {
         let _ = self.mutate(id, |record| {
@@ -720,14 +1120,28 @@ fn validate_resume(p: &ExecutionResumeParams) -> Result<(), String> {
         workspace_id: None,
         label: None,
         command: ExecutionCommand::Argv {
-            argv: vec![p.xcsh_executable.clone()],
+            argv: vec![p.native_launch.xcsh_executable.clone()],
         },
     })?;
     if p.text.is_empty() || p.text.len() > 65_536 {
         return Err("invalid_execution_resume".into());
     }
-    if !is_canonical_xcsh_session_id(&p.session_id) {
+    if p.native_launch.version != 3 {
+        return Err(
+            "invalid_native_launch: execution.resume requires native_launch version 3".into(),
+        );
+    }
+    if !is_canonical_xcsh_session_id(&p.native_launch.session_header.id) {
         return Err("invalid_xcsh_session_id: execution.resume requires the canonical 16-character lowercase hexadecimal XCSH SessionHeader ID; ID prefixes and session paths cannot bind reporter provenance exactly".into());
+    }
+    if p.native_launch.model.is_empty()
+        || p.native_launch.model.len() > 256
+        || p.native_launch.model.chars().any(char::is_control)
+    {
+        return Err("invalid_native_launch: model must be a non-empty non-secret selector".into());
+    }
+    if !is_sha256_hex(&p.native_launch.session_header.sha256) {
+        return Err("invalid_native_launch: session_header.sha256 must be 64 lowercase hexadecimal characters".into());
     }
     // XCSH serializes generations as JavaScript Number. Larger values round
     // and could silently select a different durable generation binding.
@@ -737,6 +1151,93 @@ fn validate_resume(p: &ExecutionResumeParams) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Canonicalize and bind the exact XCSH JSONL SessionHeader. The digest is of
+/// the first line's original bytes including the LF separator; this makes the
+/// durable receipt unambiguous and catches a header rewrite before launch.
+pub(crate) fn measure_xcsh_session_header(
+    launch: &NativeLaunchV3,
+) -> Result<NativeSessionHeaderBinding, String> {
+    let requested = Path::new(&launch.session_path);
+    if !requested.is_absolute() {
+        return Err("invalid_xcsh_session_path: session_path must be an absolute path".into());
+    }
+    let canonical = std::fs::canonicalize(requested).map_err(|error| {
+        format!("invalid_xcsh_session_path: cannot resolve session path: {error}")
+    })?;
+    let metadata = std::fs::metadata(&canonical).map_err(|error| {
+        format!("invalid_xcsh_session_path: cannot inspect session path: {error}")
+    })?;
+    if !metadata.is_file() {
+        return Err("invalid_xcsh_session_path: session_path must name a regular file".into());
+    }
+    if canonical.to_string_lossy() != launch.session_path {
+        return Err("invalid_xcsh_session_path: session_path must already be canonical".into());
+    }
+    let requested_dir = Path::new(&launch.session_dir);
+    if !requested_dir.is_absolute() {
+        return Err("invalid_xcsh_session_dir: session_dir must be an absolute path".into());
+    }
+    let canonical_dir = std::fs::canonicalize(requested_dir).map_err(|error| {
+        format!("invalid_xcsh_session_dir: cannot resolve session dir: {error}")
+    })?;
+    if !canonical_dir.is_dir()
+        || canonical_dir.to_string_lossy() != launch.session_dir
+        || canonical.parent() != Some(canonical_dir.as_path())
+    {
+        return Err("invalid_xcsh_session_dir: session_dir must be canonical and contain session_path directly".into());
+    }
+    let mut file = std::fs::File::open(&canonical).map_err(|error| {
+        format!("invalid_xcsh_session_path: cannot read session header: {error}")
+    })?;
+    let mut header_line = Vec::new();
+    std::io::Read::by_ref(&mut file)
+        .take(1024 * 1024)
+        .read_to_end(&mut header_line)
+        .map_err(|error| format!("invalid_xcsh_session_header: cannot read header: {error}"))?;
+    let Some(newline) = header_line.iter().position(|byte| *byte == b'\n') else {
+        return Err("invalid_xcsh_session_header: first JSONL header must end with LF".into());
+    };
+    header_line.truncate(newline + 1);
+    let value: serde_json::Value = serde_json::from_slice(&header_line[..newline])
+        .map_err(|_| "invalid_xcsh_session_header: first line is not JSON".to_string())?;
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("session") {
+        return Err(
+            "invalid_xcsh_session_header: first JSONL line is not an XCSH session header".into(),
+        );
+    }
+    let id = value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "invalid_xcsh_session_header: session header has no id".to_string())?;
+    if id != launch.session_header.id || !is_canonical_xcsh_session_id(id) {
+        return Err(
+            "invalid_xcsh_session_header: session header id does not match canonical binding"
+                .into(),
+        );
+    }
+    use sha2::Digest;
+    let measured = NativeSessionHeaderBinding {
+        id: id.into(),
+        sha256: format!("{:x}", sha2::Sha256::digest(&header_line)),
+    };
+    if measured != launch.session_header {
+        return Err("invalid_xcsh_session_header: session header digest does not match first line including LF".into());
+    }
+    Ok(measured)
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn sha256_hex(value: &str) -> String {
+    use sha2::Digest;
+    format!("{:x}", sha2::Sha256::digest(value.as_bytes()))
 }
 
 /// Measure an explicit XCSH executable without consulting PATH. The binding is
@@ -820,6 +1321,42 @@ fn is_canonical_xcsh_session_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
+/// The complete supported XCSH argv derived from protocol-22's typed launch.
+/// No caller-controlled argv or environment reaches the child. `managed_turn_v1`
+/// is a durable Herdr/producer lifecycle contract, not an undocumented XCSH
+/// command-line option.
+fn native_xcsh_argv(
+    executable: &NativeExecutableBinding,
+    launch: &NativeLaunchV3,
+    text: &str,
+) -> Result<Vec<String>, String> {
+    let mut argv = vec![executable.canonical_path.clone()];
+    if !launch.interactive {
+        argv.extend(["--mode".into(), "json".into()]);
+    }
+    argv.extend([
+        "--session-dir".into(),
+        launch.session_dir.clone(),
+        "--resume".into(),
+        launch.session_path.clone(),
+        "--model".into(),
+        launch.model.clone(),
+        "--tools".into(),
+        "read".into(),
+        "--no-mcp".into(),
+        "--no-lsp".into(),
+        "--no-memories".into(),
+        "--no-skills".into(),
+        "--no-rules".into(),
+        "--no-pty".into(),
+    ]);
+    if !launch.interactive {
+        argv.push("--print".into());
+    }
+    argv.push(text.into());
+    Ok(argv)
+}
+
 fn native_backend_id(execution_id: &str, generation: u64) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(format!("xcsh\0{execution_id}\0{generation}").as_bytes());
@@ -870,18 +1407,54 @@ mod tests {
         }
     }
     fn resume_params(generation: u64) -> ExecutionResumeParams {
+        let session_path = test_session_path();
         ExecutionResumeParams {
             execution_id: "semantic-task".into(),
             generation,
-            session_id: "0123abcd4567ef89".into(),
-            xcsh_executable: std::env::current_exe()
-                .expect("test executable path")
-                .to_string_lossy()
-                .into_owned(),
+            native_launch: NativeLaunchV3 {
+                version: 3,
+                xcsh_executable: std::env::current_exe()
+                    .expect("test executable path")
+                    .to_string_lossy()
+                    .into_owned(),
+                session_dir: std::fs::canonicalize(session_path.parent().expect("session parent"))
+                    .expect("canonical session directory")
+                    .to_string_lossy()
+                    .into_owned(),
+                session_path: session_path.to_string_lossy().into_owned(),
+                session_header: test_session_header_binding(),
+                model: "test/model".into(),
+                discovery: crate::api::schema::NativeDiscoveryPolicy::ReducedV1,
+                tools: crate::api::schema::NativeToolsPolicy::Read,
+                interactive: false,
+                lifecycle_mode: crate::api::schema::NativeLifecycleMode::ManagedTurnV1,
+            },
             text: "continue the task".into(),
             cwd: "/tmp".into(),
             workspace_id: None,
             label: None,
+        }
+    }
+
+    fn test_session_path() -> &'static PathBuf {
+        static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        PATH.get_or_init(|| {
+            let path = temp("native-session.jsonl");
+            std::fs::write(
+                &path,
+                "{\"type\":\"session\",\"version\":3,\"id\":\"0123abcd4567ef89\",\"cwd\":\"/tmp\"}\n",
+            )
+            .expect("write native session header");
+            std::fs::canonicalize(path).expect("canonical session path")
+        })
+    }
+
+    fn test_session_header_binding() -> NativeSessionHeaderBinding {
+        use sha2::Digest;
+        let bytes = std::fs::read(test_session_path()).expect("read native session header");
+        NativeSessionHeaderBinding {
+            id: "0123abcd4567ef89".into(),
+            sha256: format!("{:x}", sha2::Sha256::digest(bytes)),
         }
     }
 
@@ -929,13 +1502,31 @@ mod tests {
             .contains("generation_conflict"));
         let alternate = copied_test_executable("native-alternate-binding");
         let mut binding_conflict = resume_params(4);
-        binding_conflict.xcsh_executable = alternate.to_string_lossy().into_owned();
+        binding_conflict.native_launch.xcsh_executable = alternate.to_string_lossy().into_owned();
         assert!(manager
             .admit_xcsh_resume(&binding_conflict)
             .unwrap_err()
             .contains("generation_conflict"));
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(alternate);
+    }
+
+    #[test]
+    fn interactive_native_argv_omits_json_mode_and_reduced_policy_flags_are_complete() {
+        let mut params = resume_params(1);
+        params.native_launch.interactive = true;
+        let binding = measure_xcsh_executable(&params.native_launch.xcsh_executable).unwrap();
+        let argv = native_xcsh_argv(&binding, &params.native_launch, &params.text).unwrap();
+        assert!(!argv.windows(2).any(|pair| pair == ["--mode", "json"]));
+        for flag in [
+            "--no-mcp",
+            "--no-lsp",
+            "--no-memories",
+            "--no-skills",
+            "--no-rules",
+        ] {
+            assert!(argv.iter().any(|argument| argument == flag));
+        }
     }
 
     #[test]
@@ -991,7 +1582,7 @@ mod tests {
             "123e4567-e89b-12d3-a456-426614174000",
         ] {
             let mut params = resume_params(1);
-            params.session_id = invalid.into();
+            params.native_launch.session_header.id = invalid.into();
             let error = manager.admit_xcsh_resume(&params).unwrap_err();
             assert!(error.starts_with("invalid_xcsh_session_id"));
             assert!(error.contains("prefixes and session paths"));
@@ -1049,8 +1640,13 @@ mod tests {
             old.superseded_by_backend_execution_id.as_deref(),
             Some(current.execution_id.as_str())
         );
+        let action = {
+            let state = manager.0.state.lock().unwrap();
+            state.native_actions[&old.execution_id].clone()
+        };
+        assert_eq!(action.state, AgentTurnActionState::Requested);
         let mut conflicting_retry = resume_params(1);
-        conflicting_retry.session_id = "0123abcd4567ef8a".into();
+        conflicting_retry.native_launch.model = "other/model".into();
         assert!(manager
             .admit_xcsh_resume(&conflicting_retry)
             .unwrap_err()
@@ -1066,8 +1662,189 @@ mod tests {
         );
         assert_eq!(
             manager.get(&old.execution_id).unwrap().state,
+            ExecutionState::Exited
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn native_cancel_action_requires_owned_capability_and_is_idempotent() {
+        let path = temp("native-cancel-action");
+        let manager = ExecutionManager::load_at(path.clone());
+        let (claimed, admitted, _) = manager.admit_xcsh_resume(&resume_params(12)).unwrap();
+        assert!(admitted);
+        manager
+            .attach_visible(
+                &claimed.execution_id,
+                91,
+                "w1:p91".into(),
+                "w1:t1".into(),
+                Some(91),
+            )
+            .unwrap();
+        let capability = manager.native_capability(&claimed.execution_id).unwrap();
+        let target = AgentTurnActionTarget {
+            execution_id: "semantic-task".into(),
+            pane_id: "w1:p91".into(),
+            producer: "xcsh".into(),
+            session_id: "0123abcd4567ef89".into(),
+            generation: 12,
+            native_capability: capability.clone(),
+            after_revision: 0,
+        };
+        assert!(manager
+            .native_actions(&target)
+            .unwrap_err()
+            .contains("not_registered"));
+        let starting = crate::api::schema::AgentTurnReportParams {
+            execution_id: "semantic-task".into(),
+            pane_id: "w1:p91".into(),
+            producer: "xcsh".into(),
+            session_id: "0123abcd4567ef89".into(),
+            turn_id: "turn-91".into(),
+            generation: 12,
+            event_revision: 1,
+            state: crate::api::schema::AgentTurnState::Starting,
+            result: None,
+            reason: None,
+            result_digest: None,
+            native_capability: Some(capability.clone()),
+        };
+        manager.register_native_start(&claimed, &starting).unwrap();
+        manager.register_native_start(&claimed, &starting).unwrap();
+        manager
+            .confirm_native_start_journaled(&claimed, &starting)
+            .unwrap();
+        assert!(manager.native_actions(&target).unwrap().is_empty());
+        assert!(
+            manager
+                .request_native_cancel(&claimed.execution_id)
+                .unwrap()
+                .cancel_requested
+        );
+        let actions = manager.native_actions(&target).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].state, AgentTurnActionState::Requested);
+        let ack = AgentTurnActionAckParams {
+            target: target.clone(),
+            action_id: "cancel".into(),
+            action_revision: 1,
+            state: AgentTurnActionState::SafePoint,
+        };
+        assert!(manager.acknowledge_native_action(&ack).unwrap().1);
+        assert!(!manager.acknowledge_native_action(&ack).unwrap().1);
+        let cancelled = crate::api::schema::AgentTurnReportParams {
+            event_revision: 2,
+            state: crate::api::schema::AgentTurnState::Cancelled,
+            native_capability: Some(capability.clone()),
+            ..starting.clone()
+        };
+        manager
+            .validate_native_cancelled_report(&claimed, &cancelled)
+            .unwrap();
+        manager
+            .settle_native_cancelled_report(&claimed, &cancelled)
+            .unwrap();
+        manager
+            .settle_native_cancelled_report(&claimed, &cancelled)
+            .unwrap();
+        assert_eq!(
+            manager.get(&claimed.execution_id).unwrap().state,
             ExecutionState::Cancelled
         );
+        drop(manager);
+        let manager = ExecutionManager::load_at(path.clone());
+        let persisted = manager.get(&claimed.execution_id).unwrap();
+        assert_eq!(persisted.state, ExecutionState::Cancelled);
+        assert!(
+            manager.0.state.lock().unwrap().native_actions[&claimed.execution_id]
+                .settled_at_unix_ms
+                .is_some()
+        );
+        manager
+            .settle_native_cancelled_report(&persisted, &cancelled)
+            .unwrap();
+        let mut foreign = target;
+        foreign.native_capability = "wrong".into();
+        assert!(manager
+            .native_actions(&foreign)
+            .unwrap_err()
+            .contains("capability"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn native_cancel_deadline_is_reconciled_durably_and_cancelled_requires_safe_point() {
+        let path = temp("native-cancel-deadline");
+        let manager = ExecutionManager::load_at(path.clone());
+        let (claimed, _, _) = manager.admit_xcsh_resume(&resume_params(13)).unwrap();
+        manager
+            .attach_visible(
+                &claimed.execution_id,
+                13,
+                "w1:p13".into(),
+                "w1:t1".into(),
+                Some(13),
+            )
+            .unwrap();
+        let capability = manager.native_capability(&claimed.execution_id).unwrap();
+        let starting = crate::api::schema::AgentTurnReportParams {
+            execution_id: "semantic-task".into(),
+            pane_id: "w1:p13".into(),
+            producer: "xcsh".into(),
+            session_id: "0123abcd4567ef89".into(),
+            turn_id: "turn-13".into(),
+            generation: 13,
+            event_revision: 1,
+            state: crate::api::schema::AgentTurnState::Starting,
+            result: None,
+            reason: None,
+            result_digest: None,
+            native_capability: Some(capability.clone()),
+        };
+        manager.register_native_start(&claimed, &starting).unwrap();
+        manager
+            .confirm_native_start_journaled(&claimed, &starting)
+            .unwrap();
+        manager
+            .request_native_cancel(&claimed.execution_id)
+            .unwrap();
+        let cancelled = crate::api::schema::AgentTurnReportParams {
+            event_revision: 2,
+            state: crate::api::schema::AgentTurnState::Cancelled,
+            native_capability: Some(capability.clone()),
+            ..starting.clone()
+        };
+        assert!(manager
+            .validate_native_cancelled_report(&claimed, &cancelled)
+            .unwrap_err()
+            .contains("safe_point"));
+        let target = AgentTurnActionTarget {
+            execution_id: "semantic-task".into(),
+            pane_id: "w1:p13".into(),
+            producer: "xcsh".into(),
+            session_id: "0123abcd4567ef89".into(),
+            generation: 13,
+            native_capability: capability,
+            after_revision: 0,
+        };
+        {
+            let mut state = manager.0.state.lock().unwrap();
+            state
+                .native_actions
+                .get_mut(&claimed.execution_id)
+                .unwrap()
+                .requested_at_unix_ms = 0;
+            manager.persist_locked(&state).unwrap();
+        }
+        drop(manager);
+        let reloaded = ExecutionManager::load_at(path.clone());
+        // This is the same server-owned reconciliation invoked by the
+        // headless timer; no producer action.get/ack call causes expiry.
+        reloaded.reconcile_native_action_deadlines().unwrap();
+        let actions = reloaded.native_actions(&target).unwrap();
+        assert_eq!(actions[0].state, AgentTurnActionState::TimedOut);
+        assert!(actions[0].timed_out_at_unix_ms.is_some());
         let _ = std::fs::remove_file(path);
     }
 
@@ -1202,6 +1979,8 @@ mod tests {
         let path = temp("lost");
         let state = State {
             revision: 1,
+            native_capability_verifiers: BTreeMap::new(),
+            native_actions: BTreeMap::new(),
             records: vec![ExecutionRecord {
                 execution_id: "old".into(),
                 backend_execution_id: None,
@@ -1209,6 +1988,8 @@ mod tests {
                 generation: None,
                 native_producer: None,
                 native_executable: None,
+                native_launch: None,
+                native_registration: None,
                 producer_session_id: None,
                 injected_env: BTreeMap::new(),
                 superseded_by_backend_execution_id: None,

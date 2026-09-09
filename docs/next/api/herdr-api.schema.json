@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 21,
+  "protocol": 22,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -1396,6 +1396,106 @@
           ],
           "type": "object"
         },
+        "AgentTurnActionAckParams": {
+          "properties": {
+            "action_id": {
+              "type": "string"
+            },
+            "action_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "after_revision": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "execution_id": {
+              "type": "string"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "native_capability": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "producer": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/schemas/request/$defs/AgentTurnActionState"
+            }
+          },
+          "required": [
+            "execution_id",
+            "pane_id",
+            "producer",
+            "session_id",
+            "generation",
+            "native_capability",
+            "action_id",
+            "action_revision",
+            "state"
+          ],
+          "type": "object"
+        },
+        "AgentTurnActionState": {
+          "enum": [
+            "requested",
+            "safe_point",
+            "timed_out"
+          ],
+          "type": "string"
+        },
+        "AgentTurnActionTarget": {
+          "properties": {
+            "after_revision": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "execution_id": {
+              "type": "string"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "native_capability": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "producer": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "execution_id",
+            "pane_id",
+            "producer",
+            "session_id",
+            "generation",
+            "native_capability"
+          ],
+          "type": "object"
+        },
         "AgentTurnListParams": {
           "properties": {
             "since_revision": {
@@ -1422,6 +1522,14 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            },
+            "native_capability": {
+              "description": "One-time native child capability. It is authenticated before journal\nadmission and deliberately stripped from persisted turn records.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "writeOnly": true
             },
             "pane_id": {
               "type": "string"
@@ -2242,7 +2350,7 @@
           "type": "object"
         },
         "ExecutionResumeParams": {
-          "description": "Admit an XCSH child for one immutable semantic execution generation.\n\n`execution_id` is owned by the producer's semantic task. Herdr assigns a\ndifferent `backend_execution_id` for the visible child it launches.\n\n`session_id` must be XCSH SessionHeader's canonical 16-character lowercase\nhexadecimal Snowflake ID.\nXCSH's convenient ID-prefix and path selectors are intentionally rejected:\nthey cannot provide the exact durable reporter binding this API requires.",
+          "description": "Admit an XCSH child for one immutable semantic execution generation.\n\n`execution_id` is owned by the producer's semantic task. Herdr assigns a\ndifferent `backend_execution_id` for the visible child it launches.\n\n`native_launch` is versioned and fully typed. Herdr never accepts a\ncaller-provided shell command, environment, or opaque XCSH argv here.",
           "properties": {
             "cwd": {
               "type": "string"
@@ -2261,8 +2369,8 @@
                 "null"
               ]
             },
-            "session_id": {
-              "type": "string"
+            "native_launch": {
+              "$ref": "#/schemas/request/$defs/NativeLaunchV3"
             },
             "text": {
               "type": "string"
@@ -2272,17 +2380,12 @@
                 "string",
                 "null"
               ]
-            },
-            "xcsh_executable": {
-              "description": "Absolute path to the XCSH executable that owns this generation.\nHerdr measures and persists its canonical path and SHA-256 before\nadmission; launches do not resolve `xcsh` through the server PATH.",
-              "type": "string"
             }
           },
           "required": [
             "execution_id",
             "generation",
-            "session_id",
-            "xcsh_executable",
+            "native_launch",
             "text",
             "cwd"
           ],
@@ -2586,6 +2689,93 @@
             "ratio"
           ],
           "type": "object"
+        },
+        "NativeDiscoveryPolicy": {
+          "enum": [
+            "reduced-v1"
+          ],
+          "type": "string"
+        },
+        "NativeLaunchV3": {
+          "description": "Version 3 native XCSH launch contract for protocol 22.\n\n`session_path` is a canonical absolute JSONL path. `session_header.sha256`\nis the SHA-256 of exactly the first JSONL line, including its terminating\nLF byte. The header's `id` is XCSH's canonical 16-character lowercase hex\nSessionHeader ID; selector prefixes and paths are never reporter IDs.",
+          "properties": {
+            "discovery": {
+              "$ref": "#/schemas/request/$defs/NativeDiscoveryPolicy"
+            },
+            "interactive": {
+              "type": "boolean"
+            },
+            "lifecycle_mode": {
+              "$ref": "#/schemas/request/$defs/NativeLifecycleMode"
+            },
+            "model": {
+              "description": "Configured, non-secret XCSH model selector. It is not a user identity.",
+              "type": "string"
+            },
+            "session_dir": {
+              "description": "Canonical absolute directory containing `session_path`.",
+              "type": "string"
+            },
+            "session_header": {
+              "$ref": "#/schemas/request/$defs/NativeSessionHeaderBinding"
+            },
+            "session_path": {
+              "type": "string"
+            },
+            "tools": {
+              "$ref": "#/schemas/request/$defs/NativeToolsPolicy"
+            },
+            "version": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "xcsh_executable": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "version",
+            "xcsh_executable",
+            "session_dir",
+            "session_path",
+            "session_header",
+            "model",
+            "discovery",
+            "tools",
+            "interactive",
+            "lifecycle_mode"
+          ],
+          "type": "object"
+        },
+        "NativeLifecycleMode": {
+          "description": "Semantic lifecycle behavior, retained as durable producer contract rather\nthan translated into an undocumented XCSH command-line flag.",
+          "enum": [
+            "managed_turn_v1"
+          ],
+          "type": "string"
+        },
+        "NativeSessionHeaderBinding": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "sha256": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "sha256"
+          ],
+          "type": "object"
+        },
+        "NativeToolsPolicy": {
+          "enum": [
+            "read"
+          ],
+          "type": "string"
         },
         "NotificationShowParams": {
           "properties": {
@@ -6050,6 +6240,38 @@
         {
           "properties": {
             "method": {
+              "const": "agent.turn.action.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentTurnActionTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.turn.action.ack",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentTurnActionAckParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.turn.get",
               "type": "string"
             },
@@ -6796,6 +7018,76 @@
           ],
           "type": "string"
         },
+        "AgentTurnActionRecord": {
+          "properties": {
+            "acknowledged_at_unix_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "action_id": {
+              "type": "string"
+            },
+            "action_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "backend_execution_id": {
+              "type": "string"
+            },
+            "requested_at_unix_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "settled_at_unix_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "state": {
+              "$ref": "#/schemas/success_response/$defs/AgentTurnActionState"
+            },
+            "timed_out_at_unix_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "turn_id": {
+              "description": "The authenticated turn which accepted the cooperative safe point.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "backend_execution_id",
+            "action_id",
+            "action_revision",
+            "state",
+            "requested_at_unix_ms"
+          ],
+          "type": "object"
+        },
+        "AgentTurnActionState": {
+          "enum": [
+            "requested",
+            "safe_point",
+            "timed_out"
+          ],
+          "type": "string"
+        },
         "AgentTurnRecord": {
           "properties": {
             "event_revision": {
@@ -6811,6 +7103,14 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            },
+            "native_capability": {
+              "description": "One-time native child capability. It is authenticated before journal\nadmission and deliberately stripped from persisted turn records.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "writeOnly": true
             },
             "pane_id": {
               "type": "string"
@@ -7706,10 +8006,31 @@
                 }
               ]
             },
+            "native_launch": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/NativeLaunchV3"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Complete protocol-22 typed native launch receipt. Kept alongside the\nnormalized executable/session fields for compatibility with existing\nexecution consumers."
+            },
             "native_producer": {
               "type": [
                 "string",
                 "null"
+              ]
+            },
+            "native_registration": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/NativeProducerRegistration"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "output_complete": {
@@ -8080,6 +8401,12 @@
             }
           ]
         },
+        "NativeDiscoveryPolicy": {
+          "enum": [
+            "reduced-v1"
+          ],
+          "type": "string"
+        },
         "NativeExecutableBinding": {
           "description": "Immutable measurement of the XCSH program admitted for a native child.",
           "properties": {
@@ -8095,6 +8422,138 @@
             "sha256"
           ],
           "type": "object"
+        },
+        "NativeLaunchV3": {
+          "description": "Version 3 native XCSH launch contract for protocol 22.\n\n`session_path` is a canonical absolute JSONL path. `session_header.sha256`\nis the SHA-256 of exactly the first JSONL line, including its terminating\nLF byte. The header's `id` is XCSH's canonical 16-character lowercase hex\nSessionHeader ID; selector prefixes and paths are never reporter IDs.",
+          "properties": {
+            "discovery": {
+              "$ref": "#/schemas/success_response/$defs/NativeDiscoveryPolicy"
+            },
+            "interactive": {
+              "type": "boolean"
+            },
+            "lifecycle_mode": {
+              "$ref": "#/schemas/success_response/$defs/NativeLifecycleMode"
+            },
+            "model": {
+              "description": "Configured, non-secret XCSH model selector. It is not a user identity.",
+              "type": "string"
+            },
+            "session_dir": {
+              "description": "Canonical absolute directory containing `session_path`.",
+              "type": "string"
+            },
+            "session_header": {
+              "$ref": "#/schemas/success_response/$defs/NativeSessionHeaderBinding"
+            },
+            "session_path": {
+              "type": "string"
+            },
+            "tools": {
+              "$ref": "#/schemas/success_response/$defs/NativeToolsPolicy"
+            },
+            "version": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "xcsh_executable": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "version",
+            "xcsh_executable",
+            "session_dir",
+            "session_path",
+            "session_header",
+            "model",
+            "discovery",
+            "tools",
+            "interactive",
+            "lifecycle_mode"
+          ],
+          "type": "object"
+        },
+        "NativeLifecycleMode": {
+          "description": "Semantic lifecycle behavior, retained as durable producer contract rather\nthan translated into an undocumented XCSH command-line flag.",
+          "enum": [
+            "managed_turn_v1"
+          ],
+          "type": "string"
+        },
+        "NativeProducerRegistration": {
+          "description": "Durable proof that the launched native child has made its first\nauthenticated `starting` report. The PID is Herdr's PTY-child ownership\nevidence; the inherited capability authenticates the reporting process.",
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "journaled_at_unix_ms": {
+              "description": "Set only after the matching starting frame is durable in the turn journal.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "producer": {
+              "type": "string"
+            },
+            "registered_at_unix_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "turn_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "producer",
+            "session_id",
+            "generation",
+            "pane_id",
+            "pid",
+            "turn_id",
+            "registered_at_unix_ms"
+          ],
+          "type": "object"
+        },
+        "NativeSessionHeaderBinding": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "sha256": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "sha256"
+          ],
+          "type": "object"
+        },
+        "NativeToolsPolicy": {
+          "enum": [
+            "read"
+          ],
+          "type": "string"
         },
         "NotificationShowReason": {
           "enum": [
@@ -9495,6 +9954,45 @@
               "required": [
                 "type",
                 "turns"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "actions": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/AgentTurnActionRecord"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "agent_turn_action_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "actions"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "action": {
+                  "$ref": "#/schemas/success_response/$defs/AgentTurnActionRecord"
+                },
+                "admitted": {
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "agent_turn_action",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "action",
+                "admitted"
               ],
               "type": "object"
             },

@@ -368,6 +368,20 @@ fn handle_request(
                 encode_execution_error(request.id, code)
             }
         },
+        Method::AgentTurnActionGet(params) => match executions.native_actions(&params) {
+            Ok(actions) => encode_execution_response(
+                request.id,
+                crate::api::schema::ResponseResult::AgentTurnActionList { actions },
+            ),
+            Err(error) => encode_execution_error(request.id, &error),
+        },
+        Method::AgentTurnActionAck(params) => match executions.acknowledge_native_action(&params) {
+            Ok((action, admitted)) => encode_execution_response(
+                request.id,
+                crate::api::schema::ResponseResult::AgentTurnAction { action, admitted },
+            ),
+            Err(error) => encode_execution_error(request.id, &error),
+        },
         Method::AgentTurnGet(target) => match agent_turns.get(&target) {
             Some(turn) => encode_execution_response(
                 request.id,
@@ -508,6 +522,8 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::ExecutionWait(_) => "execution.wait",
         Method::ExecutionCancel(_) => "execution.cancel",
         Method::AgentTurnReport(_) => "agent.turn.report",
+        Method::AgentTurnActionGet(_) => "agent.turn.action.get",
+        Method::AgentTurnActionAck(_) => "agent.turn.action.ack",
         Method::AgentTurnGet(_) => "agent.turn.get",
         Method::AgentTurnList(_) => "agent.turn.list",
         Method::AgentTurnWait(_) => "agent.turn.wait",

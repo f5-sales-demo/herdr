@@ -51,6 +51,13 @@ pub enum ResponseResult {
     AgentTurnList {
         turns: Vec<AgentTurnRecord>,
     },
+    AgentTurnActionList {
+        actions: Vec<super::agent_turns::AgentTurnActionRecord>,
+    },
+    AgentTurnAction {
+        action: super::agent_turns::AgentTurnActionRecord,
+        admitted: bool,
+    },
     Execution {
         execution: ExecutionRecord,
         admitted: bool,

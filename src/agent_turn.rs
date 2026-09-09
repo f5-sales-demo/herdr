@@ -78,8 +78,16 @@ impl AgentTurnManager {
         &self,
         report: AgentTurnReportParams,
     ) -> Result<(AgentTurnRecord, bool), String> {
+        self.report_with_execution_manager(report, crate::execution::ExecutionManager::global())
+    }
+
+    fn report_with_execution_manager(
+        &self,
+        mut report: AgentTurnReportParams,
+        executions: &crate::execution::ExecutionManager,
+    ) -> Result<(AgentTurnRecord, bool), String> {
         validate(&report)?;
-        let execution = crate::execution::ExecutionManager::global().resolve_agent_turn_execution(
+        let execution = executions.resolve_agent_turn_execution(
             &report.execution_id,
             &report.producer,
             &report.session_id,
@@ -88,16 +96,29 @@ impl AgentTurnManager {
         if execution.pane_id.as_deref() != Some(report.pane_id.as_str()) {
             return Err("agent_turn_provenance_mismatch: pane is not owned by execution".into());
         }
+        executions
+            .authorize_native_report_capability(&execution, report.native_capability.as_deref())?;
+        executions.register_native_start(&execution, &report)?;
+        executions.validate_native_cancelled_report(&execution, &report)?;
+        // The credential is request-only. It must never enter the durable
+        // journal, replay identity, response, or log surface.
+        report.native_capability = None;
         let mut state = self
             .0
             .state
             .lock()
             .map_err(|_| "agent turn state lock poisoned")?;
-        let latest = state
-            .records
-            .iter()
-            .rev()
-            .find(|record| same_turn(&record.report, &report));
+        // `load_at` appends a synthetic Lost event for an interrupted server.
+        // A native child may have already persisted its authenticated starting
+        // frame while Herdr crashed before cross-ledger confirmation. Only the
+        // same authenticated revision-1 starting frame may remove that exact
+        // synthetic marker and resume confirmation; no terminal producer event
+        // is reset or fabricated.
+        let recovering_start = recover_synthetic_restart_lost(&state, &report);
+        let latest = state.records.iter().rev().find(|record| {
+            same_turn(&record.report, &report)
+                && !(recovering_start && is_synthetic_restart_lost(&record.report))
+        });
         if latest.is_none()
             && state
                 .tombstones
@@ -115,6 +136,8 @@ impl AgentTurnManager {
             }
             if report.event_revision == latest.report.event_revision {
                 if latest.report == report {
+                    executions.confirm_native_start_journaled(&execution, &latest.report)?;
+                    executions.settle_native_cancelled_report(&execution, &latest.report)?;
                     return Ok((latest.clone(), false));
                 }
                 return Err("agent_turn_revision_conflict: revision content differs".into());
@@ -142,6 +165,9 @@ impl AgentTurnManager {
         state.records.push(record.clone());
         enforce_retention(&mut state);
         self.persist_locked(&state)?;
+        drop(state);
+        executions.confirm_native_start_journaled(&execution, &record.report)?;
+        executions.settle_native_cancelled_report(&execution, &record.report)?;
         Ok((record, true))
     }
 
@@ -266,6 +292,30 @@ fn same_turn(left: &AgentTurnReportParams, right: &AgentTurnReportParams) -> boo
         && left.generation == right.generation
 }
 
+fn is_synthetic_restart_lost(report: &AgentTurnReportParams) -> bool {
+    report.state == AgentTurnState::Lost
+        && report.reason.as_deref()
+            == Some("Herdr restarted before the semantic turn reached a terminal state")
+        && report.event_revision == 2
+}
+
+fn recover_synthetic_restart_lost(state: &State, report: &AgentTurnReportParams) -> bool {
+    if report.state != AgentTurnState::Starting || report.event_revision != 1 {
+        return false;
+    }
+    let Some(index) = state.records.iter().rposition(|candidate| {
+        same_turn(&candidate.report, report) && is_synthetic_restart_lost(&candidate.report)
+    }) else {
+        return false;
+    };
+    state.records[..index].iter().rev().any(|candidate| {
+        same_turn(&candidate.report, report)
+            && candidate.report.state == AgentTurnState::Starting
+            && candidate.report.event_revision == 1
+            && candidate.report == *report
+    })
+}
+
 fn matches_target(target: &AgentTurnTarget, report: &AgentTurnReportParams) -> bool {
     target.producer == report.producer
         && target.session_id == report.session_id
@@ -335,6 +385,7 @@ mod tests {
             result: None,
             reason: None,
             result_digest: None,
+            native_capability: None,
         };
         let state = State {
             revision: 4,
@@ -366,6 +417,249 @@ mod tests {
     }
 
     #[test]
+    fn persisted_starting_replay_removes_only_the_synthetic_restart_marker() {
+        let starting = AgentTurnReportParams {
+            execution_id: "native".into(),
+            pane_id: "w1:p1".into(),
+            producer: "xcsh".into(),
+            session_id: "0123abcd4567ef89".into(),
+            turn_id: "turn".into(),
+            generation: 1,
+            event_revision: 1,
+            state: AgentTurnState::Starting,
+            result: None,
+            reason: None,
+            result_digest: None,
+            native_capability: None,
+        };
+        let mut lost = starting.clone();
+        lost.event_revision = 2;
+        lost.state = AgentTurnState::Lost;
+        lost.reason =
+            Some("Herdr restarted before the semantic turn reached a terminal state".into());
+        let state = State {
+            revision: 2,
+            records: vec![
+                AgentTurnRecord {
+                    report: starting.clone(),
+                    revision: 1,
+                    reported_at_unix_ms: 1,
+                },
+                AgentTurnRecord {
+                    report: lost,
+                    revision: 2,
+                    reported_at_unix_ms: 2,
+                },
+            ],
+            tombstones: Vec::new(),
+        };
+        assert!(recover_synthetic_restart_lost(&state, &starting));
+        assert_eq!(state.records.len(), 2, "synthetic history is preserved");
+        let mut foreign = starting.clone();
+        foreign.pane_id = "w1:p2".into();
+        assert!(!recover_synthetic_restart_lost(&state, &foreign));
+    }
+
+    #[test]
+    fn cross_manager_crash_reload_starting_replay_confirms_registration() {
+        use crate::api::schema::{
+            ExecutionResumeParams, NativeDiscoveryPolicy, NativeLaunchV3, NativeLifecycleMode,
+            NativeSessionHeaderBinding, NativeToolsPolicy,
+        };
+        let root = std::env::temp_dir().join(format!("herdr-cross-ledger-{}", now_ms()));
+        std::fs::create_dir_all(&root).unwrap();
+        let session = root.join("session.jsonl");
+        let line = b"{\"type\":\"session\",\"id\":\"0123abcd4567ef89\"}\n";
+        std::fs::write(&session, line).unwrap();
+        use sha2::Digest;
+        let launch = NativeLaunchV3 {
+            version: 3,
+            xcsh_executable: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            session_dir: root.canonicalize().unwrap().to_string_lossy().into_owned(),
+            session_path: session
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            session_header: NativeSessionHeaderBinding {
+                id: "0123abcd4567ef89".into(),
+                sha256: format!("{:x}", Sha256::digest(line)),
+            },
+            model: "test/model".into(),
+            discovery: NativeDiscoveryPolicy::ReducedV1,
+            tools: NativeToolsPolicy::Read,
+            interactive: false,
+            lifecycle_mode: NativeLifecycleMode::ManagedTurnV1,
+        };
+        let exec_path = root.join("executions.json");
+        let turn_path = root.join("turns.json");
+        let executions = crate::execution::ExecutionManager::load_at(exec_path.clone());
+        let (claimed, _, _) = executions
+            .admit_xcsh_resume(&ExecutionResumeParams {
+                execution_id: "semantic".into(),
+                generation: 1,
+                native_launch: launch,
+                text: "continue".into(),
+                cwd: "/tmp".into(),
+                workspace_id: None,
+                label: None,
+            })
+            .unwrap();
+        executions
+            .attach_visible(
+                &claimed.execution_id,
+                1,
+                "w1:p1".into(),
+                "w1:t1".into(),
+                Some(1),
+            )
+            .unwrap();
+        let cap = executions.native_capability(&claimed.execution_id).unwrap();
+        let starting = AgentTurnReportParams {
+            execution_id: "semantic".into(),
+            pane_id: "w1:p1".into(),
+            producer: "xcsh".into(),
+            session_id: "0123abcd4567ef89".into(),
+            turn_id: "turn".into(),
+            generation: 1,
+            event_revision: 1,
+            state: AgentTurnState::Starting,
+            result: None,
+            reason: None,
+            result_digest: None,
+            native_capability: Some(cap.clone()),
+        };
+        executions
+            .register_native_start(&claimed, &starting)
+            .unwrap();
+        let journal = State {
+            revision: 1,
+            records: vec![AgentTurnRecord {
+                report: AgentTurnReportParams {
+                    native_capability: None,
+                    ..starting.clone()
+                },
+                revision: 1,
+                reported_at_unix_ms: now_ms(),
+            }],
+            tombstones: vec![],
+        };
+        std::fs::write(&turn_path, serde_json::to_vec(&journal).unwrap()).unwrap();
+        executions
+            .confirm_native_start_journaled(&claimed, &starting)
+            .unwrap();
+        executions
+            .request_native_cancel(&claimed.execution_id)
+            .unwrap();
+        let target = crate::api::schema::AgentTurnActionTarget {
+            execution_id: "semantic".into(),
+            pane_id: "w1:p1".into(),
+            producer: "xcsh".into(),
+            session_id: "0123abcd4567ef89".into(),
+            generation: 1,
+            native_capability: cap.clone(),
+            after_revision: 0,
+        };
+        executions
+            .acknowledge_native_action(&crate::api::schema::AgentTurnActionAckParams {
+                target,
+                action_id: "cancel".into(),
+                action_revision: 1,
+                state: crate::api::schema::AgentTurnActionState::SafePoint,
+            })
+            .unwrap();
+        drop(executions);
+        let executions = crate::execution::ExecutionManager::load_at(exec_path.clone());
+        let turns = AgentTurnManager::load_at(turn_path.clone());
+        assert_eq!(
+            executions.get(&claimed.execution_id).unwrap().state,
+            crate::api::schema::ExecutionState::Lost
+        );
+        assert!(
+            !turns
+                .report_with_execution_manager(starting.clone(), &executions)
+                .unwrap()
+                .1
+        );
+        assert!(executions
+            .get(&claimed.execution_id)
+            .unwrap()
+            .native_registration
+            .unwrap()
+            .journaled_at_unix_ms
+            .is_some());
+        // Crash window: terminal frame is durable in the turn journal after a
+        // safe point, but execution/action settlement has not run yet.
+        let terminal = AgentTurnReportParams {
+            event_revision: 2,
+            state: AgentTurnState::Cancelled,
+            native_capability: Some(cap.clone()),
+            ..starting.clone()
+        };
+        {
+            let mut journal = turns.0.state.lock().unwrap();
+            journal.revision += 1;
+            let revision = journal.revision;
+            journal.records.push(AgentTurnRecord {
+                report: AgentTurnReportParams {
+                    native_capability: None,
+                    ..terminal.clone()
+                },
+                revision,
+                reported_at_unix_ms: now_ms(),
+            });
+            turns.persist_locked(&journal).unwrap();
+        }
+        drop(turns);
+        drop(executions);
+        let executions = crate::execution::ExecutionManager::load_at(exec_path);
+        let turns = AgentTurnManager::load_at(turn_path);
+        assert!(
+            !turns
+                .report_with_execution_manager(terminal.clone(), &executions)
+                .unwrap()
+                .1
+        );
+        assert_eq!(
+            executions.get(&claimed.execution_id).unwrap().state,
+            crate::api::schema::ExecutionState::Cancelled
+        );
+        assert_eq!(
+            executions.get(&claimed.execution_id).unwrap().state,
+            crate::api::schema::ExecutionState::Cancelled
+        );
+        assert!(executions
+            .get(&claimed.execution_id)
+            .unwrap()
+            .native_registration
+            .unwrap()
+            .journaled_at_unix_ms
+            .is_some());
+        let target = crate::api::schema::AgentTurnActionTarget {
+            execution_id: "semantic".into(),
+            pane_id: "w1:p1".into(),
+            producer: "xcsh".into(),
+            session_id: "0123abcd4567ef89".into(),
+            generation: 1,
+            native_capability: cap.clone(),
+            after_revision: 0,
+        };
+        assert!(executions.native_actions(&target).unwrap()[0]
+            .settled_at_unix_ms
+            .is_some());
+        let mut altered = starting;
+        altered.reason = Some("altered".into());
+        assert!(turns
+            .report_with_execution_manager(altered, &executions)
+            .unwrap_err()
+            .contains("stale_revision"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn completed_result_requires_matching_digest_and_byte_bound() {
         let result = "accepted".to_string();
         let mut report = AgentTurnReportParams {
@@ -380,6 +674,7 @@ mod tests {
             result: Some(result.clone()),
             reason: None,
             result_digest: Some(format!("{:x}", Sha256::digest(result.as_bytes()))),
+            native_capability: None,
         };
         assert!(validate(&report).is_ok());
         report.result_digest = Some("0".repeat(64));

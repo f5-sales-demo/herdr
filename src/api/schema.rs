@@ -227,6 +227,10 @@ pub enum Method {
     ExecutionCancel(ExecutionTarget),
     #[serde(rename = "agent.turn.report")]
     AgentTurnReport(AgentTurnReportParams),
+    #[serde(rename = "agent.turn.action.get")]
+    AgentTurnActionGet(AgentTurnActionTarget),
+    #[serde(rename = "agent.turn.action.ack")]
+    AgentTurnActionAck(AgentTurnActionAckParams),
     #[serde(rename = "agent.turn.get")]
     AgentTurnGet(AgentTurnTarget),
     #[serde(rename = "agent.turn.list")]
