@@ -76,10 +76,18 @@ impl AgentTurnManager {
 
     pub(crate) fn report(
         &self,
+        report: AgentTurnReportParams,
+    ) -> Result<(AgentTurnRecord, bool), String> {
+        self.report_with_execution_manager(report, crate::execution::ExecutionManager::global())
+    }
+
+    fn report_with_execution_manager(
+        &self,
         mut report: AgentTurnReportParams,
+        executions: &crate::execution::ExecutionManager,
     ) -> Result<(AgentTurnRecord, bool), String> {
         validate(&report)?;
-        let execution = crate::execution::ExecutionManager::global().resolve_agent_turn_execution(
+        let execution = executions.resolve_agent_turn_execution(
             &report.execution_id,
             &report.producer,
             &report.session_id,
@@ -88,11 +96,10 @@ impl AgentTurnManager {
         if execution.pane_id.as_deref() != Some(report.pane_id.as_str()) {
             return Err("agent_turn_provenance_mismatch: pane is not owned by execution".into());
         }
-        crate::execution::ExecutionManager::global()
+        executions
             .authorize_native_report_capability(&execution, report.native_capability.as_deref())?;
-        crate::execution::ExecutionManager::global().register_native_start(&execution, &report)?;
-        crate::execution::ExecutionManager::global()
-            .validate_native_cancelled_report(&execution, &report)?;
+        executions.register_native_start(&execution, &report)?;
+        executions.validate_native_cancelled_report(&execution, &report)?;
         // The credential is request-only. It must never enter the durable
         // journal, replay identity, response, or log surface.
         report.native_capability = None;
@@ -129,10 +136,8 @@ impl AgentTurnManager {
             }
             if report.event_revision == latest.report.event_revision {
                 if latest.report == report {
-                    crate::execution::ExecutionManager::global()
-                        .confirm_native_start_journaled(&execution, &latest.report)?;
-                    crate::execution::ExecutionManager::global()
-                        .settle_native_cancelled_report(&execution, &latest.report)?;
+                    executions.confirm_native_start_journaled(&execution, &latest.report)?;
+                    executions.settle_native_cancelled_report(&execution, &latest.report)?;
                     return Ok((latest.clone(), false));
                 }
                 return Err("agent_turn_revision_conflict: revision content differs".into());
@@ -161,7 +166,6 @@ impl AgentTurnManager {
         enforce_retention(&mut state);
         self.persist_locked(&state)?;
         drop(state);
-        let executions = crate::execution::ExecutionManager::global();
         executions.confirm_native_start_journaled(&execution, &record.report)?;
         executions.settle_native_cancelled_report(&execution, &record.report)?;
         Ok((record, true))
@@ -454,6 +458,131 @@ mod tests {
         let mut foreign = starting.clone();
         foreign.pane_id = "w1:p2".into();
         assert!(!recover_synthetic_restart_lost(&state, &foreign));
+    }
+
+    #[test]
+    fn cross_manager_crash_reload_starting_replay_confirms_registration() {
+        use crate::api::schema::{
+            ExecutionResumeParams, NativeDiscoveryPolicy, NativeLaunchV3, NativeLifecycleMode,
+            NativeSessionHeaderBinding, NativeToolsPolicy,
+        };
+        let root = std::env::temp_dir().join(format!("herdr-cross-ledger-{}", now_ms()));
+        std::fs::create_dir_all(&root).unwrap();
+        let session = root.join("session.jsonl");
+        let line = b"{\"type\":\"session\",\"id\":\"0123abcd4567ef89\"}\n";
+        std::fs::write(&session, line).unwrap();
+        use sha2::Digest;
+        let launch = NativeLaunchV3 {
+            version: 3,
+            xcsh_executable: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            session_dir: root.canonicalize().unwrap().to_string_lossy().into_owned(),
+            session_path: session
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            session_header: NativeSessionHeaderBinding {
+                id: "0123abcd4567ef89".into(),
+                sha256: format!("{:x}", Sha256::digest(line)),
+            },
+            model: "test/model".into(),
+            discovery: NativeDiscoveryPolicy::ReducedV1,
+            tools: NativeToolsPolicy::Read,
+            interactive: false,
+            lifecycle_mode: NativeLifecycleMode::ManagedTurnV1,
+        };
+        let exec_path = root.join("executions.json");
+        let turn_path = root.join("turns.json");
+        let executions = crate::execution::ExecutionManager::load_at(exec_path.clone());
+        let (claimed, _, _) = executions
+            .admit_xcsh_resume(&ExecutionResumeParams {
+                execution_id: "semantic".into(),
+                generation: 1,
+                native_launch: launch,
+                text: "continue".into(),
+                cwd: "/tmp".into(),
+                workspace_id: None,
+                label: None,
+            })
+            .unwrap();
+        executions
+            .attach_visible(
+                &claimed.execution_id,
+                1,
+                "w1:p1".into(),
+                "w1:t1".into(),
+                Some(1),
+            )
+            .unwrap();
+        let cap = executions.native_capability(&claimed.execution_id).unwrap();
+        let starting = AgentTurnReportParams {
+            execution_id: "semantic".into(),
+            pane_id: "w1:p1".into(),
+            producer: "xcsh".into(),
+            session_id: "0123abcd4567ef89".into(),
+            turn_id: "turn".into(),
+            generation: 1,
+            event_revision: 1,
+            state: AgentTurnState::Starting,
+            result: None,
+            reason: None,
+            result_digest: None,
+            native_capability: Some(cap.clone()),
+        };
+        executions
+            .register_native_start(&claimed, &starting)
+            .unwrap();
+        let journal = State {
+            revision: 1,
+            records: vec![AgentTurnRecord {
+                report: AgentTurnReportParams {
+                    native_capability: None,
+                    ..starting.clone()
+                },
+                revision: 1,
+                reported_at_unix_ms: now_ms(),
+            }],
+            tombstones: vec![],
+        };
+        std::fs::write(&turn_path, serde_json::to_vec(&journal).unwrap()).unwrap();
+        drop(executions);
+        let executions = crate::execution::ExecutionManager::load_at(exec_path);
+        let turns = AgentTurnManager::load_at(turn_path.clone());
+        assert_eq!(
+            executions.get(&claimed.execution_id).unwrap().state,
+            crate::api::schema::ExecutionState::Lost
+        );
+        assert!(
+            !turns
+                .report_with_execution_manager(starting.clone(), &executions)
+                .unwrap()
+                .1
+        );
+        assert!(executions
+            .get(&claimed.execution_id)
+            .unwrap()
+            .native_registration
+            .unwrap()
+            .journaled_at_unix_ms
+            .is_some());
+        drop(turns);
+        let turns = AgentTurnManager::load_at(turn_path);
+        assert!(
+            !turns
+                .report_with_execution_manager(starting.clone(), &executions)
+                .unwrap()
+                .1
+        );
+        let mut altered = starting;
+        altered.reason = Some("altered".into());
+        assert!(turns
+            .report_with_execution_manager(altered, &executions)
+            .unwrap_err()
+            .contains("conflict"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

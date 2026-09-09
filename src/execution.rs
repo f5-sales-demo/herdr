@@ -69,7 +69,7 @@ impl ExecutionManager {
         Self::load_at(crate::session::data_dir().join("executions.json"))
     }
 
-    fn load_at(path: PathBuf) -> Self {
+    pub(crate) fn load_at(path: PathBuf) -> Self {
         let mut state: State = std::fs::read(&path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
