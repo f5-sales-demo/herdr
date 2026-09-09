@@ -62,20 +62,23 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_hung_probe_failures_are_parallel_and_bounded(self):
         # The real Unix-socket hang is exercised by the native harness.  This
-        # unit test verifies supervisor fan-out without leaving peer handlers.
-        import control_supervisor
-        original = control_supervisor.unix_probe
+        # unit test verifies only supervisor fan-out. Stub its independent
+        # app-server/native subprocess probes so runner load cannot turn this
+        # timing assertion into an unrelated process-scheduling failure.
         async def hung(path, payload=None):
             await asyncio.sleep(.05)
             return False, 'TimeoutError: injected hung probe'
+        async def app_probe(_cfg, _config):
+            return False, 'injected app-server probe', {}
+        async def native_probe(_cfg, _config):
+            return 'degraded', 'injected native probe', {}
         with tempfile.TemporaryDirectory() as raw:
             root=Path(raw); config=root/'machine.json'; config.write_text(json.dumps({'herdr_socket':'a','broker_socket':'b','app_server_socket':'c','manager_thread_id':'canonical','manager_required_tools_verified':True}))
             supervisor=Supervisor(root/'socket',root/'state.sqlite3',config)
-            control_supervisor.unix_probe=hung
-            try:
+            with patch('control_supervisor.unix_probe', hung), \
+                 patch('control_supervisor.appserver_probe', app_probe), \
+                 patch('control_supervisor.native_manager_probe', native_probe):
                 started=asyncio.get_running_loop().time(); result=await supervisor.check(); elapsed=asyncio.get_running_loop().time()-started
-            finally:
-                control_supervisor.unix_probe=original
             self.assertLess(elapsed,.15)
             self.assertTrue(any(item['component']=='broker' and item['status']=='degraded' for item in result['components']))
 
