@@ -41,6 +41,13 @@ jobs:
           ref: ${{ inputs.tag || github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
+      - name: Require immutable releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/immutable-releases" --jq .enabled)" = true
+
       - id: plan
         if: github.event_name == 'workflow_run'
         name: Derive the next fork version
@@ -229,3 +236,11 @@ jobs:
             herdr-macos-aarch64/herdr-macos-aarch64 \
             herdr-macos-aarch64/herdr-macos-aarch64.sha256 \
             --title "$TAG" --generate-notes
+
+      - name: Verify published release is immutable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq .immutable)" = true
