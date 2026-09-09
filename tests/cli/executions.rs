@@ -366,6 +366,17 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
         ),
     );
     assert_eq!(settled["result"]["execution"]["state"], "cancelled");
+    // The current child was cancelled above. Do not poll agent actions or
+    // reload: let the live headless timer cross its real 30-second deadline.
+    thread::sleep(Duration::from_secs(31));
+    let ledger: serde_json::Value = serde_json::from_slice(
+        &fs::read(config_home.join(app_dir_name()).join("executions.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        ledger["native_actions"][current_backend_id]["state"], "timed_out",
+        "headless timer must persist expiry before producer observation"
+    );
     cleanup_spawned_herdr(herdr, base);
 }
 
