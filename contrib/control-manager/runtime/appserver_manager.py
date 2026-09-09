@@ -788,22 +788,29 @@ def native_pane_health(thread_id: str) -> dict[str, Any]:
     exact_runtime = (expected is not None and len(foreground) == 1
                      and foreground[0].get("name") == "codex"
                      and foreground[0].get("argv") == expected)
-    if actual == thread_id and exact_runtime and status in {"idle", "done"}:
-        try:
-            read = herdr_request("agent.read", {
-                "target": pane_id, "source": "detection", "lines": 120,
-                "format": "text", "strip_ansi": True,
-            })
-            terminal = str((read.get("read", read) if isinstance(read, dict) else {}).get("text") or "")
-        except Exception as exc:
+    if actual == thread_id and exact_runtime and status in {"idle", "done", "working"}:
+        readable = False
+        errors: list[str] = []
+        for source in ("visible", "detection"):
+            try:
+                read = herdr_request("agent.read", {
+                    "target": pane_id, "source": source, "lines": 120,
+                    "format": "text", "strip_ansi": True,
+                })
+                terminal = str((read.get("read", read) if isinstance(read, dict) else {}).get("text") or "")
+                readable = True
+            except Exception as exc:
+                errors.append(f"{source}: {type(exc).__name__}: {exc}")
+                continue
+            if terminal_appserver_disconnect(terminal):
+                return {"state": "unavailable",
+                        "reason": "canonical native manager reports terminal app-server reconnect failure",
+                        "pane_id": pane_id, "thread_id": thread_id, "agent_status": status,
+                        "terminal_disconnect_proven": True, "terminal_source": source}
+        if not readable:
             return {"state": "degraded",
-                    "reason": f"canonical native terminal state is unreadable: {type(exc).__name__}: {exc}"[:500],
+                    "reason": ("canonical native terminal state is unreadable: " + "; ".join(errors))[:500],
                     "pane_id": pane_id, "thread_id": thread_id, "agent_status": status}
-        if terminal_appserver_disconnect(terminal):
-            return {"state": "unavailable",
-                    "reason": "canonical native manager reports terminal app-server reconnect failure",
-                    "pane_id": pane_id, "thread_id": thread_id, "agent_status": status,
-                    "terminal_disconnect_proven": True}
     if actual == thread_id and not exact_runtime:
         # Do not overwrite or interrupt a process that happens to carry stale
         # canonical metadata.  A non-idle process is a user-visible busy pane.

@@ -21,13 +21,19 @@ STATE_SCHEMA_VERSION = 11
 def terminal_appserver_disconnect(text: str) -> bool:
     """Match Codex's explicit terminal state after remote reconnect gives up.
 
-    Both independent controls are required.  A prior connection warning or a
-    sentence in conversation history cannot by itself authorize recovery.
-    Callers must also prove the exact canonical process and thread identity.
+    The fatal screen can be classified as ``working`` while its reconnect
+    timer/spinner is rendered.  Require the complete terminal-only footer so
+    ordinary conversation text and transient reconnect warnings cannot
+    authorize replacement.  Callers must also prove the exact canonical
+    process and thread identity.
     """
-    lowered = text.lower()
-    return ("app-server session could not be restored" in lowered
-            and "reconnect failed" in lowered)
+    lines = [line.strip().lower() for line in text.splitlines() if line.strip()]
+    lowered = "\n".join(lines)
+    return ("automatic reconnect could not restore this session" in lowered
+            and "app-server session could not be restored" in lowered
+            and "reconnect failed" in lowered
+            and bool(lines)
+            and lines[-1] == "ctrl+c quit")
 
 
 def package_root() -> Path:

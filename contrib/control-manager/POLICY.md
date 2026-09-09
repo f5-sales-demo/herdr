@@ -23,11 +23,13 @@ candidate creation or promotion is a separately authorized manual operation.
 Liveness checks use metadata-only reads and subscribed lifecycle events, not
 repeated full-history hydration.
 
-A terminal reconnect failure is actionable only when bounded detection output,
-the exact configured process arguments, the canonical thread identity, and an
-idle terminal state all agree. Replacing that client requires the active
-supervisor recovery claim and the durable attachment journal. Never close a
-busy, blocked, foreign, or partially verified pane.
+A terminal reconnect failure is actionable only when a bounded visible or
+detection read contains the complete fatal reconnect screen and footer, and
+the exact configured process arguments and canonical thread identity agree.
+Herdr may classify the fatal reconnect spinner as working, so that state is
+accepted only with the complete screen proof. Replacing that client requires
+the active supervisor recovery claim and the durable attachment journal.
+Never close a blocked, foreign, partially verified, or genuinely active pane.
 
 For authorized repository changes, choose Conventional Commit wording
 autonomously. This does not weaken repository permissions, review, CI, release,
