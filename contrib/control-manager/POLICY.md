@@ -23,6 +23,12 @@ candidate creation or promotion is a separately authorized manual operation.
 Liveness checks use metadata-only reads and subscribed lifecycle events, not
 repeated full-history hydration.
 
+A terminal reconnect failure is actionable only when bounded detection output,
+the exact configured process arguments, the canonical thread identity, and an
+idle terminal state all agree. Replacing that client requires the active
+supervisor recovery claim and the durable attachment journal. Never close a
+busy, blocked, foreign, or partially verified pane.
+
 For authorized repository changes, choose Conventional Commit wording
 autonomously. This does not weaken repository permissions, review, CI, release,
 or safety requirements. Before destructive, security-sensitive,

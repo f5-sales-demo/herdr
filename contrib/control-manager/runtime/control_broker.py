@@ -36,6 +36,7 @@ from control_portable import (
     package_root,
     runtime_root,
     state_root,
+    terminal_appserver_disconnect,
 )
 
 
@@ -3723,6 +3724,105 @@ class Broker:
             receipt={"manager_execution_id":execution_id,"workspace_id":workspace_id,
                      "tab_id":tab_id,"pane_id":pane_id,"execution_state":execution.get("state")})
 
+    async def _manager_terminal_disconnect_evidence(
+        self, pane_id: str, config: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Prove that the exact idle canonical Codex client cannot reconnect."""
+        try:
+            agent_result = await self.herdr.request("agent.get", {"target": pane_id}, timeout=5)
+            agent = agent_result.get("agent", agent_result)
+            process_result = await self.herdr.request(
+                "pane.process_info", {"pane_id": pane_id}, timeout=10
+            )
+            process_info = process_result.get("process_info", process_result)
+        except Exception as exc:
+            return {"proven": False, "reason": f"canonical pane identity is unreadable: {type(exc).__name__}: {exc}"}
+        thread_id = str(config.get("manager_thread_id") or "")
+        session = agent.get("agent_session") or {}
+        if str(session.get("value") or "") != thread_id:
+            return {"proven": False, "reason": "native pane does not carry the exact canonical thread"}
+        status = str(agent.get("agent_status") or "")
+        if status not in {"idle", "done"}:
+            return {"proven": False, "reason": "canonical pane is busy, blocked, or has ambiguous lifecycle state"}
+        try:
+            codex = str(Path(configured_codex_binary(config)))
+            cwd = normalized_cwd(str(config.get("manager_cwd") or ""))
+        except (RuntimeError, ValueError) as exc:
+            return {"proven": False, "reason": f"canonical runtime binding is invalid: {exc}"}
+        expected = [codex, "--disable", "hooks", "--remote", str(config.get("app_server_remote") or ""),
+                    "--profile", str(config.get("profile") or "control-manager"), "-C", cwd,
+                    "resume", thread_id]
+        foreground = process_info.get("foreground_processes") or []
+        if (len(foreground) != 1 or foreground[0].get("name") != "codex"
+                or foreground[0].get("argv") != expected):
+            return {"proven": False, "reason": "canonical pane lacks exact remote-process proof"}
+        try:
+            read_result = await self.herdr.request("agent.read", {
+                "target": pane_id, "source": "detection", "lines": 120,
+                "format": "text", "strip_ansi": True,
+            }, timeout=5)
+            terminal = str((read_result.get("read", read_result)).get("text") or "")
+        except Exception as exc:
+            return {"proven": False, "reason": f"canonical terminal evidence is unreadable: {type(exc).__name__}: {exc}"}
+        if not terminal_appserver_disconnect(terminal):
+            return {"proven": False, "reason": "canonical terminal does not show explicit reconnect failure"}
+        return {"proven": True, "reason": "exact idle canonical client shows explicit app-server reconnect failure"}
+
+    async def _recover_proven_disconnected_manager(
+        self, snapshot: dict[str, Any], *, action_id: str, claim_sha256: str,
+        claim_key: str | None, owner_generation: str | None,
+    ) -> dict[str, str]:
+        """Close one proven-dead client, then use the durable lost-pane repair."""
+        config = self.config()
+        if not claim_key or not owner_generation:
+            return {"state": "unverified", "reason": "terminal replacement requires an active supervisor claim capability"}
+        try:
+            expected_generation = int(config.get("manager_binding_generation", 0))
+        except (TypeError, ValueError):
+            return {"state": "unverified", "reason": "manager binding generation is invalid"}
+        pane_id = str(config.get("manager_pane_id") or "")
+        workspace_id = str(config.get("manager_workspace_id") or "")
+        thread_id = str(config.get("manager_thread_id") or "")
+        if not pane_id or not workspace_id or not thread_id:
+            return {"state": "unverified", "reason": "canonical manager bindings are incomplete"}
+        record = self.db.claim_manager_attachment(
+            action_id=action_id, claim_sha256=claim_sha256, logical_thread_id=thread_id,
+            expected_binding_generation=expected_generation,
+            old_workspace_id=workspace_id, old_pane_id=pane_id,
+        )
+        if str(record["state"]) != "intent":
+            return await self._recover_proven_lost_manager_binding(
+                snapshot, action_id=action_id, claim_sha256=claim_sha256,
+                claim_key=claim_key, owner_generation=owner_generation,
+            )
+        panes = {str(item.get("pane_id")) for item in snapshot.get("panes", [])}
+        if pane_id in panes:
+            evidence = await self._manager_terminal_disconnect_evidence(pane_id, config)
+            if not evidence.get("proven"):
+                return {"state": "unverified", "reason": str(evidence.get("reason") or "terminal disconnect is unverified")}
+            self._verified_supervisor_attachment_claim(action_id, claim_key, owner_generation)
+            try:
+                await self.herdr.request("pane.close", {"pane_id": pane_id}, timeout=10)
+            except Exception as exc:
+                try:
+                    await self.herdr.request("pane.get", {"pane_id": pane_id}, timeout=5)
+                except Exception as absent:
+                    if not self._exact_not_found(absent, "pane"):
+                        return {"state": "unverified", "reason": "canonical pane close outcome is uncertain"}
+                else:
+                    return {"state": "unverified", "reason": f"canonical disconnected pane close failed: {type(exc).__name__}: {exc}"}
+        # pane.close is synchronous.  The lost-binding path below performs its
+        # own direct pane/workspace reads and a fresh snapshot before creating
+        # anything, so remove only the just-proven old pane from this input
+        # instead of adding another unjournaled read-failure window here.
+        fresh = dict(snapshot)
+        fresh["panes"] = [item for item in snapshot.get("panes", [])
+                          if str(item.get("pane_id")) != pane_id]
+        return await self._recover_proven_lost_manager_binding(
+            fresh, action_id=action_id, claim_sha256=claim_sha256,
+            claim_key=claim_key, owner_generation=owner_generation,
+        )
+
     async def _recover_proven_lost_manager_binding(
         self, snapshot: dict[str, Any], *, action_id: str, claim_sha256: str,
         claim_key: str | None, owner_generation: str | None,
@@ -4838,6 +4938,19 @@ Requested task:
                     snapshot,action_id=recovery_action_id,claim_sha256=recovery_claim_sha256,
                     claim_key=recovery_claim_key,owner_generation=recovery_owner_generation,
                 )
+            elif (require_manager_reattach and allow_supervisor_reattach and configured_pane in panes
+                  and recovery_action_id and recovery_claim_sha256):
+                disconnect = await self._manager_terminal_disconnect_evidence(configured_pane, config)
+                if disconnect.get("proven"):
+                    manager_reattach = await self._recover_proven_disconnected_manager(
+                        snapshot, action_id=recovery_action_id, claim_sha256=recovery_claim_sha256,
+                        claim_key=recovery_claim_key, owner_generation=recovery_owner_generation,
+                    )
+                else:
+                    manager_reattach = await self._ensure_manager(
+                        snapshot, panes, allow_supervisor_reattach=allow_supervisor_reattach,
+                        require_verified=require_manager_reattach,
+                    )
             else:
                 manager_reattach = await self._ensure_manager(
                     snapshot, panes, allow_supervisor_reattach=allow_supervisor_reattach,

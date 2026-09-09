@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from control_broker import Broker, OUTBOX_LEASE_SECONDS, StateDB, completion_presentation
 
@@ -153,6 +153,9 @@ class FakeHerdr:
                     "agent_session": pane.get("agent_session", {}),
                 }
             }
+        if method == "agent.read":
+            pane = next(value for value in self.panes.values() if value.get("pane_id") == params["target"])
+            return {"read": {"text": pane.get("output", "")}}
         if method == "pane.process_info":
             pane = self.panes[params["pane_id"]]
             return {
@@ -173,6 +176,11 @@ class FakeHerdr:
                 pane["state_change_seq"] = self.seq
                 pane["process_name"] = "codex"
                 pane["process_argv"] = shlex.split(pane.get("sent_text", "codex"))
+            return {}
+        if method == "pane.close":
+            pane = self.panes.pop(params["pane_id"], None)
+            if pane is None:
+                raise RuntimeError("pane_not_found")
             return {}
         if method == "pane.report_agent":
             pane = self.panes[params["pane_id"]]
@@ -1975,6 +1983,62 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
             await self.broker.handle("reconcile_topology", {"recovery_action_id": "recovery-" + "d" * 32})
         self.assertEqual(pane["agent_session"]["value"], "foreign-session")
         self.assertFalse(any(call[0] == "pane.report_agent_session" for call in self.broker.herdr.calls))
+
+    async def test_claimed_repair_replaces_exact_terminally_disconnected_manager(self):
+        created = await self.broker.herdr.request("workspace.create", {"cwd": str(self.root), "label": "control"})
+        pane = created["root_pane"]
+        thread = "01a07cad-d970-7393-82a4-14ae9a1c16ee"
+        pane.update({
+            "process_name": "codex",
+            "process_argv": [str(Path("/bin/true").resolve()), "--disable", "hooks", "--remote", "unix://",
+                             "--profile", "control-manager", "-C", str(self.root), "resume", thread],
+            "agent_status": "idle", "agent_session": {"value": thread},
+            "output": "app-server session could not be restored\nReconnect failed — check the endpoint",
+        })
+        self.broker.config_path.write_text(json.dumps({
+            "manager_thread_id": thread, "manager_cwd": str(self.root),
+            "manager_workspace_id": created["workspace"]["workspace_id"], "manager_pane_id": pane["pane_id"],
+            "app_server_remote": "unix://", "profile": "control-manager", "codex_binary": "/bin/true",
+            "supervisor_owns_recovery": True,
+        }))
+        replacement = AsyncMock(return_value={"state": "verified", "reason": "same thread reattached"})
+        with patch.object(self.broker, "_verified_supervisor_attachment_claim", return_value="claim-sha"), \
+             patch.object(self.broker, "_recover_proven_lost_manager_binding", replacement):
+            result = await self.broker._reconcile_manager_topology(
+                allow_supervisor_reattach=True, strict=True, require_manager_reattach=True,
+                recovery_action_id="recovery-" + "b" * 32, recovery_claim_sha256="claim-sha",
+                recovery_claim_key="c" * 64, recovery_owner_generation="d" * 32,
+            )
+        self.assertEqual(result["manager_reattach"]["state"], "verified")
+        self.assertNotIn(pane["pane_id"], self.broker.herdr.panes)
+        replacement.assert_awaited_once()
+
+    async def test_claimed_repair_never_closes_busy_canonical_manager(self):
+        created = await self.broker.herdr.request("workspace.create", {"cwd": str(self.root), "label": "control"})
+        pane = created["root_pane"]
+        thread = "01a07cad-d970-7393-82a4-14ae9a1c16ee"
+        pane.update({
+            "process_name": "codex",
+            "process_argv": [str(Path("/bin/true").resolve()), "--disable", "hooks", "--remote", "unix://",
+                             "--profile", "control-manager", "-C", str(self.root), "resume", thread],
+            "agent_status": "working", "agent_session": {"value": thread},
+            "output": "app-server session could not be restored\nReconnect failed — check the endpoint",
+        })
+        self.broker.config_path.write_text(json.dumps({
+            "manager_thread_id": thread, "manager_cwd": str(self.root),
+            "manager_workspace_id": created["workspace"]["workspace_id"], "manager_pane_id": pane["pane_id"],
+            "app_server_remote": "unix://", "profile": "control-manager", "codex_binary": "/bin/true",
+            "supervisor_owns_recovery": True,
+        }))
+        with patch.object(self.broker, "_verified_supervisor_attachment_claim", return_value="claim-sha"):
+            result = await self.broker._reconcile_manager_topology(
+                allow_supervisor_reattach=True, strict=True, require_manager_reattach=True,
+                recovery_action_id="recovery-" + "e" * 32, recovery_claim_sha256="claim-sha",
+                recovery_claim_key="f" * 64, recovery_owner_generation="a" * 32,
+            )
+        self.assertEqual(result["manager_reattach"]["state"], "verified")
+        self.assertIn(pane["pane_id"], self.broker.herdr.panes)
+        self.assertFalse(any(method == "pane.close" for method, _params in self.broker.herdr.calls))
 
 
 if __name__ == "__main__":
