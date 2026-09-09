@@ -1,5 +1,5 @@
 {
-  "package_version": 23,
+  "package_version": 24,
   "state_schema_version": 12,
   "control_root": "/absolute/path/to/control-manager",
   "state_dir": "/machine/local/state/codex-control",

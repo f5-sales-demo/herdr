@@ -3,7 +3,7 @@
   "kind": "installed_runtime_synthesized_prompts",
   "native_resume_contract": {
     "execution_resume_schema": "execution.resume/v3",
-    "herdr_protocol_minimum": 22,
+    "herdr_protocol_minimum": 23,
     "required_herdr_capabilities": ["tracked_executions", "agent_turn_journal"]
   },
   "scenarios": [
