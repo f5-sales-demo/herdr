@@ -1752,6 +1752,18 @@ mod tests {
             manager.get(&claimed.execution_id).unwrap().state,
             ExecutionState::Cancelled
         );
+        drop(manager);
+        let manager = ExecutionManager::load_at(path.clone());
+        let persisted = manager.get(&claimed.execution_id).unwrap();
+        assert_eq!(persisted.state, ExecutionState::Cancelled);
+        assert!(
+            manager.0.state.lock().unwrap().native_actions[&claimed.execution_id]
+                .settled_at_unix_ms
+                .is_some()
+        );
+        manager
+            .settle_native_cancelled_report(&persisted, &cancelled)
+            .unwrap();
         let mut foreign = target;
         foreign.native_capability = "wrong".into();
         assert!(manager
