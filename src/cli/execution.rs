@@ -158,7 +158,7 @@ fn usage_ok() -> std::io::Result<i32> {
     Ok(0)
 }
 fn print_usage() {
-    eprintln!("herdr execution commands:\n  herdr execution start <id> --cwd <absolute-path> [--shell bash|zsh] -- <argv...|command-text>\n  herdr execution resume <semantic-id> <generation> --session <xcsh-session-id> --cwd <absolute-path> --text <text>\n  herdr execution get <backend-id>\n  herdr execution list [--since <revision>]\n  herdr execution wait <after-revision>\n  herdr execution cancel <backend-id>");
+    eprintln!("herdr execution commands:\n  herdr execution start <id> --cwd <absolute-path> [--shell bash|zsh] -- <argv...|command-text>\n  herdr execution resume <semantic-id> <generation> --session <canonical-xcsh-sessionManager-uuid> --cwd <absolute-path> --text <text>\n  herdr execution get <backend-id>\n  herdr execution list [--since <revision>]\n  herdr execution wait <after-revision>\n  herdr execution cancel <backend-id>");
 }
 
 #[cfg(test)]
@@ -171,7 +171,7 @@ mod tests {
             "semantic".into(),
             "7".into(),
             "--session".into(),
-            "session".into(),
+            "123e4567-e89b-12d3-a456-426614174000".into(),
             "--cwd".into(),
             "/tmp".into(),
             "--text".into(),
@@ -183,6 +183,6 @@ mod tests {
         };
         assert_eq!(params.execution_id, "semantic");
         assert_eq!(params.generation, 7);
-        assert_eq!(params.session_id, "session");
+        assert_eq!(params.session_id, "123e4567-e89b-12d3-a456-426614174000");
     }
 }

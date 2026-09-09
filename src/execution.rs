@@ -29,6 +29,12 @@ struct CapturedOutput {
 struct State {
     revision: u64,
     records: Vec<ExecutionRecord>,
+    /// Native semantic identities outlive the bounded visible-record window.
+    /// This is deliberately separate from tombstones: a semantic task may
+    /// continue with a newer generation, but no earlier generation may be
+    /// relaunched and no ordinary execution may claim its identity.
+    #[serde(default)]
+    native_reservations: BTreeMap<String, u64>,
     #[serde(default)]
     tombstones: Vec<ExecutionTombstone>,
     #[serde(default)]
@@ -37,6 +43,10 @@ struct State {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ExecutionTombstone {
     execution_id: String,
+    #[serde(default)]
+    semantic_execution_id: Option<String>,
+    #[serde(default)]
+    generation: Option<u64>,
     command: ExecutionCommand,
     cwd: String,
 }
@@ -106,6 +116,10 @@ impl ExecutionManager {
             .records
             .iter()
             .any(|record| record.semantic_execution_id.as_deref() == Some(&params.execution_id))
+            || state.native_reservations.contains_key(&params.execution_id)
+            || state.tombstones.iter().any(|tombstone| {
+                tombstone.semantic_execution_id.as_deref() == Some(&params.execution_id)
+            })
         {
             return Err("execution_namespace_conflict: execution id is reserved by a native semantic execution".into());
         }
@@ -214,6 +228,29 @@ impl ExecutionManager {
                 "execution_generation_stale: a newer semantic generation is already bound".into(),
             );
         }
+        let retained_generation = state
+            .native_reservations
+            .get(&params.execution_id)
+            .copied()
+            .into_iter()
+            .chain(
+                state
+                    .tombstones
+                    .iter()
+                    .filter(|tombstone| {
+                        tombstone.semantic_execution_id.as_deref() == Some(&params.execution_id)
+                    })
+                    .filter_map(|tombstone| tombstone.generation),
+            )
+            .max();
+        if let Some(retained_generation) = retained_generation {
+            if retained_generation == params.generation {
+                return Err("execution_expired: semantic generation was previously admitted but its visible record expired; use a newer generation".into());
+            }
+            if retained_generation > params.generation {
+                return Err("execution_generation_stale: a newer retained semantic generation is already bound".into());
+            }
+        }
         if state
             .records
             .iter()
@@ -233,6 +270,9 @@ impl ExecutionManager {
         });
         state.revision += 1;
         let revision = state.revision;
+        state
+            .native_reservations
+            .insert(params.execution_id.clone(), params.generation);
         let record = ExecutionRecord {
             execution_id: backend_execution_id.clone(),
             backend_execution_id: Some(backend_execution_id.clone()),
@@ -528,6 +568,8 @@ impl ExecutionManager {
             expired_filter_insert(&mut state.expired_id_filter, &record.execution_id);
             state.tombstones.push(ExecutionTombstone {
                 execution_id: record.execution_id,
+                semantic_execution_id: record.semantic_execution_id,
+                generation: record.generation,
                 command: record.command,
                 cwd: record.cwd,
             });
@@ -664,12 +706,11 @@ fn validate_resume(p: &ExecutionResumeParams) -> Result<(), String> {
             argv: vec!["xcsh".into()],
         },
     })?;
-    if p.session_id.is_empty()
-        || p.session_id.len() > 512
-        || p.text.is_empty()
-        || p.text.len() > 65_536
-    {
+    if p.text.is_empty() || p.text.len() > 65_536 {
         return Err("invalid_execution_resume".into());
+    }
+    if !is_canonical_xcsh_session_id(&p.session_id) {
+        return Err("invalid_xcsh_session_id: execution.resume requires the canonical 36-character XCSH sessionManager UUID; ID prefixes and session paths cannot bind reporter provenance exactly".into());
     }
     // XCSH serializes generations as JavaScript Number. Larger values round
     // and could silently select a different durable generation binding.
@@ -679,6 +720,14 @@ fn validate_resume(p: &ExecutionResumeParams) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+fn is_canonical_xcsh_session_id(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            matches!(index, 8 | 13 | 18 | 23) && byte == b'-'
+                || !matches!(index, 8 | 13 | 18 | 23) && byte.is_ascii_hexdigit()
+        })
 }
 
 fn native_backend_id(execution_id: &str, generation: u64) -> String {
@@ -734,7 +783,7 @@ mod tests {
         ExecutionResumeParams {
             execution_id: "semantic-task".into(),
             generation,
-            session_id: "xcsh-session".into(),
+            session_id: "123e4567-e89b-12d3-a456-426614174000".into(),
             text: "continue the task".into(),
             cwd: "/tmp".into(),
             workspace_id: None,
@@ -786,6 +835,26 @@ mod tests {
     }
 
     #[test]
+    fn native_resume_requires_a_canonical_xcsh_session_manager_id() {
+        let path = temp("native-canonical-session");
+        let manager = ExecutionManager::load_at(path.clone());
+        for invalid in ["123e4567", "/tmp/xcsh-session.jsonl"] {
+            let mut params = resume_params(1);
+            params.session_id = invalid.into();
+            let error = manager.admit_xcsh_resume(&params).unwrap_err();
+            assert!(error.starts_with("invalid_xcsh_session_id"));
+            assert!(error.contains("prefixes and session paths"));
+        }
+        let (record, admitted, _) = manager.admit_xcsh_resume(&resume_params(1)).unwrap();
+        assert!(admitted);
+        assert_eq!(
+            record.producer_session_id.as_deref(),
+            Some("123e4567-e89b-12d3-a456-426614174000")
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn ordinary_and_native_execution_namespaces_cannot_collide_in_either_order() {
         let path = temp("native-ordinary-collision");
         let manager = ExecutionManager::load_at(path.clone());
@@ -830,7 +899,7 @@ mod tests {
             Some(current.execution_id.as_str())
         );
         let mut conflicting_retry = resume_params(1);
-        conflicting_retry.session_id = "foreign-session".into();
+        conflicting_retry.session_id = "123e4567-e89b-12d3-a456-426614174001".into();
         assert!(manager
             .admit_xcsh_resume(&conflicting_retry)
             .unwrap_err()
@@ -911,6 +980,30 @@ mod tests {
         assert!(error.starts_with("execution_expired"));
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn evicted_native_generation_remains_reserved_across_restart() {
+        let path = temp("evicted-native-generation");
+        let manager = ExecutionManager::load_at(path.clone());
+        let (claimed, admitted, _) = manager.admit_xcsh_resume(&resume_params(6)).unwrap();
+        assert!(admitted);
+        for index in 0..MAX_RECORDS {
+            manager
+                .admit_visible(&params(&format!("eviction-{index}")))
+                .unwrap();
+        }
+        assert!(manager.get(&claimed.execution_id).is_none());
+        drop(manager);
+
+        let reloaded = ExecutionManager::load_at(path.clone());
+        let retry = reloaded.admit_xcsh_resume(&resume_params(6)).unwrap_err();
+        assert!(retry.starts_with("execution_expired"));
+        let collision = reloaded
+            .admit_visible(&params("semantic-task"))
+            .unwrap_err();
+        assert!(collision.starts_with("execution_namespace_conflict"));
+        let _ = std::fs::remove_file(path);
+    }
     #[test]
     fn restart_marks_running_lost() {
         let path = temp("lost");
@@ -949,6 +1042,7 @@ mod tests {
                 output_complete: false,
                 evidence_gap: None,
             }],
+            native_reservations: BTreeMap::new(),
             tombstones: Vec::new(),
             expired_id_filter: Vec::new(),
         };
