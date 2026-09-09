@@ -107,6 +107,7 @@ def build(args: argparse.Namespace) -> None:
         "artifact_sha256": digest,
         "package_name": checked["manifest"]["name"],
         "package_version": checked["manifest"]["package_version"],
+        "state_schema_version": checked["manifest"]["state_schema_version"],
         "release_tag": args.release_tag,
         "source_sha": args.source_sha,
         "manifest_sha256": sha256(root / "control-package.json"),
@@ -139,6 +140,8 @@ def verify(args: argparse.Namespace) -> None:
         checked = validate_tree(roots[0])
         if sha256(roots[0] / "control-package.json") != provenance.get("manifest_sha256"):
             raise ValueError("provenance manifest digest does not verify")
+        if provenance.get("state_schema_version") != checked["manifest"].get("state_schema_version"):
+            raise ValueError("provenance state schema does not match package manifest")
     print(json.dumps({"verified": True, "archive": args.archive.name, "files": len(checked["files"])}, sort_keys=True))
 
 

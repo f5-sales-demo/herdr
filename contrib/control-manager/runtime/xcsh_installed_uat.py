@@ -71,15 +71,6 @@ def validate_fixture(runtime: dict[str, Any], *, verify_file: bool) -> dict[str,
     return {"path": path, "value": value, "sha256": digest}
 
 
-def require_execution_contract(observed_capabilities: set[str]) -> None:
-    """Gate execution on a receipt from the measured XCSH binary, never JSON input."""
-    missing = sorted(REQUIRED_PRODUCER_CAPABILITIES - observed_capabilities)
-    if missing:
-        raise PreflightError(
-            "installed XCSH producer lacks required real-execution capabilities: " + ", ".join(missing)
-        )
-
-
 def unix_request(path: Path, method: str, params: dict[str, Any]) -> Any:
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.settimeout(15)
@@ -193,15 +184,8 @@ def preflight(manifest: dict[str, Any], catalog: dict[str, Any], *, probe: bool 
         raise PreflightError("manifest must bind isolated broker_socket and herdr_socket")
     if not isinstance(runtime.get("workspace_id"), str) or not runtime["workspace_id"]:
         raise PreflightError("manifest must bind a dedicated Herdr workspace_id")
-    session_create = runtime.get("xcsh_session_create_argv")
-    if (not isinstance(session_create, list) or not session_create or any(not isinstance(item, str) or not item for item in session_create)
-            or session_create[0] != runtime.get("xcsh_executable")):
-        raise PreflightError("manifest must bind canonical XCSH JSON session-create argv for execution.resume")
-    capability_probe = runtime.get("xcsh_capability_probe_argv")
-    if (not isinstance(capability_probe, list) or not capability_probe
-            or any(not isinstance(item, str) or not item for item in capability_probe)
-            or capability_probe[0] != runtime.get("xcsh_executable")):
-        raise PreflightError("manifest must bind canonical XCSH JSON capability-probe argv")
+    if not isinstance(runtime.get("xcsh_session_dir"), str) or not Path(runtime["xcsh_session_dir"]).is_absolute():
+        raise PreflightError("manifest must bind an isolated absolute xcsh_session_dir")
     if not isinstance(runtime.get("xcsh_executable"), str) or not runtime["xcsh_executable"]:
         raise PreflightError("manifest must bind the measured xcsh_executable")
     declared_executable_digest = runtime.get("xcsh_executable_sha256")
@@ -414,23 +398,15 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
             raise PreflightError("cleanup receipt did not close the admitted execution tab")
     if case["id"] in controlled_cases and control_receipt is None:
         raise PreflightError("required isolated controller action produced no authoritative receipt")
-    return {"scenario_id": case["id"], "task_id": task["id"], "pass": True,
-            "controller_receipt": control_receipt, "evidence_class": "installed_runtime_pending_gate"}
+    return {"scenario_id": case["id"], "task_id": task["id"], "pass": True, "accepted": False,
+            "session_receipt": session_receipt, "controller_receipt": control_receipt,
+            "evidence_class": "installed_runtime_pending_gate"}
 
 
 def execute(manifest: dict[str, Any], catalog: dict[str, Any], *, run_id: str | None = None,
             controller: Any | None = None) -> dict[str, Any]:
     preflight(manifest, catalog, probe=True)
     controller = controller or controller_from_manifest(manifest)
-    runtime = manifest["runtime"]
-    try:
-        observed_capabilities = controller.probe_xcsh_capabilities(
-            Path(runtime["xcsh_executable"]), runtime["xcsh_executable_sha256"],
-            list(runtime["xcsh_capability_probe_argv"]), Path(runtime.get("cwd", "/")),
-        )
-    except Exception as exc:
-        raise PreflightError(f"controller could not authoritatively probe measured XCSH capabilities: {exc}") from exc
-    require_execution_contract(observed_capabilities)
     run_id = run_id or uuid.uuid4().hex
     cases = [execute_case(manifest, case, run_id=run_id, controller=controller) for case in catalog["scenarios"]]
     return {"run_id": run_id, "pass": all(item["pass"] for item in cases), "accepted": False,

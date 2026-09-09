@@ -6,7 +6,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 ALLOWED = {"reconnect_replay", "generation_supersession", "cleanup", "restart_loss"}
-CANONICAL_XCSH_SESSION_ID = re.compile(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$")
+# The released XCSH JSON-mode SessionHeader.id is the producer's canonical
+# identity.  It is a 16-character lowercase hexadecimal sessionManager id,
+# not a CLI prefix, a path, or a UUID invented by this controller.
+CANONICAL_XCSH_SESSION_ID = re.compile(r"^[0-9a-f]{16}$")
 
 class ControllerError(RuntimeError): pass
 
@@ -155,48 +158,70 @@ class DisposableHerdrController(IsolatedController):
         if self.ownership["workspace_id"] not in {item.get("workspace_id") for item in listed if isinstance(item,dict)}:
             raise ControllerError("owned workspace provenance no longer matches")
 
-    def create_xcsh_session(self, xcsh_binary: Path, expected_sha256: str, argv: list[str], cwd: Path) -> str:
-        """Create one producer session through an explicit released CLI contract.
+    def probe_xcsh_json_session(self, xcsh_binary: Path, expected_sha256: str, cwd: Path,
+                                session_dir: Path) -> dict[str, Any]:
+        """Observe the released XCSH JSON-mode session behavior without a prompt.
 
-        The manifest supplies the measured producer executable and its
-        documented JSON session-create argv.  This controller owns the
-        subprocess, captures its receipt, and refuses labels or inferred IDs.
-        It deliberately cannot synthesize a session when the installed XCSH
-        release lacks this contract.
+        XCSH has no ``--create-session-json`` or capabilities command.  Its
+        supported non-interactive ``--mode json --session-dir`` invocation
+        emits a SessionHeader first on stdout, before any prompt is submitted.
+        The controller uses that observable behavior; it does not accept a
+        caller-supplied session id or manifest-declared capability.  The
+        returned ``resume_ready`` fact is evidence, not a guessed feature:
+        current releases emit a header without durably creating a resume file.
         """
         if (not xcsh_binary.is_file() or hashlib.sha256(xcsh_binary.read_bytes()).hexdigest() != expected_sha256
-                or not isinstance(argv, list) or not argv or any(not isinstance(item, str) or not item for item in argv)
-                or Path(argv[0]).resolve() != xcsh_binary.resolve()):
-            raise ControllerError("controller requires canonical measured XCSH session-create argv")
-        call = subprocess.run(argv, cwd=cwd, check=False, capture_output=True, text=True)
-        if call.returncode:
-            raise ControllerError(f"owned XCSH session creation failed: {call.stderr.strip()[:500]}")
+                or not cwd.is_dir() or not session_dir.is_absolute() or session_dir.exists()):
+            raise ControllerError("controller requires a measured XCSH binary and fresh absolute session directory")
+        session_dir.mkdir(parents=True, mode=0o700)
+        argv = [str(xcsh_binary), "--mode", "json", "--session-dir", str(session_dir),
+                "--no-tools", "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules"]
         try:
-            receipt = json.loads(call.stdout)
-        except json.JSONDecodeError as exc:
-            raise ControllerError("XCSH session creation did not return a JSON receipt") from exc
-        session = receipt.get("session_id") if isinstance(receipt, dict) else None
+            call = subprocess.run(argv, cwd=cwd, check=False, capture_output=True, text=True, timeout=20)
+        except subprocess.TimeoutExpired as exc:
+            raise ControllerError("XCSH JSON-mode session header timed out") from exc
+        if call.returncode:
+            raise ControllerError(f"owned XCSH JSON-mode session creation failed: {call.stderr.strip()[:500]}")
+        header: dict[str, Any] | None = None
+        for line in call.stdout.splitlines():
+            try:
+                candidate = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict) and candidate.get("type") == "session":
+                header = candidate
+                break
+        session = header.get("id") if header else None
         if not isinstance(session, str) or not CANONICAL_XCSH_SESSION_ID.fullmatch(session):
-            raise ControllerError("XCSH session creation receipt lacks canonical sessionManager UUID")
-        return session
+            raise ControllerError("XCSH JSON-mode header lacks canonical sessionManager id")
+        if header.get("cwd") != str(cwd.resolve()):
+            raise ControllerError("XCSH JSON-mode header cwd does not match the owned invocation")
+        files = list(session_dir.rglob("*.jsonl"))
+        session_file: str | None = None
+        if len(files) == 1:
+            try:
+                persisted = json.loads(files[0].read_text(encoding="utf-8").splitlines()[0])
+            except (OSError, IndexError, json.JSONDecodeError) as exc:
+                raise ControllerError("XCSH persisted session header is unreadable") from exc
+            identity_fields = ("type", "version", "id", "timestamp", "cwd")
+            if any(persisted.get(key) != header.get(key) for key in identity_fields):
+                raise ControllerError("XCSH stdout and persisted session headers disagree")
+            session_file = str(files[0])
+        return {"session_id": session, "session_file": session_file,
+                "header_sha256": hashlib.sha256(json.dumps(header, sort_keys=True).encode()).hexdigest(),
+                "json_mode_session_header": True, "resume_ready": session_file is not None}
 
-    def probe_xcsh_capabilities(self, xcsh_binary: Path, expected_sha256: str, argv: list[str], cwd: Path) -> set[str]:
-        """Read the producer contract from the exact measured binary's JSON receipt."""
-        if (not xcsh_binary.is_file() or hashlib.sha256(xcsh_binary.read_bytes()).hexdigest() != expected_sha256
-                or not isinstance(argv, list) or not argv or any(not isinstance(item, str) or not item for item in argv)
-                or Path(argv[0]).resolve() != xcsh_binary.resolve()):
-            raise ControllerError("controller requires canonical measured XCSH capability-probe argv")
-        call = subprocess.run(argv, cwd=cwd, check=False, capture_output=True, text=True)
-        if call.returncode:
-            raise ControllerError(f"owned XCSH capability probe failed: {call.stderr.strip()[:500]}")
-        try:
-            receipt = json.loads(call.stdout)
-        except json.JSONDecodeError as exc:
-            raise ControllerError("XCSH capability probe did not return a JSON receipt") from exc
-        capabilities = receipt.get("capabilities") if isinstance(receipt, dict) else None
-        if not isinstance(capabilities, list) or any(not isinstance(item, str) or not item for item in capabilities):
-            raise ControllerError("XCSH capability receipt lacks a string capabilities list")
-        return set(capabilities)
+    def create_xcsh_session(self, xcsh_binary: Path, expected_sha256: str, cwd: Path,
+                            session_dir: Path) -> dict[str, str]:
+        """Return a real, persisted producer session or fail closed."""
+        receipt = self.probe_xcsh_json_session(xcsh_binary, expected_sha256, cwd, session_dir)
+        if not receipt["resume_ready"]:
+            raise ControllerError(
+                "released XCSH emitted a JSON session header but did not persist a resume-ready session; "
+                "the producer needs a prompt-free durable session creation API"
+            )
+        return {"session_id": receipt["session_id"], "session_file": receipt["session_file"],
+                "header_sha256": receipt["header_sha256"]}
 
     def _restart(self) -> dict[str,Any]:
         session,service=self.ownership["session_id"],self.ownership["service_id"]

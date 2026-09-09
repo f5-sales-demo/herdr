@@ -1,6 +1,6 @@
 {
   "package_version": 21,
-  "state_schema_version": 11,
+  "state_schema_version": 12,
   "control_root": "/absolute/path/to/control-manager",
   "state_dir": "/machine/local/state/codex-control",
   "broker_socket": "/machine/local/state/codex-control/control.sock",

@@ -1,7 +1,7 @@
 {
   "name": "control-manager",
   "package_version": 21,
-  "state_schema_version": 11,
+  "state_schema_version": 12,
   "policy": "POLICY.md",
   "shared_policy": "control-policy.json",
   "commit_message_policy": "autonomous_conventional",
@@ -21,5 +21,5 @@
   },
   "contains_credentials": false,
   "contains_runtime_sessions": false,
-  "files": ["LICENSE", "README.md", "POLICY.md", "control-package.json", "control-policy.json", "machine-config.example.json", "project-profile.example.json", "runtime", "herdr-control-recovery", "tests", "scripts"]
+  "files": ["LICENSE", "README.md", "POLICY.md", "XCSH_PRODUCER_HANDOFF.md", "control-package.json", "control-policy.json", "machine-config.example.json", "project-profile.example.json", "runtime", "herdr-control-recovery", "tests", "scripts"]
 }

@@ -1,4 +1,4 @@
-import hashlib, os, subprocess, tempfile, unittest
+import hashlib, os, subprocess, tarfile, tempfile, unittest
 from pathlib import Path
 from xcsh_isolated_uat_controller import ControllerError, DisposableHerdrController, IsolatedController
 
@@ -50,18 +50,25 @@ class ControllerTests(unittest.TestCase):
     c.act('restart_loss','p1','wrong-execution','token',wrong)
    c.close()
 
- def test_measured_xcsh_session_and_capability_receipts_are_required(self):
-  """Synthetic controller fixture; it labels command receipts, never UAT proof."""
+ def test_real_v21190_binary_probes_documented_json_session_header(self):
+  """Real released-binary smoke; it is source evidence, not installed UAT."""
+  archive=Path('/data/robin-GIT/xcsh-codex-login/xcsh/.local/native-lifecycle-artifacts/v21.19.0/xcsh-linux-x64.tar.gz')
+  if not archive.is_file(): self.skipTest('retained immutable v21.19.0 archive absent')
   with tempfile.TemporaryDirectory() as raw:
-   binary=Path(raw)/'xcsh'
-   binary.write_text('#!/bin/sh\ncase "$1" in --session-json) echo \'{"session_id":"123e4567-e89b-12d3-a456-426614174000"}\' ;; --caps-json) echo \'{"capabilities":["transport_replay"]}\' ;; *) exit 2 ;; esac\n')
+   root=Path(raw)
+   with tarfile.open(archive,'r:gz') as payload:
+    member=payload.getmember('xcsh')
+    binary=root/'xcsh'; binary.write_bytes(payload.extractfile(member).read())
    binary.chmod(0o700)
-   digest=hashlib.sha256(binary.read_bytes()).hexdigest()
    controller=object.__new__(DisposableHerdrController)
-   self.assertEqual(controller.create_xcsh_session(binary,digest,[str(binary),'--session-json'],Path(raw)),'123e4567-e89b-12d3-a456-426614174000')
-   self.assertEqual(controller.probe_xcsh_capabilities(binary,digest,[str(binary),'--caps-json'],Path(raw)),{'transport_replay'})
-   with self.assertRaisesRegex(ControllerError,'measured'):
-    controller.probe_xcsh_capabilities(binary,'0'*64,[str(binary),'--caps-json'],Path(raw))
+   receipt=controller.probe_xcsh_json_session(binary,hashlib.sha256(binary.read_bytes()).hexdigest(),root,root/'sessions')
+   self.assertRegex(receipt['session_id'],r'^[0-9a-f]{16}$')
+   self.assertTrue(receipt['json_mode_session_header'])
+   # v21.19.0 exposes no prompt-free durable session creation. This is the
+   # concrete producer dependency, deliberately not forged by a test shim.
+   self.assertFalse(receipt['resume_ready'])
+   with self.assertRaisesRegex(ControllerError,'prompt-free durable'):
+    controller.create_xcsh_session(binary,hashlib.sha256(binary.read_bytes()).hexdigest(),root,root/'second-session')
 
  def test_real_disposable_binary_actions_when_explicitly_enabled(self):
   raw_binary=os.environ.get('HERDR_DISPOSABLE_BINARY')

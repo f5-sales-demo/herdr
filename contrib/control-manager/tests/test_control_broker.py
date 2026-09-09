@@ -565,6 +565,7 @@ class StateTests(unittest.TestCase):
             self.assertEqual(saved["policy_file"], str(root / "POLICY.md"))
             self.assertEqual(saved["app_server_socket"], str(appserver_socket))
             self.assertEqual(saved["app_server_remote"], f"unix://{appserver_socket}")
+            self.assertEqual(saved["state_schema_version"], 12)
             self.assertTrue(config.exists())
             self.assertNotIn(str(Path.home()), config.read_text())
 
@@ -1040,6 +1041,63 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         await self.broker.consume_native_turns()
         await asyncio.sleep(0.08)
         self.assertNotIn(current["tab_id"], self.broker.herdr.tabs)
+
+    async def test_xcsh_concurrent_continuations_share_one_source_turn_child(self):
+        """Synthetic component fixture for the source-turn CAS fence."""
+        workspace = await self.configure_control_workspace()
+        task = await self.broker.native_xcsh_admit({
+            "target": "xcsh-continuation-race", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
+            "text": "safe", "session_id": "session-continuation-race", "workspace_id": workspace["workspace"]["workspace_id"],
+            "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"}, "idempotency_key": "continuation-race",
+        })
+        binding = self.broker.db.current_native_generation(task["id"])
+        report = {"execution_id": task["id"], "pane_id": binding["pane_id"], "producer": "xcsh",
+                  "session_id": binding["session_id"], "turn_id": "turn-race", "generation": 0}
+        self.broker.db.apply_native_turn({"revision": 1, "report": report | {"event_revision": 1, "state": "starting"}})
+        self.broker.db.apply_native_turn({"revision": 2, "report": report | {"event_revision": 2, "state": "waiting_input", "reason": "need input"}})
+        first, second = await asyncio.gather(
+            self.broker.continue_task({"task_id": task["id"], "text": "continue exactly once"}),
+            self.broker.continue_task({"task_id": task["id"], "text": "continue exactly once"}),
+        )
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(self.broker.db.current_native_generation(task["id"])["generation"], 1)
+        children = self.broker.db.conn.execute(
+            "SELECT * FROM native_execution_generations WHERE task_id=? AND generation=1", (task["id"],)
+        ).fetchall()
+        self.assertEqual(len(children), 1)
+        self.assertEqual(len([item for item in self.broker.herdr.executions.values() if item["generation"] == 1]), 1)
+
+    async def test_xcsh_lost_continuation_response_reconciles_same_generation(self):
+        """Synthetic component fixture for an effect that succeeded before its response was lost."""
+        workspace = await self.configure_control_workspace()
+        task = await self.broker.native_xcsh_admit({
+            "target": "xcsh-continuation-lost", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
+            "text": "safe", "session_id": "session-continuation-lost", "workspace_id": workspace["workspace"]["workspace_id"],
+            "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"}, "idempotency_key": "continuation-lost",
+        })
+        binding = self.broker.db.current_native_generation(task["id"])
+        report = {"execution_id": task["id"], "pane_id": binding["pane_id"], "producer": "xcsh",
+                  "session_id": binding["session_id"], "turn_id": "turn-lost", "generation": 0}
+        self.broker.db.apply_native_turn({"revision": 1, "report": report | {"event_revision": 1, "state": "starting"}})
+        self.broker.db.apply_native_turn({"revision": 2, "report": report | {"event_revision": 2, "state": "waiting_input", "reason": "need input"}})
+        original_request, lose_reply = self.broker.herdr.request, True
+
+        async def uncertain_request(method, params=None, timeout=65):
+            nonlocal lose_reply
+            result = await original_request(method, params, timeout)
+            if method == "execution.resume" and params["generation"] == 1 and lose_reply:
+                lose_reply = False
+                raise RuntimeError("continuation response lost after backend effect")
+            return result
+
+        self.broker.herdr.request = uncertain_request
+        first = await self.broker.continue_task({"task_id": task["id"], "text": "continue after loss"})
+        self.assertTrue(first["admission_uncertain"])
+        self.broker.herdr.request = original_request
+        replay = await self.broker.continue_task({"task_id": task["id"], "text": "continue after loss"})
+        self.assertTrue(replay["generation_replayed"])
+        self.assertEqual(self.broker.db.current_native_generation(task["id"])["generation"], 1)
+        self.assertEqual(len([item for item in self.broker.herdr.executions.values() if item["generation"] == 1]), 1)
 
     async def test_xcsh_cancel_claim_recovers_after_ambiguous_backend_response(self):
         """Synthetic component fixture: a persisted cancel claim is replayed exactly."""
