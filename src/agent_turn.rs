@@ -101,6 +101,30 @@ impl AgentTurnManager {
             .state
             .lock()
             .map_err(|_| "agent turn state lock poisoned")?;
+        // `load_at` appends a synthetic Lost event for an interrupted server.
+        // A native child may have already persisted its authenticated starting
+        // frame while Herdr crashed before cross-ledger confirmation. Only the
+        // same authenticated revision-1 starting frame may remove that exact
+        // synthetic marker and resume confirmation; no terminal producer event
+        // is reset or fabricated.
+        if report.state == AgentTurnState::Starting && report.event_revision == 1 {
+            if let Some(index) = state.records.iter().rposition(|candidate| {
+                same_turn(&candidate.report, &report)
+                    && candidate.report.state == AgentTurnState::Lost
+                    && candidate.report.reason.as_deref()
+                        == Some("Herdr restarted before the semantic turn reached a terminal state")
+                    && candidate.report.event_revision == 2
+            }) {
+                if state.records[..index].iter().rev().any(|candidate| {
+                    same_turn(&candidate.report, &report)
+                        && candidate.report.state == AgentTurnState::Starting
+                        && candidate.report.event_revision == 1
+                        && candidate.report == report
+                }) {
+                    state.records.remove(index);
+                }
+            }
+        }
         let latest = state
             .records
             .iter()
