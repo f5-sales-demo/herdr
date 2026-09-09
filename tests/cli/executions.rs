@@ -345,6 +345,20 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
         .to_string(),
     );
     assert_eq!(terminal["result"]["turn"]["state"], "cancelled");
+    // Simulate a lost terminal reply: resend the exact durable frame with a
+    // new transport request id. Neither action nor execution may settle twice.
+    let replay = send_request(
+        &socket_path,
+        &serde_json::json!({
+            "id":"fixture-old-terminal-replay", "method":"agent.turn.report", "params":{
+                "execution_id":"semantic-child", "pane_id":execution["pane_id"], "producer":"xcsh",
+                "session_id":"0123abcd4567ef89", "turn_id":"fixture-turn", "generation":11,
+                "event_revision":3, "state":"cancelled", "native_capability":capability
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(replay["result"]["admitted"], false);
     let settled = send_request(
         &socket_path,
         &format!(
