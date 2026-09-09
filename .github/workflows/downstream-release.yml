@@ -198,8 +198,55 @@ jobs:
             ${{ matrix.artifact }}
             ${{ matrix.artifact }}.sha256
 
+  control-manager-package:
+    needs: prepare
+    if: needs.prepare.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify pinned release source and tag
+        env:
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          TAG: v${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$(git rev-parse "${TAG}^{commit}")" = "$RELEASE_SHA"
+
+      - name: Run portable Control Manager checks
+        run: python3 contrib/control-manager/scripts/control_archive.py test --source-root contrib/control-manager
+
+      - name: Build deterministic Control Manager archive
+        env:
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          TAG: v${{ needs.prepare.outputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 contrib/control-manager/scripts/control_archive.py build \
+            --source-root contrib/control-manager --output-dir control-manager-release \
+            --version "$VERSION" --release-tag "$TAG" --source-sha "$RELEASE_SHA"
+          python3 contrib/control-manager/scripts/control_archive.py attest \
+            --archive "control-manager-release/control-manager-${VERSION}.tar.gz" \
+            --checksum "control-manager-release/control-manager-${VERSION}.tar.gz.sha256" \
+            --provenance "control-manager-release/control-manager-${VERSION}.provenance.json" \
+            --expected-tag "$TAG" --expected-source-sha "$RELEASE_SHA"
+
+      - name: Upload Control Manager release asset
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: control-manager-release
+          path: control-manager-release/
+
   publish:
-    needs: [prepare, build]
+    needs: [prepare, build, control-manager-package]
     if: needs.prepare.outputs.release == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -212,6 +259,19 @@ jobs:
 
       - name: Download release assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+
+      - name: Verify Control Manager asset provenance
+        env:
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          TAG: v${{ needs.prepare.outputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 contrib/control-manager/scripts/control_archive.py attest \
+            --archive "control-manager-release/control-manager-${VERSION}.tar.gz" \
+            --checksum "control-manager-release/control-manager-${VERSION}.tar.gz.sha256" \
+            --provenance "control-manager-release/control-manager-${VERSION}.provenance.json" \
+            --expected-tag "$TAG" --expected-source-sha "$RELEASE_SHA"
 
       - name: Create the fork-owned GitHub Release
         env:
@@ -228,6 +288,9 @@ jobs:
             herdr-macos-x86_64/herdr-macos-x86_64.sha256 \
             herdr-macos-aarch64/herdr-macos-aarch64 \
             herdr-macos-aarch64/herdr-macos-aarch64.sha256 \
+            control-manager-release/control-manager-${{ needs.prepare.outputs.version }}.tar.gz \
+            control-manager-release/control-manager-${{ needs.prepare.outputs.version }}.tar.gz.sha256 \
+            control-manager-release/control-manager-${{ needs.prepare.outputs.version }}.provenance.json \
             --title "$TAG" --generate-notes
 
       - name: Verify published release is immutable

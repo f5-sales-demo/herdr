@@ -1,0 +1,9 @@
+{
+  "profile_version": 1,
+  "target": "project-derived-stable-key",
+  "cwd": "/machine-specific/project-checkout",
+  "feature_actions": {},
+  "commit_message_policy": "autonomous_conventional",
+  "presentation_policy": "human_meaningful_voice_v1",
+  "note": "Project profiles bind local checkouts. Do not put credentials, socket paths, terminal identifiers, or session history in them."
+}

@@ -1,0 +1,33 @@
+id = "robin.control-recovery"
+name = "Control Recovery"
+version = "0.1.0"
+min_herdr_version = "0.9.4"
+description = "Owner-only Control Manager recovery health popup and direct supervisor controls"
+platforms = ["linux"]
+
+[[actions]]
+id = "recover-now"
+title = "Recover Control Manager now"
+contexts = ["workspace"]
+command = ["python3", "recovery_plugin.py", "recover"]
+
+[[actions]]
+id = "pause"
+title = "Pause automatic Control recovery"
+contexts = ["workspace"]
+command = ["python3", "recovery_plugin.py", "pause"]
+
+[[actions]]
+id = "resume"
+title = "Resume automatic Control recovery"
+contexts = ["workspace"]
+command = ["python3", "recovery_plugin.py", "resume"]
+
+[[panes]]
+id = "health"
+title = "Control recovery health"
+placement = "popup"
+# Native actions reopen this popup, which polls every 0.5 seconds.
+command = ["python3", "recovery_plugin.py", "popup"]
+width = "90%"
+height = "85%"
