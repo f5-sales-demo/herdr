@@ -549,7 +549,7 @@ mod tests {
         };
         std::fs::write(&turn_path, serde_json::to_vec(&journal).unwrap()).unwrap();
         drop(executions);
-        let executions = crate::execution::ExecutionManager::load_at(exec_path);
+        let executions = crate::execution::ExecutionManager::load_at(exec_path.clone());
         let turns = AgentTurnManager::load_at(turn_path.clone());
         assert_eq!(
             executions.get(&claimed.execution_id).unwrap().state,
@@ -569,6 +569,8 @@ mod tests {
             .journaled_at_unix_ms
             .is_some());
         drop(turns);
+        drop(executions);
+        let executions = crate::execution::ExecutionManager::load_at(exec_path);
         let turns = AgentTurnManager::load_at(turn_path);
         assert!(
             !turns
