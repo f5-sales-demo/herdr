@@ -1,0 +1,12 @@
+{
+  "name": "control-manager",
+  "package_version": 18,
+  "state_schema_version": 9,
+  "policy": "POLICY.md",
+  "shared_policy": "control-policy.json",
+  "commit_message_policy": "autonomous_conventional",
+  "presentation_policy": "human_meaningful_voice_v1",
+  "contains_credentials": false,
+  "contains_runtime_sessions": false,
+  "files": ["LICENSE", "README.md", "POLICY.md", "control-package.json", "control-policy.json", "machine-config.example.json", "project-profile.example.json", "runtime", "herdr-control-recovery", "xcsh-native-uat", "xcsh-installed-uat", "tests", "scripts"]
+}

@@ -1,0 +1,13 @@
+{
+  "policy_version": 1,
+  "commit_message_policy": "autonomous_conventional",
+  "commit_message_alignment_required": false,
+  "commit_message_rule": "For authorized repository changes, select a concise Conventional Commit subject and any repository-required body autonomously. Preserve repository permissions, review, CI, release, and other consequential safeguards.",
+  "presentation_policy": {
+    "version": 1,
+    "voice_summary_only": true,
+    "rule": "User-facing delivery summarizes the verified outcome, significance, any human blocker, and next action. Do not read worker prose verbatim or expose correlation identifiers, hashes, pane coordinates, or machine paths unless asked.",
+    "deduplicate_semantic_completions": true,
+    "avoid_status_backchannels": true
+  }
+}

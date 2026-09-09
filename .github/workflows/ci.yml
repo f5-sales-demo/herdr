@@ -21,6 +21,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  control-manager-package:
+    name: Control Manager package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Run portable package checks
+        run: python3 contrib/control-manager/scripts/control_archive.py test --source-root contrib/control-manager
+
+      - name: Build and attest a deterministic package archive
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 contrib/control-manager/scripts/control_archive.py build \
+            --source-root contrib/control-manager --output-dir control-manager-ci \
+            --version ci --release-tag ci --source-sha "$SOURCE_SHA"
+          python3 contrib/control-manager/scripts/control_archive.py attest \
+            --archive control-manager-ci/control-manager-ci.tar.gz \
+            --checksum control-manager-ci/control-manager-ci.tar.gz.sha256 \
+            --provenance control-manager-ci/control-manager-ci.provenance.json \
+            --expected-tag ci --expected-source-sha "$SOURCE_SHA"
+
   conventional-commits:
     if: github.event_name != 'push' || github.ref_name == 'master' || github.ref_name == 'build-xcsh'
     runs-on: ubuntu-latest

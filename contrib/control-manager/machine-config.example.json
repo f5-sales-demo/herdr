@@ -1,0 +1,20 @@
+{
+  "package_version": 18,
+  "state_schema_version": 9,
+  "control_root": "/absolute/path/to/control-manager",
+  "state_dir": "/machine/local/state/codex-control",
+  "broker_socket": "/machine/local/state/codex-control/control.sock",
+  "database": "/machine/local/state/codex-control/tasks.sqlite3",
+  "herdr_socket": "",
+  "app_server_socket": "",
+  "codex_binary": "codex",
+  "supervisor_socket": "/machine/local/state/codex-control/recovery-supervisor.sock",
+  "supervisor_database": "/machine/local/state/codex-control/recovery.sqlite3",
+  "supervisor_mode": "observation_only",
+  "recovery_live_enabled": false,
+  "supervisor_owns_recovery": false,
+  "policy_file": "/absolute/path/to/control-manager/POLICY.md",
+  "shared_policy_file": "/absolute/path/to/control-manager/control-policy.json",
+  "commit_message_policy": "autonomous_conventional",
+  "presentation_policy": "human_meaningful_voice_v1"
+}

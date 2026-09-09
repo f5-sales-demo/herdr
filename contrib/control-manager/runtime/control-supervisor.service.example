@@ -1,0 +1,20 @@
+[Unit]
+Description=Control Manager observation-only recovery supervisor
+After=default.target
+
+[Service]
+Type=notify
+# Copy this unit to the user's systemd directory only at the authorized install
+# stage and replace the three absolute bindings below with machine-local paths.
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /absolute/control-package/control_supervisor.py --socket /machine/state/codex-control/recovery-supervisor.sock --database /machine/state/codex-control/recovery.sqlite3 --config /machine/state/codex-control/machine.json
+Restart=on-failure
+RestartSec=5
+WatchdogSec=30
+NotifyAccess=main
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target
