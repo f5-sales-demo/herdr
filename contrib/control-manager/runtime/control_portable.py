@@ -15,7 +15,7 @@ from typing import Any
 
 
 PACKAGE_VERSION = 21
-STATE_SCHEMA_VERSION = 11
+STATE_SCHEMA_VERSION = 12
 
 
 def terminal_appserver_disconnect(text: str) -> bool:
@@ -72,6 +72,8 @@ def package_manifest(root: Path) -> dict[str, Any]:
         raise ValueError(f"{root} has no valid control-package.json: {exc}") from exc
     if value.get("package_version") != PACKAGE_VERSION:
         raise ValueError("package manifest/version does not match this installer")
+    if value.get("state_schema_version") != STATE_SCHEMA_VERSION:
+        raise ValueError("package manifest/state schema does not match this installer")
     files = value.get("files")
     if not isinstance(files, list) or not files or not all(isinstance(item, str) for item in files):
         raise ValueError("package manifest has no valid file list")

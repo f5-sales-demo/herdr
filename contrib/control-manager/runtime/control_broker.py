@@ -492,6 +492,51 @@ class StateDB:
                 last_revision INTEGER NOT NULL DEFAULT 0,
                 updated_at REAL NOT NULL
             );
+            -- An XCSH task is a semantic execution.  Each visible child is a
+            -- separately-owned, append-only backend generation.  Keeping this
+            -- outside tasks prevents a late old-child terminal report from
+            -- replacing the current child provenance.
+            CREATE TABLE IF NOT EXISTS native_execution_generations (
+                task_id TEXT NOT NULL REFERENCES tasks(id),
+                generation INTEGER NOT NULL,
+                semantic_execution_id TEXT NOT NULL,
+                backend_execution_id TEXT,
+                session_id TEXT NOT NULL,
+                workspace_id TEXT NOT NULL,
+                request_sha256 TEXT NOT NULL,
+                request_json TEXT NOT NULL,
+                source_generation INTEGER,
+                source_turn_id TEXT,
+                source_event_revision INTEGER,
+                continuation_key TEXT,
+                state TEXT NOT NULL,
+                tab_id TEXT,
+                pane_id TEXT,
+                turn_id TEXT,
+                last_event_revision INTEGER NOT NULL DEFAULT 0,
+                terminal_state TEXT,
+                claimed_at REAL NOT NULL,
+                admitted_at REAL,
+                settled_at REAL,
+                PRIMARY KEY(task_id,generation),
+                UNIQUE(backend_execution_id),
+                UNIQUE(pane_id)
+            );
+            CREATE INDEX IF NOT EXISTS native_execution_current_idx
+              ON native_execution_generations(task_id,generation DESC);
+            CREATE TABLE IF NOT EXISTS native_execution_actions (
+                action_key TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES tasks(id),
+                generation INTEGER NOT NULL,
+                backend_execution_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                request_sha256 TEXT NOT NULL,
+                state TEXT NOT NULL,
+                receipt_json TEXT,
+                claimed_at REAL NOT NULL,
+                completed_at REAL,
+                UNIQUE(task_id,generation,kind)
+            );
             CREATE TABLE IF NOT EXISTS admission_idempotency (
                 idempotency_key TEXT PRIMARY KEY,
                 method TEXT NOT NULL,
@@ -585,6 +630,23 @@ class StateDB:
             self.conn.execute("ALTER TABLE manager_attachment_recoveries ADD COLUMN logical_thread_id TEXT NOT NULL DEFAULT ''")
         if attachment_columns and "manager_execution_id" not in attachment_columns:
             self.conn.execute("ALTER TABLE manager_attachment_recoveries ADD COLUMN manager_execution_id TEXT")
+        native_generation_columns = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(native_execution_generations)")
+        }
+        if native_generation_columns and "request_json" not in native_generation_columns:
+            # Existing claims predate exact-replay storage. They remain
+            # fail-closed rather than being guessed into a new child.
+            self.conn.execute("ALTER TABLE native_execution_generations ADD COLUMN request_json TEXT NOT NULL DEFAULT '{}'")
+        for column, definition in {
+            "source_generation": "INTEGER", "source_turn_id": "TEXT",
+            "source_event_revision": "INTEGER", "continuation_key": "TEXT",
+        }.items():
+            if native_generation_columns and column not in native_generation_columns:
+                self.conn.execute(f"ALTER TABLE native_execution_generations ADD COLUMN {column} {definition}")
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS native_execution_one_continuation_idx "
+            "ON native_execution_generations(task_id,source_generation) WHERE source_generation IS NOT NULL"
+        )
         schema = self.conn.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
         if schema is not None and int(schema["value"]) > STATE_SCHEMA_VERSION:
             raise RuntimeError(f"state schema {schema['value']} is newer than this package ({STATE_SCHEMA_VERSION})")
@@ -1153,6 +1215,57 @@ class StateDB:
             self.conn.commit()
         return self.task(data["id"])  # type: ignore[return-value]
 
+    def admit_native_xcsh_task(self, data: dict[str, Any], *, idempotency_key: str,
+                               idempotency_digest: str, session_id: str, workspace_id: str,
+                               request_json: str, request_sha256: str) -> sqlite3.Row:
+        """Commit task, caller replay key, and gen-0 intent as one boundary."""
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            # The preflight replay lookup is intentionally only an optimization:
+            # concurrent callers can both observe its absence.  Recheck while
+            # holding the write transaction so the second caller reuses the
+            # first immutable gen-0 claim instead of failing or creating work.
+            prior = self.conn.execute(
+                "SELECT method,request_sha256,task_id FROM admission_idempotency WHERE idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+            if prior is not None:
+                if prior["method"] != "native_xcsh_admit" or prior["request_sha256"] != idempotency_digest:
+                    raise ValueError("idempotency_key was already used for a different admission")
+                row = self.task(prior["task_id"])
+                if row is None:
+                    raise RuntimeError("native XCSH admission evidence has no retained task")
+                self.conn.commit()
+                return row
+            self.add_task(data, commit=False)
+            self.conn.execute(
+                "INSERT INTO admission_idempotency(idempotency_key,method,request_sha256,task_id,created_at) VALUES(?,?,?,?,?)",
+                (idempotency_key, "native_xcsh_admit", idempotency_digest, data["id"], self.clock()),
+            )
+            self.conn.execute(
+                """INSERT INTO native_execution_generations(
+                    task_id,generation,semantic_execution_id,session_id,workspace_id,
+                    request_sha256,request_json,state,claimed_at
+                ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (data["id"], 0, data["id"], session_id, workspace_id,
+                 request_sha256, request_json, "claimed", self.clock()),
+            )
+            ts = self.clock()
+            self.conn.execute(
+                """UPDATE tasks SET state='starting',started_at=?,workspace_id=?,agent_kind='xcsh',
+                   herdr_state='admitting',session_state='admitting',task_version=1,updated_at=? WHERE id=?""",
+                (ts, workspace_id, ts, data["id"]),
+            )
+            self.record_transition(data["id"], "queued", "starting", "xcsh_admission_claimed", at=ts)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        row = self.task(data["id"])
+        if row is None:
+            raise RuntimeError("native XCSH atomic admission disappeared")
+        return row
+
     def update(self, task_id: str, *, event: str | None = None, **values: Any) -> sqlite3.Row:
         if not values:
             row = self.task(task_id)
@@ -1422,6 +1535,202 @@ class StateDB:
         row = self.conn.execute("SELECT last_revision FROM native_turn_cursors WHERE producer=?", (producer,)).fetchone()
         return int(row["last_revision"]) if row else 0
 
+    def native_generation(self, task_id: str, generation: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM native_execution_generations WHERE task_id=? AND generation=?",
+            (task_id, generation),
+        ).fetchone()
+
+    def current_native_generation(self, task_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM native_execution_generations WHERE task_id=? ORDER BY generation DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+
+    def claim_native_generation(self, task_id: str, *, generation: int, session_id: str,
+                                workspace_id: str, request_sha256: str, request_json: str,
+                                source_generation: int | None = None,
+                                source_turn_id: str | None = None,
+                                source_event_revision: int | None = None) -> sqlite3.Row:
+        """Durably claim an exact `execution.resume` generation before I/O.
+
+        The claim is intentionally append-only. A process crash after this
+        transaction leaves an unambiguous request which reconciliation can
+        replay; it never grants permission to allocate another generation.
+        """
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            task = self.task(task_id)
+            if task is None or task["work_kind"] != "xcsh":
+                raise ValueError("native generation is not an admitted xcsh task")
+            prior = self.native_generation(task_id, generation)
+            if prior is not None:
+                if (prior["semantic_execution_id"] != task_id or prior["session_id"] != session_id
+                        or prior["workspace_id"] != workspace_id or prior["request_sha256"] != request_sha256):
+                    raise ValueError("native generation conflicts with immutable admitted provenance")
+                self.conn.commit()
+                return prior
+            if source_generation is not None:
+                source = self.native_generation(task_id, source_generation)
+                if (int(task["run_generation"]) != source_generation or task["state"] not in {"waiting_human", "blocked"}
+                        or source is None or source["turn_id"] != source_turn_id
+                        or int(source["last_event_revision"]) != source_event_revision):
+                    raise ValueError("XCSH continuation source generation is no longer the current waiting turn")
+                prior_action = self.conn.execute(
+                    "SELECT * FROM native_execution_generations WHERE task_id=? AND source_generation=?",
+                    (task_id, source_generation),
+                ).fetchone()
+                if prior_action is not None:
+                    if prior_action["request_sha256"] != request_sha256:
+                        raise ValueError("XCSH continuation conflicts with the durable source-turn action")
+                    self.conn.commit()
+                    return prior_action
+            current = self.current_native_generation(task_id)
+            expected = 0 if current is None else int(current["generation"]) + 1
+            if generation != expected:
+                if generation < expected:
+                    raise ValueError("native generation is stale")
+                raise ValueError("native generation skips an unclaimed predecessor")
+            ts = self.clock()
+            self.conn.execute(
+                """INSERT INTO native_execution_generations(
+                    task_id,generation,semantic_execution_id,session_id,workspace_id,
+                    request_sha256,request_json,source_generation,source_turn_id,
+                    source_event_revision,continuation_key,state,claimed_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (task_id, generation, task_id, session_id, workspace_id,
+                 request_sha256, request_json, source_generation, source_turn_id,
+                 source_event_revision, request_sha256 if source_generation is not None else None,
+                 "claimed", ts),
+            )
+            if source_generation is not None:
+                changed = self.conn.execute(
+                    """UPDATE tasks SET state='starting',run_generation=?,native_turn_id=NULL,
+                       terminal_reported_at=NULL,terminal_event_id=NULL,cleanup_deadline=NULL,
+                       updated_at=?,task_version=task_version+1
+                       WHERE id=? AND run_generation=? AND state IN ('waiting_human','blocked')""",
+                    (generation, ts, task_id, source_generation),
+                ).rowcount
+                if changed != 1:
+                    raise ValueError("XCSH continuation compare-and-set lost its waiting generation")
+                self.record_transition(task_id, task["state"], "starting", "xcsh_continuation_claimed", at=ts)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        row = self.native_generation(task_id, generation)
+        if row is None:
+            raise RuntimeError("native generation claim disappeared")
+        return row
+
+    def admit_native_generation(self, task_id: str, generation: int,
+                                execution: dict[str, Any]) -> sqlite3.Row:
+        """Attach one exact Herdr receipt to an existing claim, once."""
+        row = self.native_generation(task_id, generation)
+        if row is None:
+            raise ValueError("native generation was not claimed")
+        semantic = execution.get("semantic_execution_id")
+        backend = execution.get("backend_execution_id") or execution.get("execution_id")
+        session = execution.get("producer_session_id")
+        workspace, tab, pane = (execution.get(key) for key in ("workspace_id", "tab_id", "pane_id"))
+        request = json.loads(row["request_json"])
+        expected_argv = ["xcsh", "--resume", row["session_id"], request.get("text")]
+        command = execution.get("command")
+        injected = execution.get("injected_env")
+        if (semantic != row["semantic_execution_id"] or execution.get("generation") != generation
+                or execution.get("native_producer") != "xcsh" or session != row["session_id"]
+                or execution.get("cwd") != request.get("cwd") or workspace != row["workspace_id"]
+                or command != {"mode": "argv", "argv": expected_argv}
+                or not isinstance(injected, dict)
+                or injected.get("HERDR_EXECUTION_ID") != row["semantic_execution_id"]
+                or injected.get("HERDR_EXECUTION_GENERATION") != str(generation)
+                or not all(isinstance(value, str) and value for value in (backend, tab, pane))):
+            raise ValueError("Herdr resume receipt conflicts with immutable native generation provenance or argv")
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            latest = self.native_generation(task_id, generation)
+            if latest is None:
+                raise ValueError("native generation was not claimed")
+            if latest["backend_execution_id"] is not None:
+                if (latest["backend_execution_id"], latest["tab_id"], latest["pane_id"]) != (backend, tab, pane):
+                    raise ValueError("native generation admission receipt conflicts with prior receipt")
+                self.conn.commit()
+                return latest
+            self.conn.execute(
+                """UPDATE native_execution_generations
+                   SET backend_execution_id=?,tab_id=?,pane_id=?,state='admitted',admitted_at=?
+                   WHERE task_id=? AND generation=?""",
+                (backend, tab, pane, self.clock(), task_id, generation),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        admitted = self.native_generation(task_id, generation)
+        if admitted is None:
+            raise RuntimeError("native generation admission disappeared")
+        return admitted
+
+    def settle_native_generation(self, task_id: str, generation: int, state: str,
+                                 turn_id: str, event_revision: int) -> sqlite3.Row:
+        row = self.native_generation(task_id, generation)
+        if row is None:
+            raise ValueError("native turn generation was not admitted")
+        if row["turn_id"] is not None and row["turn_id"] != turn_id:
+            raise ValueError("native turn id conflicts with admitted generation")
+        if event_revision <= int(row["last_event_revision"]):
+            return row
+        if event_revision != int(row["last_event_revision"]) + 1:
+            raise ValueError("native turn event revision gap")
+        terminal = state in {"completed", "failed", "cancelled", "interrupted", "lost"}
+        self.conn.execute(
+            """UPDATE native_execution_generations
+               SET turn_id=COALESCE(turn_id,?),last_event_revision=?,state=?,
+                   terminal_state=CASE WHEN ? THEN ? ELSE terminal_state END,
+                   settled_at=CASE WHEN ? THEN ? ELSE settled_at END
+               WHERE task_id=? AND generation=?""",
+            (turn_id, event_revision, "settled" if terminal else "active", terminal, state,
+             terminal, self.clock(), task_id, generation),
+        )
+        self.conn.commit()
+        settled = self.native_generation(task_id, generation)
+        if settled is None:
+            raise RuntimeError("native generation settlement disappeared")
+        return settled
+
+    def claim_native_cancel(self, task_id: str, generation: int, backend_execution_id: str) -> sqlite3.Row:
+        """Persist a generation-bound cancellation intent before contacting Herdr."""
+        key = f"cancel:{task_id}:{generation}:{backend_execution_id}"
+        digest = hashlib.sha256(key.encode()).hexdigest()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            binding = self.native_generation(task_id, generation)
+            if (binding is None or binding["backend_execution_id"] != backend_execution_id
+                    or self.current_native_generation(task_id)["generation"] != generation):
+                raise ValueError("native cancellation is not for the current admitted generation")
+            prior = self.conn.execute("SELECT * FROM native_execution_actions WHERE action_key=?", (key,)).fetchone()
+            if prior is None:
+                self.conn.execute(
+                    """INSERT INTO native_execution_actions(
+                       action_key,task_id,generation,backend_execution_id,kind,request_sha256,state,claimed_at
+                    ) VALUES(?,?,?,?,?,?,?,?)""",
+                    (key, task_id, generation, backend_execution_id, "cancel", digest, "claimed", self.clock()),
+                )
+            elif prior["request_sha256"] != digest or prior["backend_execution_id"] != backend_execution_id:
+                raise ValueError("native cancellation conflicts with durable action provenance")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return self.conn.execute("SELECT * FROM native_execution_actions WHERE action_key=?", (key,)).fetchone()
+
+    def complete_native_action(self, action_key: str, receipt: dict[str, Any]) -> None:
+        self.conn.execute(
+            "UPDATE native_execution_actions SET state='completed',receipt_json=?,completed_at=? WHERE action_key=?",
+            (json.dumps(receipt, sort_keys=True), self.clock(), action_key),
+        )
+        self.conn.commit()
+
     def apply_native_turn(self, record: dict[str, Any]) -> tuple[str, str] | None:
         """Persist one verified Herdr semantic record exactly once.
 
@@ -1444,24 +1753,16 @@ class StateDB:
         row = self.task(task_id)
         if row is None or row["work_kind"] != "xcsh":
             raise ValueError("native turn execution is not an admitted xcsh task")
-        if row["pane_id"] != report.get("pane_id"):
+        generation = report.get("generation")
+        session_id, turn_id = report.get("session_id"), report.get("turn_id")
+        event_revision = report.get("event_revision")
+        if (not isinstance(generation, int) or generation < 0 or not isinstance(session_id, str)
+                or not session_id or not isinstance(turn_id, str) or not turn_id
+                or not isinstance(event_revision, int) or event_revision <= 0):
+            raise ValueError("native turn generation provenance is incomplete")
+        binding = self.native_generation(task_id, generation)
+        if binding is None or binding["pane_id"] != report.get("pane_id") or binding["session_id"] != session_id:
             raise ValueError("native turn task identity/provenance mismatch")
-        # The first observed semantic record may bind a freshly admitted XCSH
-        # session/turn, but only from its owned execution pane and only as a
-        # starting/working report. Later reports are exact identity matches.
-        if row["native_turn_id"] is None:
-            if str(report.get("state", "")) not in {"starting", "working"}:
-                raise ValueError("native turn initial identity requires starting/working")
-            if not report.get("session_id") or not report.get("turn_id"):
-                raise ValueError("native turn initial identity is incomplete")
-            if row["agent_session_id"] is not None and row["agent_session_id"] != report.get("session_id"):
-                raise ValueError("native continuation session identity mismatch")
-            row = self.update(task_id, event="xcsh_identity_bound",
-                              agent_session_id=row["agent_session_id"] or report["session_id"], native_turn_id=report["turn_id"])
-        if row["agent_session_id"] != report.get("session_id") or row["native_turn_id"] != report.get("turn_id"):
-            raise ValueError("native turn task identity/provenance mismatch")
-        if report.get("generation") != row["run_generation"]:
-            raise ValueError("native turn generation mismatch")
         result = report.get("result")
         digest = report.get("result_digest")
         if result is not None:
@@ -1471,10 +1772,25 @@ class StateDB:
         mapped = {"starting": "starting", "working": "working", "waiting_input": "waiting_human", "completed": "completed", "failed": "failed", "cancelled": "cancelled", "interrupted": "unknown", "lost": "unknown"}.get(state)
         if mapped is None:
             raise ValueError("unknown native semantic state")
+        if generation != int(row["run_generation"]) and state not in {"completed", "failed", "cancelled", "interrupted", "lost"}:
+            raise ValueError("stale native generation may only settle terminal evidence")
+        self.settle_native_generation(task_id, generation, state, turn_id, event_revision)
+        # Replayed records still advance the global cursor but cannot perturb
+        # task state. A late terminal settles only its historical generation.
+        if event_revision <= int(binding["last_event_revision"]):
+            self.conn.execute("INSERT INTO native_turn_cursors(producer,last_revision,updated_at) VALUES(?,?,?) ON CONFLICT(producer) DO UPDATE SET last_revision=excluded.last_revision,updated_at=excluded.updated_at", (cursor_key, revision, self.clock()))
+            self.conn.commit()
+            return None
+        if generation != int(row["run_generation"]):
+            self.conn.execute("INSERT INTO native_turn_cursors(producer,last_revision,updated_at) VALUES(?,?,?) ON CONFLICT(producer) DO UPDATE SET last_revision=excluded.last_revision,updated_at=excluded.updated_at", (cursor_key, revision, self.clock()))
+            self.conn.commit()
+            return None
         if row["state"] in TERMINAL_STATES:
             raise ValueError("native turn attempted to change terminal task")
         summary = (result if state == "completed" else str(report.get("reason") or f"Native XCSH turn {state}."))[:MAX_SUMMARY]
         values: dict[str, Any] = {"state": mapped, "summary": summary, "output_excerpt": result if state == "completed" else row["output_excerpt"]}
+        if row["agent_session_id"] != session_id or row["native_turn_id"] != turn_id:
+            values.update(agent_session_id=session_id, native_turn_id=turn_id)
         if mapped == "waiting_human": values["question"] = summary
         if mapped in TERMINAL_STATES: values["finished_at"] = self.clock(); values["terminal_reported_at"] = self.clock()
         self.update(task_id, event=f"xcsh_turn_{state}", **values)
@@ -2234,9 +2550,12 @@ class Broker:
         protocol-20 semantic reports to settle it; process exit/output is not
         task success evidence.
         """
+        if params.get("idempotency_key") is None:
+            raise ValueError("native_xcsh_admit requires a durable idempotency_key")
         existing = self._idempotent_admission("native_xcsh_admit", params)
         if existing is not None:
-            return existing
+            await self._reconcile_native_xcsh_admissions(existing["id"])
+            return public_task(self.db.task(existing["id"])) | {"admitted": False, "idempotency_replayed": True}  # type: ignore[arg-type]
         target = bounded(params.get("target"), 64, "target", required=True)
         if not TARGET_RE.fullmatch(target or ""):
             raise ValueError("target must match task target rules")
@@ -2246,9 +2565,8 @@ class Broker:
         if priority not in PRIORITIES:
             raise ValueError(f"priority must be one of {', '.join(PRIORITIES)}")
         workspace_id = bounded(params.get("workspace_id"), 160, "workspace_id", required=True)
-        argv = params.get("argv")
-        if not isinstance(argv, list) or not 1 <= len(argv) <= 64 or any(not isinstance(value, str) or not value or len(value) > 4096 for value in argv):
-            raise ValueError("argv must contain 1..64 non-empty bounded strings")
+        session_id = bounded(params.get("session_id"), 512, "session_id", required=True)
+        text = bounded(params.get("text", params.get("prompt")), MAX_PROMPT, "text", required=True)
         runtime_identity = params.get("runtime_identity")
         if not isinstance(runtime_identity, dict):
             raise ValueError("runtime_identity object is required")
@@ -2257,47 +2575,128 @@ class Broker:
             raise ValueError("runtime_identity must bind xcsh_artifact, herdr_artifact, and manager_artifact")
         persisted_identity = runtime_identity | {
             "workspace_id": workspace_id,
-            "argv_sha256": hashlib.sha256(json.dumps(argv, separators=(",", ":")).encode()).hexdigest(),
+            "resume_schema": "execution.resume/v1",
         }
         identity_json = json.dumps(persisted_identity, sort_keys=True, separators=(",", ":"))
         if len(identity_json) > 4000:
             raise ValueError("runtime_identity is too large")
         try:
+            pong = await self.herdr.request("ping", {}, timeout=10)
+            caps = (pong or {}).get("capabilities") or {}
+            if (int((pong or {}).get("protocol", 0)) < 20
+                    or not caps.get("tracked_executions")
+                    or not caps.get("agent_turn_journal")):
+                raise ValueError("Herdr lacks the protocol-20 tracked-executions and semantic-journal contract required for execution.resume")
             await self.herdr.request("workspace.get", {"workspace_id": workspace_id}, timeout=10)
         except Exception as exc:
             raise ValueError(f"native XCSH workspace is not available: {exc}") from exc
         task_id = f"xut-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-        row = self._admit_task("native_xcsh_admit", params, {
+        immutable = {"execution_id": task_id, "generation": 0, "session_id": session_id,
+                     "cwd": cwd, "workspace_id": workspace_id, "text": text}
+        request_json = json.dumps(immutable, sort_keys=True, separators=(",", ":"))
+        canonical = dict(params)
+        canonical.pop("idempotency_key", None)
+        idempotency_digest = hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        row = self.db.admit_native_xcsh_task({
             "id": task_id, "parent_id": None, "target": target, "cwd": cwd,
             "priority": priority, "prompt": prompt,
             "summary": "Installed XCSH semantic UAT admission claimed.", "work_kind": "xcsh",
             "native_runtime_json": identity_json,
-        })
-        self.db.update(row["id"], event="xcsh_admission_claimed", state="starting", started_at=self.clock(),
-                       workspace_id=workspace_id, agent_kind="xcsh", herdr_state="admitting",
-                       session_state="admitting", native_runtime_json=identity_json)
+        }, idempotency_key=bounded(params.get("idempotency_key"), 160, "idempotency_key", required=True) or "",
+           idempotency_digest=idempotency_digest, session_id=session_id or "", workspace_id=workspace_id or "",
+           request_json=request_json, request_sha256=hashlib.sha256(request_json.encode()).hexdigest())
+        return await self._resume_xcsh_generation(row["id"], generation=0, session_id=session_id or "",
+                                                   text=text or "", label="xcsh-native-uat")
+
+    async def _resume_xcsh_generation(self, task_id: str, *, generation: int, session_id: str,
+                                      text: str, label: str, source_generation: int | None = None,
+                                      source_turn_id: str | None = None,
+                                      source_event_revision: int | None = None) -> dict[str, Any]:
+        row = self.db.task(task_id)
+        if row is None or row["work_kind"] != "xcsh" or not row["workspace_id"]:
+            raise ValueError("XCSH resume lacks an admitted task workspace")
+        immutable = {"execution_id": task_id, "generation": generation, "session_id": session_id,
+                     "cwd": row["cwd"], "workspace_id": row["workspace_id"], "text": text}
+        digest = hashlib.sha256(json.dumps(immutable, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        request_json = json.dumps(immutable, sort_keys=True, separators=(",", ":"))
+        binding = self.db.claim_native_generation(task_id, generation=generation, session_id=session_id,
+                                                  workspace_id=row["workspace_id"], request_sha256=digest,
+                                                  request_json=request_json, source_generation=source_generation,
+                                                  source_turn_id=source_turn_id,
+                                                  source_event_revision=source_event_revision)
+        if binding["backend_execution_id"] is not None:
+            if (int(row["run_generation"]) != generation or row["pane_id"] != binding["pane_id"]
+                    or row["tab_id"] != binding["tab_id"] or row["state"] == "unknown"):
+                row = self.db.update(
+                    task_id, event="xcsh_resume_receipt_recovered", state="starting",
+                    run_generation=generation, pane_id=binding["pane_id"], tab_id=binding["tab_id"],
+                    agent_session_id=binding["session_id"], native_turn_id=None, herdr_state="starting",
+                    session_state="live", cleanup_deadline=None, terminal_reported_at=None, terminal_event_id=None,
+                    summary="Recovered the durable XCSH execution.resume receipt after an interrupted response.",
+                )
+            return public_task(row) | {"admitted": False, "generation_replayed": True,
+                                       "backend_execution_id": binding["backend_execution_id"]}
+        # The exact durable claim is the only request we can replay after an
+        # unknown response. Herdr's generation admission is idempotent, so
+        # this neither duplicates child input nor allocates a new authority.
         try:
-            result = await self.herdr.request("execution.start", {
-                "execution_id": row["id"], "workspace_id": workspace_id, "cwd": cwd,
-                "label": "xcsh-native-uat", "mode": "argv", "argv": argv,
-            }, timeout=30)
+            result = await self.herdr.request("execution.resume", immutable | {"label": label}, timeout=30)
             execution = result.get("execution", result)
-            if execution.get("execution_id") != row["id"] or not execution.get("pane_id") or not execution.get("tab_id"):
-                raise RuntimeError("Herdr returned incomplete native execution provenance")
-            updated = self.db.update(row["id"], event="xcsh_execution_admitted", state="starting",
-                                     pane_id=execution["pane_id"], tab_id=execution["tab_id"],
-                                     herdr_state=execution.get("state", "starting"), session_state="live",
-                                     summary="Installed XCSH execution admitted; awaiting semantic journal identity.")
-            return public_task(updated) | {"admitted": bool(result.get("admitted", True))}
+            binding = self.db.admit_native_generation(task_id, generation, execution)
+            updated = self.db.update(
+                task_id, event="xcsh_execution_resumed", state="starting", started_at=self.clock(),
+                run_generation=generation, pane_id=binding["pane_id"], tab_id=binding["tab_id"],
+                agent_session_id=session_id, native_turn_id=None, herdr_state=execution.get("state", "starting"),
+                session_state="live", cleanup_deadline=None, terminal_reported_at=None, terminal_event_id=None,
+                summary="Installed XCSH execution.resume admitted; awaiting semantic journal identity.",
+            )
+            admitted = bool(result.get("admitted", True))
+            return public_task(updated) | {"admitted": admitted,
+                                           "generation_replayed": not admitted,
+                                           "backend_execution_id": binding["backend_execution_id"]}
         except Exception as exc:
-            # A transport failure can happen after Herdr creates the process.
-            # Preserve the single claim and require journal/reconciliation; do
-            # not retry into a second XCSH process or mark it as a failure.
-            updated = self.db.update(row["id"], event="xcsh_admission_unverified", state="unknown",
-                                     herdr_state="unknown", session_state="unknown",
-                                     summary=f"Installed XCSH admission outcome is unverified: {str(exc)[:900]}")
+            updated = self.db.update(task_id, event="xcsh_resume_unverified", state="unknown",
+                                     herdr_state="unknown", session_state="admitting",
+                                     summary=f"XCSH execution.resume outcome is unverified: {str(exc)[:900]}")
             asyncio.create_task(self.emit_attention(updated))
             return public_task(updated) | {"admitted": False, "admission_uncertain": True}
+
+    async def _reconcile_native_xcsh_admissions(self, task_id: str | None = None) -> None:
+        """Recover claimed/resume-unknown generations using only their exact claim."""
+        rows = self.db.conn.execute(
+            "SELECT * FROM native_execution_generations WHERE backend_execution_id IS NULL" +
+            (" AND task_id=?" if task_id else ""), (() if task_id is None else (task_id,)),
+        ).fetchall()
+        for binding in rows:
+            task = self.db.task(binding["task_id"])
+            if task is None:
+                continue
+            request = json.loads(binding["request_json"])
+            try:
+                result = await self.herdr.request("execution.resume", request | {"label": "xcsh-native-uat"}, timeout=30)
+                execution = result.get("execution", result)
+                admitted = self.db.admit_native_generation(task["id"], int(binding["generation"]), execution)
+                if int(binding["generation"]) == int(task["run_generation"]):
+                    self.db.update(task["id"], event="xcsh_resume_reconciled", state="starting",
+                                   pane_id=admitted["pane_id"], tab_id=admitted["tab_id"],
+                                   agent_session_id=admitted["session_id"], native_turn_id=None,
+                                   herdr_state=execution.get("state", "starting"), session_state="live",
+                                   summary="XCSH execution.resume reconciliation recovered the claimed child.")
+            except Exception as exc:
+                LOG.debug("native XCSH resume reconciliation pending for %s/%s: %s", task["id"], binding["generation"], exc)
+        actions = self.db.conn.execute(
+            "SELECT * FROM native_execution_actions WHERE kind='cancel' AND state='claimed'" +
+            (" AND task_id=?" if task_id else ""), (() if task_id is None else (task_id,)),
+        ).fetchall()
+        for action in actions:
+            try:
+                result = await self.herdr.request("execution.cancel", {"execution_id": action["backend_execution_id"]}, timeout=10)
+                execution = result.get("execution", result)
+                if execution.get("execution_id") != action["backend_execution_id"]:
+                    raise RuntimeError("cancellation reconciliation received a foreign backend receipt")
+                self.db.complete_native_action(action["action_key"], execution)
+            except Exception as exc:
+                LOG.debug("native XCSH cancellation reconciliation pending for %s: %s", action["action_key"], exc)
 
     async def create_feature(self, params: dict[str, Any]) -> dict[str, Any]:
         feature_id = bounded(params.get("feature_id"), 120, "feature_id", required=True)
@@ -2401,6 +2800,10 @@ class Broker:
                 if state in TERMINAL_STATES or state == "unknown":
                     self.db.feature_task_terminal(task_id, state, self.db.task(task_id)["summary"])
                     await self.advance_for_task(task_id)
+                    if state in TERMINAL_STATES:
+                        # Semantic terminal evidence, not process exit, owns
+                        # cleanup scheduling for the current child.
+                        await self._verified_terminal(task_id)
                 applied.append({"task_id": task_id, "state": state})
         return {"enabled": True, "applied": applied, "last_revision": self.db.native_turn_cursor(cursor_key)}
 
@@ -3339,21 +3742,28 @@ class Broker:
     async def _continue_xcsh_task(self, row: sqlite3.Row, text: str) -> dict[str, Any]:
         """Continue only the same admitted XCSH pane/session generation."""
         if row["state"] not in {"waiting_human", "blocked"}:
+            replay = self.db.current_native_generation(row["id"])
+            if replay is not None and replay["source_generation"] is not None:
+                request = json.loads(replay["request_json"])
+                if request.get("text") != text:
+                    raise ValueError("XCSH continuation conflicts with the durable source-turn action")
+                return await self._resume_xcsh_generation(
+                    row["id"], generation=int(replay["generation"]), session_id=str(replay["session_id"]),
+                    text=text, label="xcsh-native-continuation", source_generation=int(replay["source_generation"]),
+                    source_turn_id=str(replay["source_turn_id"] or ""),
+                    source_event_revision=int(replay["source_event_revision"]),
+                )
             raise ValueError("XCSH continuation requires a semantic waiting state")
-        if not row["pane_id"] or not row["agent_session_id"]:
+        binding = self.db.current_native_generation(row["id"])
+        if binding is None or not row["agent_session_id"] or binding["session_id"] != row["agent_session_id"]:
             raise RuntimeError("XCSH continuation lacks an admitted semantic identity")
-        # The installed reporter creates the new turn identity.  Clear only
-        # the old turn, retain its session/pane provenance, and require the
-        # next starting/working report to bind the incremented generation.
-        await self.herdr.request("pane.send_text", {"pane_id": row["pane_id"], "text": text}, timeout=10)
-        await self.herdr.request("pane.send_keys", {"pane_id": row["pane_id"], "keys": ["enter"]}, timeout=10)
-        updated = self.db.update(
-            row["id"], event="xcsh_continuation_sent", state="working", question=None,
-            native_turn_id=None, run_generation=int(row["run_generation"]) + 1,
-            terminal_reported_at=None, finished_at=None, cleanup_deadline=None,
-            summary="Continuation sent to the same admitted XCSH session; awaiting semantic journal.",
+        self._cancel_cleanup(row["id"])
+        return await self._resume_xcsh_generation(
+            row["id"], generation=int(binding["generation"]) + 1,
+            session_id=str(binding["session_id"]), text=text, label="xcsh-native-continuation",
+            source_generation=int(binding["generation"]), source_turn_id=str(binding["turn_id"] or ""),
+            source_event_revision=int(binding["last_event_revision"]),
         )
-        return public_task(updated)
 
     async def request_stop(self, params: dict[str, Any]) -> dict[str, Any]:
         task_id = bounded(params.get("task_id"), 80, "task_id", required=True)
@@ -3378,12 +3788,25 @@ class Broker:
                     summary="Graceful native cancellation requested. Forced termination requires separate explicit confirmation.",
                     stop_requested_at=self.clock(),
                 )
+                execution_id = task_id
+                if row["work_kind"] == "xcsh":
+                    binding = self.db.current_native_generation(task_id or "")
+                    if binding is None or binding["backend_execution_id"] is None:
+                        raise RuntimeError("XCSH cancellation lacks a current admitted backend execution")
+                    execution_id = binding["backend_execution_id"]
+                    action = self.db.claim_native_cancel(task_id or "", int(binding["generation"]), execution_id)
+                    if action["state"] == "completed":
+                        return public_task(self.db.task(task_id or ""))  # type: ignore[arg-type]
                 result = await self.herdr.request(
-                    "execution.cancel", {"execution_id": task_id}, timeout=10
+                    "execution.cancel", {"execution_id": execution_id}, timeout=10
                 )
                 if row["work_kind"] == "command":
                     await self._apply_native_execution(task_id or "", result["execution"])
                 else:
+                    execution = result.get("execution", result)
+                    if execution.get("execution_id") != execution_id:
+                        raise RuntimeError("Herdr cancellation receipt is for a different backend execution")
+                    self.db.complete_native_action(action["action_key"], execution)
                     self.db.update(
                         task_id or "", event="xcsh_cancel_requested", stop_requested_at=self.clock(),
                         herdr_state=result.get("execution", result).get("state", "cancelling"),

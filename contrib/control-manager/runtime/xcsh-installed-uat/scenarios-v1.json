@@ -2,14 +2,14 @@
   "catalog_version": 1,
   "kind": "installed_runtime_synthesized_prompts",
   "scenarios": [
-    {"id":"success","prompt":"[isolated UAT] Return the exact local fixture label after reading it. Do not use network, providers, credentials, or mutate files.","expected_states":["starting","working","completed"],"expected_generations":[0,0,0]},
-    {"id":"failure","prompt":"[isolated UAT] Read the deliberately absent local fixture and report the controlled failure. Do not create it or use network/providers.","expected_states":["starting","working","failed"]},
-    {"id":"waiting_input","prompt":"[isolated UAT] Stop and request the supplied local fixture label before proceeding. Do not guess it.","expected_states":["starting","waiting_input"]},
-    {"id":"cancel","prompt":"[isolated UAT] Wait for the harness cancellation without side effects.","expected_states":["starting","working","cancelled"]},
-    {"id":"continuation","prompt":"[isolated UAT] Request the local fixture label, then after a harness continuation return it exactly.","expected_states":["starting","waiting_input","working","completed"],"expected_generations":[0,0,1,1]},
-    {"id":"reconnect_replay","prompt":"[isolated UAT] Return the local fixture label while the harness reconnects and replays journal reads.","expected_states":["starting","working","completed"]},
-    {"id":"generation_supersession","prompt":"[isolated UAT] Request the fixture label, accept one continuation only, and return its value.","expected_states":["starting","waiting_input","working","completed"],"expected_generations":[0,0,1,1]},
-    {"id":"cleanup","prompt":"[isolated UAT] Complete the local fixture-label check and permit owned-tab cleanup after terminal journal evidence.","expected_states":["starting","working","completed"]},
-    {"id":"restart_loss","prompt":"[isolated UAT] Wait without side effects while the disposable runtime simulates its documented restart/loss boundary.","expected_states":["starting","working","lost"]}
+    {"id":"success","prompt":"[isolated UAT] Read {fixture_path} and return only its exact contents without the trailing newline.","expected_states":["starting","working","completed"],"expected_generations":[0,0,0],"expected_result":"fixture_value"},
+    {"id":"failure","prompt":"[isolated UAT] Execute the producer-provided unhandled local-operation fixture for {fixture_path}.","expected_states":["starting","working","failed"],"expected_generations":[0,0,0]},
+    {"id":"waiting_input","prompt":"[isolated UAT] Enter the producer-provided awaiting-user fixture flow for {fixture_path}.","expected_states":["starting","waiting_input"],"expected_generations":[0,0]},
+    {"id":"cancel","prompt":"[isolated UAT] Wait for the harness cancellation without side effects.","expected_states":["starting","working","cancelled"],"expected_generations":[0,0,0]},
+    {"id":"continuation","prompt":"[isolated UAT] Enter the producer awaiting-user flow, then after one producer continuation read {fixture_path} and return only its value.","expected_states":["starting","waiting_input","working","completed"],"expected_generations":[0,0,1,1],"expected_result":"fixture_value"},
+    {"id":"reconnect_replay","prompt":"[isolated UAT] Read {fixture_path} and return only its value while the producer transport is forcibly replayed.","expected_states":["starting","working","completed"],"expected_generations":[0,0,0],"expected_result":"fixture_value"},
+    {"id":"generation_supersession","prompt":"[isolated UAT] Enter the producer awaiting-user flow, accept one continuation, then return only the value from {fixture_path}.","expected_states":["starting","waiting_input","working","completed"],"expected_generations":[0,0,1,1],"expected_result":"fixture_value"},
+    {"id":"cleanup","prompt":"[isolated UAT] Read {fixture_path}, return only its value, then permit owned-tab cleanup after terminal journal evidence.","expected_states":["starting","working","completed"],"expected_generations":[0,0,0],"expected_result":"fixture_value"},
+    {"id":"restart_loss","prompt":"[isolated UAT] Wait in the producer-supported open-turn flow while the disposable runtime performs its restart boundary.","expected_states":["starting","working","interrupted"],"expected_generations":[0,0,0]}
   ]
 }
