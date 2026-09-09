@@ -20,9 +20,13 @@ ALLOWED_TYPES = {
 SUBJECT_RE = re.compile(r"^(?P<kind>[a-z]+)(?:\([^)]+\))?!?:\s+\S")
 
 
-def git_subjects(rev_range: str) -> list[str]:
+def git_subjects(rev_range: str, *, first_parent: bool = False) -> list[str]:
+    command = ["git", "log"]
+    if first_parent:
+        command.append("--first-parent")
+    command.extend(["--no-merges", "--pretty=format:%s", rev_range])
     output = subprocess.check_output(
-        ["git", "log", "--no-merges", "--pretty=format:%s", rev_range], text=True
+        command, text=True
     ).strip()
     return [line.strip() for line in output.splitlines() if line.strip()]
 
@@ -44,12 +48,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Validate conventional commit subjects")
     parser.add_argument("subjects", nargs="*")
     parser.add_argument("--range", dest="rev_range")
+    parser.add_argument(
+        "--first-parent",
+        action="store_true",
+        help="validate only non-merge commits newly introduced on the first-parent path",
+    )
     parser.add_argument("--message-file")
     args = parser.parse_args()
 
     subjects = list(args.subjects)
     if args.rev_range:
-        subjects.extend(git_subjects(args.rev_range))
+        subjects.extend(git_subjects(args.rev_range, first_parent=args.first_parent))
     if args.message_file:
         subject = commit_message_subject(Path(args.message_file))
         if subject:

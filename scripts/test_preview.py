@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -213,6 +214,53 @@ file: ../../../public/assets/logo.svg
 
 
 class ConventionalCommitTests(unittest.TestCase):
+    def test_pr_and_push_ranges_preserve_conventional_enforcement(self):
+        """PR commits are checked before merge; postmerge checks stay first-parent-only."""
+        validator = Path(__file__).with_name("conventional_commits.py")
+
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+
+            def git(*args: str) -> str:
+                return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
+
+            def commit(subject: str, content: str) -> str:
+                (repo / "history.txt").write_text(content, encoding="utf-8")
+                git("add", "history.txt")
+                git("commit", "-m", subject)
+                return git("rev-parse", "HEAD")
+
+            git("init", "--initial-branch=main")
+            git("config", "user.name", "Herdr test")
+            git("config", "user.email", "test@example.invalid")
+            base = commit("chore: seed validation fixture", "base\n")
+            git("switch", "--create", "feature")
+            pr_head = commit("style: invalid PR constituent", "feature\n")
+
+            def validate(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [sys.executable, str(validator), *args],
+                    cwd=repo,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+            pr_result = validate("--range", f"{base}..{pr_head}")
+            self.assertNotEqual(pr_result.returncode, 0)
+            self.assertIn("style: invalid PR constituent", pr_result.stdout)
+
+            git("switch", "main")
+            git("merge", "--no-ff", "feature", "-m", "feat: merge validated feature")
+            merge = git("rev-parse", "HEAD")
+            self.assertNotEqual(validate("--range", f"{base}..{merge}").returncode, 0)
+            self.assertEqual(validate("--first-parent", "--range", f"{base}..{merge}").returncode, 0)
+
+            direct_head = commit("style: invalid direct push", "direct\n")
+            direct_result = validate("--first-parent", "--range", f"{merge}..{direct_head}")
+            self.assertNotEqual(direct_result.returncode, 0)
+            self.assertIn("style: invalid direct push", direct_result.stdout)
+
     @mock.patch.object(conventional_commits.subprocess, "check_output")
     def test_git_subjects_ignores_github_merge_wrappers(self, check_output):
         check_output.return_value = "fix: preserve UTF-8 tails\n"
@@ -226,10 +274,31 @@ class ConventionalCommitTests(unittest.TestCase):
             text=True,
         )
 
+    @mock.patch.object(conventional_commits.subprocess, "check_output")
+    def test_git_subjects_can_limit_push_validation_to_first_parent(self, check_output):
+        check_output.return_value = "fix: preserve UTF-8 tails\n"
+
+        self.assertEqual(
+            conventional_commits.git_subjects("before..after", first_parent=True),
+            ["fix: preserve UTF-8 tails"],
+        )
+        check_output.assert_called_once_with(
+            [
+                "git",
+                "log",
+                "--first-parent",
+                "--no-merges",
+                "--pretty=format:%s",
+                "before..after",
+            ],
+            text=True,
+        )
+
     def test_valid_subjects_allow_scopes_and_bang(self):
         self.assertTrue(conventional_commits.valid_subject("fix(update): handle preview"))
         self.assertTrue(conventional_commits.valid_subject("feat!: change config"))
         self.assertFalse(conventional_commits.valid_subject("update preview channel"))
+        self.assertFalse(conventional_commits.valid_subject("style: format native settlement regression"))
 
     def test_commit_message_subject_skips_comments(self):
         with tempfile.TemporaryDirectory() as tmp:
