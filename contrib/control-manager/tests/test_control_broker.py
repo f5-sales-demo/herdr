@@ -27,6 +27,27 @@ class FakeHerdr:
     async def request(self, method, params=None, timeout=65):
         params = params or {}
         self.calls.append((method, params))
+        if method == "execution.resume":
+            semantic, generation = params["execution_id"], params["generation"]
+            existing = next((value for value in self.executions.values()
+                             if value.get("semantic_execution_id") == semantic and value.get("generation") == generation), None)
+            if existing:
+                return {"execution": existing, "admitted": False}
+            self.seq += 1
+            wid = params["workspace_id"]
+            tid, pid = f"{wid}:t{self.seq}", f"{wid}:p{self.seq}"
+            backend = f"backend-{semantic}-{generation}"
+            self.tabs[tid] = {"tab_id": tid, "workspace_id": wid, "label": params.get("label"), "number": 1, "pane_count": 1}
+            self.panes[pid] = {"pane_id": pid, "workspace_id": wid, "tab_id": tid, "agent_status": "working", "cwd": params.get("cwd")}
+            execution = {"execution_id": backend, "backend_execution_id": backend,
+                         "semantic_execution_id": semantic, "generation": generation,
+                         "native_producer": "xcsh", "producer_session_id": params["session_id"], "workspace_id": wid,
+                         "cwd": params["cwd"], "command": {"mode": "argv", "argv": ["xcsh", "--resume", params["session_id"], params["text"]]},
+                         "injected_env": {"HERDR_EXECUTION_ID": semantic, "HERDR_EXECUTION_GENERATION": str(generation)},
+                         "state": "running", "pane_id": pid, "tab_id": tid,
+                         "exit_code": None, "signal_name": None, "stdout_tail": "", "output_complete": False}
+            self.executions[backend] = execution
+            return {"execution": execution, "admitted": True}
         if method == "execution.start":
             existing = self.executions.get(params["execution_id"])
             if existing:
@@ -589,6 +610,13 @@ class StateTests(unittest.TestCase):
             db = StateDB(Path(raw) / "state.sqlite3")
             task = db.add_task({"id": "xcsh-turn", "target": "xcsh-turn", "cwd": raw, "prompt": "x", "summary": "queued", "parent_id": None, "priority": "normal", "work_kind": "xcsh"})
             db.update(task["id"], state="working", pane_id="pane-1", agent_session_id="session-1", native_turn_id="turn-1")
+            # Synthetic component fixture: it builds the same immutable
+            # admission ledger as execution.resume, rather than injecting a
+            # fabricated semantic journal record as acceptance evidence.
+            request = {"execution_id": task["id"], "generation": 0, "session_id": "session-1", "workspace_id": "w1", "cwd": raw, "text": "x"}
+            encoded = json.dumps(request, sort_keys=True, separators=(",", ":"))
+            db.claim_native_generation(task["id"], generation=0, session_id="session-1", workspace_id="w1", request_sha256=hashlib.sha256(encoded.encode()).hexdigest(), request_json=encoded)
+            db.admit_native_generation(task["id"], 0, {"execution_id": "backend-1", "backend_execution_id": "backend-1", "semantic_execution_id": task["id"], "generation": 0, "native_producer": "xcsh", "producer_session_id": "session-1", "workspace_id": "w1", "cwd": raw, "command": {"mode": "argv", "argv": ["xcsh", "--resume", "session-1", "x"]}, "injected_env": {"HERDR_EXECUTION_ID": task["id"], "HERDR_EXECUTION_GENERATION": "0"}, "tab_id": "tab-1", "pane_id": "pane-1"})
             base = {"execution_id": "xcsh-turn", "pane_id": "pane-1", "producer": "xcsh", "session_id": "session-1", "turn_id": "turn-1", "generation": 0}
             self.assertEqual(db.apply_native_turn({"revision": 1, "report": base | {"event_revision": 1, "state": "starting"}}), ("xcsh-turn", "starting"))
             result = "accepted semantic result"
@@ -955,6 +983,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
     async def test_xcsh_generation_history_rejects_foreign_panes_and_settles_old_child(self):
         """Synthetic component fixture for ledger rules; not UAT evidence."""
         workspace = await self.configure_control_workspace()
+        self.broker.config_path.write_text(json.dumps({"agent_turn_consumer_enabled": True, "agent_turn_producer": "xcsh"}))
         task = await self.broker.native_xcsh_admit({
             "target": "xcsh-generations", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
             "text": "safe", "session_id": "session-history", "workspace_id": workspace["workspace"]["workspace_id"],
@@ -985,9 +1014,11 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         await self.broker.request_stop({"task_id": task["id"]})
         cancelled = [call for call in self.broker.herdr.calls if call[0] == "execution.cancel"]
         self.assertEqual(cancelled[-1][1]["execution_id"], current["backend_execution_id"])
-        self.broker.db.apply_native_turn({"revision": 5, "report": current_report | {"event_revision": 2, "state": "cancelled", "reason": "native cancel"}})
-        await self.broker._verified_terminal(task["id"])
-        await self.broker._cleanup_after(task["id"], 0)
+        self.broker.herdr.agent_turns = [
+            {"revision": 5, "report": current_report | {"event_revision": 2, "state": "cancelled", "reason": "native cancel"}},
+        ]
+        await self.broker.consume_native_turns()
+        await asyncio.sleep(0.08)
         self.assertNotIn(current["tab_id"], self.broker.herdr.tabs)
 
     async def test_xcsh_cancel_claim_recovers_after_ambiguous_backend_response(self):
@@ -1830,6 +1861,10 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
                                         "prompt": "native", "summary": "queued", "parent_id": None,
                                         "priority": "normal", "work_kind": "xcsh"})
         self.broker.db.update(task["id"], state="working", pane_id="w1:p1", agent_session_id="session-1", native_turn_id="turn-1")
+        request = {"execution_id": task["id"], "generation": 0, "session_id": "session-1", "workspace_id": "w1", "cwd": str(self.root), "text": "native"}
+        encoded = json.dumps(request, sort_keys=True, separators=(",", ":"))
+        self.broker.db.claim_native_generation(task["id"], generation=0, session_id="session-1", workspace_id="w1", request_sha256=hashlib.sha256(encoded.encode()).hexdigest(), request_json=encoded)
+        self.broker.db.admit_native_generation(task["id"], 0, {"execution_id": "backend-journal", "backend_execution_id": "backend-journal", "semantic_execution_id": task["id"], "generation": 0, "native_producer": "xcsh", "producer_session_id": "session-1", "workspace_id": "w1", "cwd": str(self.root), "command": {"mode": "argv", "argv": ["xcsh", "--resume", "session-1", "native"]}, "injected_env": {"HERDR_EXECUTION_ID": task["id"], "HERDR_EXECUTION_GENERATION": "0"}, "tab_id": "w1:t1", "pane_id": "w1:p1"})
         self.broker.db.create_feature({"feature_id": "journal-feature", "target": "journal-feature", "cwd": str(self.root),
                                        "title": "Journal", "scope": "end_to_end", "required_stages": ["implementation", "tests"],
                                        "children": {"implementation": task["id"]}, "actions": {"tests": {"prompt": "must not run"}}})

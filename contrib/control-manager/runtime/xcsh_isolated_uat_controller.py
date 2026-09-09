@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Durable fail-closed controller for owned disposable XCSH UAT runtimes."""
 from __future__ import annotations
-import argparse, hashlib, json, os, secrets, sqlite3, subprocess, time, uuid
+import argparse, hashlib, json, os, re, secrets, sqlite3, subprocess, time, uuid
 from pathlib import Path
 from typing import Any, Callable
 
 ALLOWED = {"reconnect_replay", "generation_supersession", "cleanup", "restart_loss"}
+CANONICAL_XCSH_SESSION_ID = re.compile(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$")
 
 class ControllerError(RuntimeError): pass
 
@@ -175,9 +176,27 @@ class DisposableHerdrController(IsolatedController):
         except json.JSONDecodeError as exc:
             raise ControllerError("XCSH session creation did not return a JSON receipt") from exc
         session = receipt.get("session_id") if isinstance(receipt, dict) else None
-        if not isinstance(session, str) or not session:
-            raise ControllerError("XCSH session creation receipt lacks session_id")
+        if not isinstance(session, str) or not CANONICAL_XCSH_SESSION_ID.fullmatch(session):
+            raise ControllerError("XCSH session creation receipt lacks canonical sessionManager UUID")
         return session
+
+    def probe_xcsh_capabilities(self, xcsh_binary: Path, expected_sha256: str, argv: list[str], cwd: Path) -> set[str]:
+        """Read the producer contract from the exact measured binary's JSON receipt."""
+        if (not xcsh_binary.is_file() or hashlib.sha256(xcsh_binary.read_bytes()).hexdigest() != expected_sha256
+                or not isinstance(argv, list) or not argv or any(not isinstance(item, str) or not item for item in argv)
+                or Path(argv[0]).resolve() != xcsh_binary.resolve()):
+            raise ControllerError("controller requires canonical measured XCSH capability-probe argv")
+        call = subprocess.run(argv, cwd=cwd, check=False, capture_output=True, text=True)
+        if call.returncode:
+            raise ControllerError(f"owned XCSH capability probe failed: {call.stderr.strip()[:500]}")
+        try:
+            receipt = json.loads(call.stdout)
+        except json.JSONDecodeError as exc:
+            raise ControllerError("XCSH capability probe did not return a JSON receipt") from exc
+        capabilities = receipt.get("capabilities") if isinstance(receipt, dict) else None
+        if not isinstance(capabilities, list) or any(not isinstance(item, str) or not item for item in capabilities):
+            raise ControllerError("XCSH capability receipt lacks a string capabilities list")
+        return set(capabilities)
 
     def _restart(self) -> dict[str,Any]:
         session,service=self.ownership["session_id"],self.ownership["service_id"]

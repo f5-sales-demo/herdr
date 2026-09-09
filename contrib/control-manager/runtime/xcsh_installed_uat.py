@@ -34,6 +34,52 @@ class PreflightError(RuntimeError):
     pass
 
 
+def prepare_fixture(directory: Path) -> dict[str, str]:
+    """Create one owned, random, mode-0600 local oracle fixture.
+
+    This is deliberately only fixture provisioning.  It does not create an
+    XCSH backend, report a semantic turn, or constitute installed-UAT proof.
+    """
+    directory = directory.resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    value = f"xcsh-uat-{secrets.token_urlsafe(24)}"
+    path = directory / f"fixture-{secrets.token_hex(12)}.txt"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as output:
+        output.write(value + "\n")
+    return {"path": str(path), "value": value,
+            "sha256": hashlib.sha256((value + "\n").encode()).hexdigest()}
+
+
+def validate_fixture(runtime: dict[str, Any], *, verify_file: bool) -> dict[str, str]:
+    fixture = runtime.get("fixture")
+    if not isinstance(fixture, dict):
+        raise PreflightError("runtime must bind an owned prepared fixture")
+    path, value, digest = fixture.get("path"), fixture.get("value"), fixture.get("sha256")
+    if (not isinstance(path, str) or not path or not isinstance(value, str) or not value or
+            not isinstance(digest, str) or len(digest) != 64):
+        raise PreflightError("fixture requires path, random expected value, and sha256")
+    expected = hashlib.sha256((value + "\n").encode()).hexdigest()
+    if digest.lower() != expected:
+        raise PreflightError("fixture sha256 does not bind its expected value")
+    if verify_file:
+        fixture_path = Path(path)
+        if not fixture_path.is_file() or fixture_path.is_symlink():
+            raise PreflightError("prepared fixture is not a regular file")
+        if fixture_path.read_bytes() != (value + "\n").encode():
+            raise PreflightError("prepared fixture content does not match its expected value")
+    return {"path": path, "value": value, "sha256": digest}
+
+
+def require_execution_contract(observed_capabilities: set[str]) -> None:
+    """Gate execution on a receipt from the measured XCSH binary, never JSON input."""
+    missing = sorted(REQUIRED_PRODUCER_CAPABILITIES - observed_capabilities)
+    if missing:
+        raise PreflightError(
+            "installed XCSH producer lacks required real-execution capabilities: " + ", ".join(missing)
+        )
+
+
 def unix_request(path: Path, method: str, params: dict[str, Any]) -> Any:
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.settimeout(15)
@@ -147,8 +193,15 @@ def preflight(manifest: dict[str, Any], catalog: dict[str, Any], *, probe: bool 
         raise PreflightError("manifest must bind isolated broker_socket and herdr_socket")
     if not isinstance(runtime.get("workspace_id"), str) or not runtime["workspace_id"]:
         raise PreflightError("manifest must bind a dedicated Herdr workspace_id")
-    if not isinstance(runtime.get("xcsh_session_dir"), str) or not Path(runtime["xcsh_session_dir"]).is_absolute():
-        raise PreflightError("manifest must bind an isolated absolute xcsh_session_dir")
+    session_create = runtime.get("xcsh_session_create_argv")
+    if (not isinstance(session_create, list) or not session_create or any(not isinstance(item, str) or not item for item in session_create)
+            or session_create[0] != runtime.get("xcsh_executable")):
+        raise PreflightError("manifest must bind canonical XCSH JSON session-create argv for execution.resume")
+    capability_probe = runtime.get("xcsh_capability_probe_argv")
+    if (not isinstance(capability_probe, list) or not capability_probe
+            or any(not isinstance(item, str) or not item for item in capability_probe)
+            or capability_probe[0] != runtime.get("xcsh_executable")):
+        raise PreflightError("manifest must bind canonical XCSH JSON capability-probe argv")
     if not isinstance(runtime.get("xcsh_executable"), str) or not runtime["xcsh_executable"]:
         raise PreflightError("manifest must bind the measured xcsh_executable")
     declared_executable_digest = runtime.get("xcsh_executable_sha256")
@@ -369,6 +422,15 @@ def execute(manifest: dict[str, Any], catalog: dict[str, Any], *, run_id: str | 
             controller: Any | None = None) -> dict[str, Any]:
     preflight(manifest, catalog, probe=True)
     controller = controller or controller_from_manifest(manifest)
+    runtime = manifest["runtime"]
+    try:
+        observed_capabilities = controller.probe_xcsh_capabilities(
+            Path(runtime["xcsh_executable"]), runtime["xcsh_executable_sha256"],
+            list(runtime["xcsh_capability_probe_argv"]), Path(runtime.get("cwd", "/")),
+        )
+    except Exception as exc:
+        raise PreflightError(f"controller could not authoritatively probe measured XCSH capabilities: {exc}") from exc
+    require_execution_contract(observed_capabilities)
     run_id = run_id or uuid.uuid4().hex
     cases = [execute_case(manifest, case, run_id=run_id, controller=controller) for case in catalog["scenarios"]]
     return {"run_id": run_id, "pass": all(item["pass"] for item in cases), "accepted": False,

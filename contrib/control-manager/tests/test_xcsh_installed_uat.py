@@ -17,7 +17,7 @@ def manifest():
     return {"schema_version": 1, "isolation": "dedicated_disposable_runtime",
             "artifacts": {name: {"release_version": "1.0.0", "artifact_uri": f"file:///isolated/{name}", "sha256": digest}
                           for name in ("xcsh", "herdr", "manager")},
-            "runtime": {"broker_socket": "/isolated/control.sock", "herdr_socket": "/isolated/herdr.sock", "workspace_id": "w-isolated", "xcsh_session_create_argv":["/isolated/xcsh","--create-session-json"], "fixture":{"path":"/isolated/fixture.txt","value":value,"sha256":hashlib.sha256((value+"\n").encode()).hexdigest()}, "producer_capabilities":["deterministic_offline_backend","unhandled_local_operation_error","awaiting_user","continuation_generation","execution_cancelled","transport_replay","restart_interrupted"], "xcsh_archive_path":"/isolated/xcsh.tar.gz", "xcsh_archive_member":"xcsh", "xcsh_archive_member_sha256":"a" * 64, "xcsh_executable": "/isolated/xcsh", "xcsh_executable_sha256": "a" * 64},
+            "runtime": {"broker_socket": "/isolated/control.sock", "herdr_socket": "/isolated/herdr.sock", "workspace_id": "w-isolated", "xcsh_session_create_argv":["/isolated/xcsh","--create-session-json"], "xcsh_capability_probe_argv":["/isolated/xcsh","--capabilities-json"], "fixture":{"path":"/isolated/fixture.txt","value":value,"sha256":hashlib.sha256((value+"\n").encode()).hexdigest()}, "xcsh_archive_path":"/isolated/xcsh.tar.gz", "xcsh_archive_member":"xcsh", "xcsh_archive_member_sha256":"a" * 64, "xcsh_executable": "/isolated/xcsh", "xcsh_executable_sha256": "a" * 64},
             "required_capabilities": ["native_xcsh_admit", "agent_turn_journal"]}
 
 

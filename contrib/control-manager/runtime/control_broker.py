@@ -1617,10 +1617,19 @@ class StateDB:
         backend = execution.get("backend_execution_id") or execution.get("execution_id")
         session = execution.get("producer_session_id")
         workspace, tab, pane = (execution.get(key) for key in ("workspace_id", "tab_id", "pane_id"))
+        request = json.loads(row["request_json"])
+        expected_argv = ["xcsh", "--resume", row["session_id"], request.get("text")]
+        command = execution.get("command")
+        injected = execution.get("injected_env")
         if (semantic != row["semantic_execution_id"] or execution.get("generation") != generation
-                or session != row["session_id"] or workspace != row["workspace_id"]
+                or execution.get("native_producer") != "xcsh" or session != row["session_id"]
+                or execution.get("cwd") != request.get("cwd") or workspace != row["workspace_id"]
+                or command != {"mode": "argv", "argv": expected_argv}
+                or not isinstance(injected, dict)
+                or injected.get("HERDR_EXECUTION_ID") != row["semantic_execution_id"]
+                or injected.get("HERDR_EXECUTION_GENERATION") != str(generation)
                 or not all(isinstance(value, str) and value for value in (backend, tab, pane))):
-            raise ValueError("Herdr resume receipt conflicts with immutable native generation provenance")
+            raise ValueError("Herdr resume receipt conflicts with immutable native generation provenance or argv")
         self.conn.execute("BEGIN IMMEDIATE")
         try:
             latest = self.native_generation(task_id, generation)
