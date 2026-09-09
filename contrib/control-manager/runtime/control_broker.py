@@ -290,6 +290,76 @@ def measure_xcsh_executable(raw: str | None, *, expected_sha256: str | None = No
     return {"canonical_path": str(canonical), "sha256": measured}
 
 
+def measure_native_launch(raw: Any, *, expected_executable_sha256: str | None = None) -> dict[str, Any]:
+    """Validate and independently measure the protocol-22 ``native_launch`` v3.
+
+    The launch is a closed typed value, not a transport for arbitrary XCSH
+    argv, environment, identity, or secrets.  Its session header hash covers
+    the raw first JSONL line *including* its mandatory LF, exactly as Herdr's
+    native-launch contract specifies.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError("native_launch object is required")
+    allowed = {"version", "xcsh_executable", "session_dir", "session_path", "session_header",
+               "model", "discovery", "tools", "interactive", "lifecycle_mode"}
+    if set(raw) != allowed:
+        raise ValueError("native_launch must contain exactly the protocol-22 v3 fields")
+    if raw.get("version") != 3:
+        raise ValueError("native_launch.version must be 3")
+    executable = measure_xcsh_executable(raw.get("xcsh_executable"), expected_sha256=expected_executable_sha256)
+    raw_dir, raw_path = raw.get("session_dir"), raw.get("session_path")
+    if not isinstance(raw_dir, str) or not isinstance(raw_path, str):
+        raise ValueError("native_launch session_dir and session_path must be strings")
+    session_dir, session_path = Path(raw_dir), Path(raw_path)
+    if not session_dir.is_absolute() or not session_path.is_absolute():
+        raise ValueError("native_launch session_dir and session_path must be absolute")
+    try:
+        canonical_dir = session_dir.resolve(strict=True)
+        canonical_path = session_path.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"native_launch session path cannot be resolved: {exc}") from exc
+    if str(canonical_dir) != raw_dir or str(canonical_path) != raw_path:
+        raise ValueError("native_launch session_dir and session_path must already be canonical")
+    if not canonical_dir.is_dir() or not canonical_path.is_file() or canonical_path.parent != canonical_dir:
+        raise ValueError("native_launch session_path must be a regular file directly inside session_dir")
+    try:
+        with canonical_path.open("rb") as source:
+            first_line = source.readline()
+    except OSError as exc:
+        raise ValueError(f"native_launch session header cannot be read: {exc}") from exc
+    if not first_line.endswith(b"\n"):
+        raise ValueError("native_launch first session header line must include LF")
+    try:
+        header = json.loads(first_line)
+    except json.JSONDecodeError as exc:
+        raise ValueError("native_launch first session header line is not JSON") from exc
+    declared_header = raw.get("session_header")
+    if (not isinstance(declared_header, dict) or set(declared_header) != {"id", "sha256"}
+            or not isinstance(header, dict) or header.get("type") != "session"
+            or not isinstance(declared_header.get("id"), str)
+            or not re.fullmatch(r"[0-9a-f]{16}", declared_header["id"])
+            or header.get("id") != declared_header["id"]
+            or not isinstance(declared_header.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", declared_header["sha256"])
+            or not hmac.compare_digest(hashlib.sha256(first_line).hexdigest(), declared_header["sha256"])):
+        raise ValueError("native_launch session_header conflicts with the first JSONL header line")
+    model = bounded(raw.get("model"), 512, "native_launch.model", required=True)
+    assert model is not None
+    if any(char in model for char in "\r\n\x00"):
+        raise ValueError("native_launch.model must be a configured nonsecret selector")
+    if raw.get("discovery") != "reduced-v1" or raw.get("tools") != "read":
+        raise ValueError("native_launch supports only discovery=reduced-v1 and tools=read")
+    if not isinstance(raw.get("interactive"), bool):
+        raise ValueError("native_launch.interactive must be boolean")
+    if raw.get("lifecycle_mode") != "managed_turn_v1":
+        raise ValueError("native_launch.lifecycle_mode must be managed_turn_v1")
+    return {"version": 3, "xcsh_executable": executable["canonical_path"],
+            "session_dir": str(canonical_dir), "session_path": str(canonical_path),
+            "session_header": {"id": declared_header["id"], "sha256": declared_header["sha256"]},
+            "model": model, "discovery": "reduced-v1", "tools": "read",
+            "interactive": raw["interactive"], "lifecycle_mode": "managed_turn_v1"}
+
+
 def configured_codex_binary(config: dict[str, Any]) -> str:
     """Resolve only an explicit machine binding or a discoverable executable.
 
@@ -1669,22 +1739,30 @@ class StateDB:
         session = execution.get("producer_session_id")
         workspace, tab, pane = (execution.get(key) for key in ("workspace_id", "tab_id", "pane_id"))
         request = json.loads(row["request_json"])
-        executable = request.get("xcsh_executable")
-        executable_sha256 = request.get("xcsh_executable_sha256")
-        expected_argv = [executable, "--resume", row["session_id"], request.get("text")]
+        launch = request.get("native_launch")
+        if not isinstance(launch, dict):
+            raise ValueError("native generation lacks immutable native_launch")
+        executable, executable_sha256 = launch.get("xcsh_executable"), request.get("xcsh_executable_sha256")
+        expected_argv = [executable, "--mode", "json", "--session-dir", launch.get("session_dir"),
+                         "--resume", launch.get("session_path"), "--model", launch.get("model"),
+                         "--tools", "read", "--no-mcp", "--no-lsp", "--no-pty"]
+        if not launch.get("interactive"):
+            expected_argv.append("--print")
+        expected_argv.append(request.get("text"))
         command = execution.get("command")
         injected = execution.get("injected_env")
         native_executable = execution.get("native_executable")
         if (semantic != row["semantic_execution_id"] or execution.get("generation") != generation
-                or execution.get("native_producer") != "xcsh" or session != row["session_id"]
+                or execution.get("native_producer") != "xcsh" or session != launch.get("session_header", {}).get("id")
                 or execution.get("cwd") != request.get("cwd") or workspace != row["workspace_id"]
+                or execution.get("native_launch") != launch
                 or command != {"mode": "argv", "argv": expected_argv}
                 or native_executable != {"canonical_path": executable, "sha256": executable_sha256}
                 or not isinstance(injected, dict)
                 or injected.get("HERDR_EXECUTION_ID") != row["semantic_execution_id"]
                 or injected.get("HERDR_EXECUTION_GENERATION") != str(generation)
                 or not all(isinstance(value, str) and value for value in (backend, tab, pane))):
-            raise ValueError("Herdr resume receipt conflicts with immutable native generation provenance or argv")
+            raise ValueError("Herdr resume receipt conflicts with immutable native generation provenance, launch, or argv")
         self.conn.execute("BEGIN IMMEDIATE")
         try:
             latest = self.native_generation(task_id, generation)
@@ -2586,7 +2664,7 @@ class Broker:
 
         This is intentionally separate from Codex dispatch.  It records a
         durable task/idempotency claim before ``execution.resume`` and waits for
-        protocol-21 executable-binding plus semantic reports to settle it; process exit/output is not
+        protocol-22 typed-native-launch binding plus semantic reports to settle it; process exit/output is not
         task success evidence.
         """
         if params.get("idempotency_key") is None:
@@ -2612,13 +2690,19 @@ class Broker:
         required_identity = ("xcsh_artifact", "herdr_artifact", "manager_artifact")
         if any(not isinstance(runtime_identity.get(key), str) or not runtime_identity[key] for key in required_identity):
             raise ValueError("runtime_identity must bind xcsh_artifact, herdr_artifact, and manager_artifact")
-        executable = measure_xcsh_executable(
-            params.get("xcsh_executable"), expected_sha256=params.get("xcsh_executable_sha256")
+        configured_model = bounded(runtime_identity.get("xcsh_model"), 512, "runtime_identity.xcsh_model", required=True)
+        if not isinstance(params.get("xcsh_executable_sha256"), str):
+            raise ValueError("xcsh_executable_sha256 controller measurement is required")
+        launch = measure_native_launch(
+            params.get("native_launch"), expected_executable_sha256=params.get("xcsh_executable_sha256")
         )
+        if launch["model"] != configured_model:
+            raise ValueError("native_launch.model must equal the configured nonsecret runtime model")
+        executable = measure_xcsh_executable(launch["xcsh_executable"], expected_sha256=params.get("xcsh_executable_sha256"))
         persisted_identity = runtime_identity | {
             "workspace_id": workspace_id,
-            "resume_schema": "execution.resume/v2",
-            "xcsh_executable": executable["canonical_path"],
+            "resume_schema": "execution.resume/v3",
+            "native_launch": launch,
             "xcsh_executable_sha256": executable["sha256"],
         }
         identity_json = json.dumps(persisted_identity, sort_keys=True, separators=(",", ":"))
@@ -2630,10 +2714,11 @@ class Broker:
         except Exception as exc:
             raise ValueError(f"native XCSH workspace is not available: {exc}") from exc
         task_id = f"xut-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-        immutable = {"execution_id": task_id, "generation": 0, "session_id": session_id,
-                     "cwd": cwd, "workspace_id": workspace_id, "text": text,
-                     "xcsh_executable": executable["canonical_path"],
-                     "xcsh_executable_sha256": executable["sha256"]}
+        if session_id != launch["session_header"]["id"]:
+            raise ValueError("session_id must equal native_launch.session_header.id")
+        immutable = {"execution_id": task_id, "generation": 0, "native_launch": launch,
+                     "cwd": cwd, "workspace_id": workspace_id, "text": text}
+        immutable["xcsh_executable_sha256"] = executable["sha256"]
         request_json = json.dumps(immutable, sort_keys=True, separators=(",", ":"))
         canonical = dict(params)
         canonical.pop("idempotency_key", None)
@@ -2650,39 +2735,36 @@ class Broker:
                                                    text=text or "", label="xcsh-native-uat")
 
     async def _require_native_xcsh_resume_contract(self) -> None:
-        """Require PR44's protocol-21 executable-binding response contract.
+        """Require protocol-22's typed native-launch response contract.
 
-        PR44 adds no invented capability bit: its authoritative compatibility
-        boundary is protocol 21 plus the existing tracked execution and
+        The authoritative compatibility boundary is protocol 22 plus the existing tracked execution and
         semantic-journal capabilities. Receipt validation below proves the
         required response schema at every admission.
         """
         pong = await self.herdr.request("ping", {}, timeout=10)
         caps = (pong or {}).get("capabilities") or {}
-        if (int((pong or {}).get("protocol", 0)) < 21
+        if (int((pong or {}).get("protocol", 0)) < 22
                 or not caps.get("tracked_executions")
                 or not caps.get("agent_turn_journal")):
-            raise ValueError("Herdr lacks the protocol-21 executable-binding, tracked-executions, and semantic-journal contract required for execution.resume")
+            raise ValueError("Herdr lacks the protocol-22 typed-native-launch, tracked-executions, and semantic-journal contract required for execution.resume")
 
     @staticmethod
     def _native_xcsh_effect_request(request: dict[str, Any], label: str) -> dict[str, Any]:
         """Re-measure a persisted claim immediately before every resume effect."""
-        measured = measure_xcsh_executable(
-            request.get("xcsh_executable"), expected_sha256=request.get("xcsh_executable_sha256")
-        )
-        if (measured["canonical_path"] != request.get("xcsh_executable")
-                or measured["sha256"] != request.get("xcsh_executable_sha256")):
-            raise RuntimeError("persisted XCSH executable binding is not canonical")
-        fields = ("execution_id", "generation", "session_id", "xcsh_executable", "text", "cwd", "workspace_id")
-        return {field: request[field] for field in fields} | {"label": label}
+        launch = measure_native_launch(request.get("native_launch"), expected_executable_sha256=request.get("xcsh_executable_sha256"))
+        if launch != request.get("native_launch"):
+            raise RuntimeError("persisted native_launch is not canonical")
+        fields = ("execution_id", "generation", "native_launch", "text", "cwd")
+        return {field: request[field] for field in fields}
 
     @staticmethod
     def _native_xcsh_public_binding(binding: sqlite3.Row) -> dict[str, Any]:
         request = json.loads(binding["request_json"])
+        launch = request["native_launch"]
         return {"native_executable": {
-            "canonical_path": request["xcsh_executable"],
+            "canonical_path": launch["xcsh_executable"],
             "sha256": request["xcsh_executable_sha256"],
-        }}
+        }, "native_launch": launch}
 
     async def _resume_xcsh_generation(self, task_id: str, *, generation: int, session_id: str,
                                       text: str, label: str, source_generation: int | None = None,
@@ -2698,14 +2780,13 @@ class Broker:
             runtime_identity = json.loads(row["native_runtime_json"] or "{}")
         except json.JSONDecodeError as exc:
             raise RuntimeError("XCSH resume has malformed durable runtime provenance") from exc
-        executable = measure_xcsh_executable(
-            runtime_identity.get("xcsh_executable"),
-            expected_sha256=runtime_identity.get("xcsh_executable_sha256"),
-        )
-        immutable = {"execution_id": task_id, "generation": generation, "session_id": session_id,
-                     "cwd": row["cwd"], "workspace_id": row["workspace_id"], "text": text,
-                     "xcsh_executable": executable["canonical_path"],
-                     "xcsh_executable_sha256": executable["sha256"]}
+        launch = measure_native_launch(runtime_identity.get("native_launch"),
+                                       expected_executable_sha256=runtime_identity.get("xcsh_executable_sha256"))
+        if session_id != launch["session_header"]["id"]:
+            raise ValueError("native continuation session differs from immutable native_launch header")
+        immutable = {"execution_id": task_id, "generation": generation, "native_launch": launch,
+                     "cwd": row["cwd"], "workspace_id": row["workspace_id"], "text": text}
+        immutable["xcsh_executable_sha256"] = runtime_identity["xcsh_executable_sha256"]
         digest = hashlib.sha256(json.dumps(immutable, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         request_json = json.dumps(immutable, sort_keys=True, separators=(",", ":"))
         binding = self.db.claim_native_generation(task_id, generation=generation, session_id=session_id,

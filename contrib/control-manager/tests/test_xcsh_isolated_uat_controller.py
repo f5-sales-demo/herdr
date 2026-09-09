@@ -72,6 +72,26 @@ class ControllerTests(unittest.TestCase):
    with self.assertRaisesRegex(ControllerError,'prompt-free durable'):
     controller.create_xcsh_session(binary,hashlib.sha256(binary.read_bytes()).hexdigest(),root,root/'second-session')
 
+ def test_real_current_xcsh_binary_creates_canonical_resume_session_when_explicitly_enabled(self):
+  """Real measured-binary source smoke; never installed-UAT acceptance."""
+  raw_binary=os.environ.get('HERDR_XCSH_BINARY')
+  expected=os.environ.get('HERDR_XCSH_SHA256')
+  if not raw_binary or not expected:
+   self.skipTest('set HERDR_XCSH_BINARY and HERDR_XCSH_SHA256 for the measured XCSH source smoke')
+  binary=Path(raw_binary)
+  with tempfile.TemporaryDirectory(prefix='xcsh-v3-session-') as raw:
+   root=Path(raw)
+   controller=object.__new__(DisposableHerdrController)
+   receipt=controller.create_xcsh_session(binary,expected,root,root/'sessions')
+   self.assertRegex(receipt['session_id'],r'^[0-9a-f]{16}$')
+   self.assertEqual(receipt['xcsh_executable'],str(binary.resolve()))
+   self.assertEqual(receipt['xcsh_executable_sha256'],expected)
+   self.assertEqual(Path(receipt['session_path']).parent,Path(receipt['session_dir']))
+   with Path(receipt['session_path']).open('rb') as source:
+    first_line=source.readline()
+   self.assertTrue(first_line.endswith(b'\n'))
+   self.assertEqual(receipt['session_header']['sha256'],hashlib.sha256(first_line).hexdigest())
+
  def test_real_disposable_binary_actions_when_explicitly_enabled(self):
   raw_binary=os.environ.get('HERDR_DISPOSABLE_BINARY')
   expected=os.environ.get('HERDR_DISPOSABLE_SHA256')

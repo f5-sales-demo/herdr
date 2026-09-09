@@ -24,6 +24,15 @@ controller returns the canonical measured XCSH path/hash with its real session
 receipt, the manager durably carries that identity through every generation,
 and resume/reconciliation reject any changed path, digest, backend binding, or
 `argv[0]`. This remains source evidence, not installed-UAT acceptance.
+Source package v23 advances only the manager core to the committed but
+unreleased protocol-22
+`native_launch` v3 contract: it measures a canonical session directory and
+direct child JSONL path, hashes the raw first header line including its LF,
+binds the configured nonsecret model and reduced read-only policy, and rejects
+any changed replay identity or noncanonical backend argv. Authenticated
+producer action/replay receipts remain pending corrected backend action
+semantics, a released producer adapter, and installed runtime evidence. This
+is not an installed-UAT acceptance claim.
 
 | Requirement | Required authoritative evidence | Current evidence | Status |
 | --- | --- | --- | --- |
@@ -32,7 +41,7 @@ and resume/reconciliation reject any changed path, digest, backend binding, or
 | CI and post-merge workflows | Exact-head CI plus post-merge workflow evidence for both projects | XCSH exact merge CI was green; Herdr PR21 CI was green before merge | Open: post-merge workflow evidence remains required |
 | Conventional version/release | Immutable release/version and artifact identity for XCSH, Herdr, and portable manager package | No release artifacts | Open |
 | Exact artifact installation | Download receipt, checksum/version, installed XCSH/Herdr capability and installed manager package identity | No installed artifact evidence | Open |
-| Protocol-21 native binding / Protocol-20 consumer | Installed Herdr protocol >=21 for `execution.resume` executable binding, plus `agent_turn_journal`, consumer enabled, and persisted cursor/result-digest receipt | Manager boundary code plus synthetic fixture only | Blocked pending installed capability |
+| Protocol-22 native launch / consumer | Installed Herdr protocol >=22 for `execution.resume` v3 native-launch binding, plus `agent_turn_journal`, consumer enabled, and persisted cursor/result-digest receipt | Manager boundary code plus synthetic fixture only | Blocked pending installed capability |
 | Semantic success/failure/input/cancel/continuation/replay/supersession/cleanup/loss | Installed-artifact isolated UAT receipt showing the specified semantic transitions | No installed receipt in this source package | Open; source does not satisfy live UAT |
 | Accepted | Every required lifecycle stage complete with matching gate evidence | Merge/release/install/native consumer/live UAT remain incomplete | Fail closed |
 
@@ -41,7 +50,7 @@ and resume/reconciliation reject any changed path, digest, backend binding, or
 `xcsh_installed_uat.py` and `xcsh-installed-uat/scenarios-v1.json` are the
 separate real-runtime driver and safe synthesized prompt catalog. They bind
 immutable XCSH, Herdr, and manager artifact versions/checksums; require a
-dedicated disposable runtime; query real protocol-21 native-binding and journal records; and
+dedicated disposable runtime; query real protocol-22 native-launch and journal records; and
 validate exact state traces, revision monotonicity, task/pane/session
 provenance, completed-result digests, and manager-consumed evidence. They do
 not infer success from a sentinel substring and never call `agent.turn.report`.

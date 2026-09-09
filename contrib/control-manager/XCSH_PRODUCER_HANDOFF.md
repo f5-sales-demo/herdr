@@ -30,16 +30,30 @@ installed-UAT acceptance.
 Herdr v0.13.0's immutable API schema was protocol 20/schema 1 (schema hash
 `88e6f9f583f56e5d7708f6cfd6ec62250ea72ce85dfc61d7a4d04d7c43d42806`) and
 defines both `ExecutionResumeParams` and `AgentTurnReportParams`, including
-the canonical 16-hex XCSH session identity. The PR44 follow-on contract is
-protocol 21: `execution.resume` requires an absolute `xcsh_executable`, and
-each receipt carries `native_executable.canonical_path` and SHA-256. The
-manager gates new native admissions on advertised protocol >=21 plus the
-existing `tracked_executions` and `agent_turn_journal` capabilities; PR44 does
-not define a separate capability bit. The controller measures the published
-executable, the manager durably records that canonical path/hash for generation
-zero and continuations, re-measures before every effect/replay, and validates
-the returned binding, argv[0], environment, generation, workspace/tab/pane,
-and producer session provenance. It never falls back to bare `xcsh`.
+the canonical 16-hex XCSH session identity. The historical PR44 follow-on
+contract was protocol 21: `execution.resume` required an absolute
+`xcsh_executable`, and each receipt carried
+`native_executable.canonical_path` and SHA-256. The current un-released
+protocol-22 source contract supersedes that request with the closed
+`native_launch` v3 value: canonical executable/session directory/session file,
+the SHA-256 of the first raw JSONL header line including its LF, a configured
+nonsecret model selector, `reduced-v1` discovery, read-only tools, interactive
+mode, and `managed_turn_v1`. The manager gates new native admissions on
+advertised protocol >=22 plus existing `tracked_executions` and
+`agent_turn_journal`, measures the executable and header before every
+effect/replay, and validates the complete returned launch, binding, exact argv,
+environment, generation, workspace/tab/pane, and producer session provenance.
+It never falls back to bare `xcsh`.
+
+The preliminary protocol-22 source also exposes request-only native
+capabilities and `agent.turn.action.get`/`agent.turn.action.ack`, but its
+first-report registration, authenticated cancelled-report linkage, pending
+action timeout recovery, and cooperative supersession are under repair in
+backend issue 47/PR49. Do not use that interim surface as acceptance evidence
+or substitute a PTY exit for producer cancellation. The manager does not
+receive, persist, or invent the one-time `HERDR_NATIVE_CAPABILITY`; its
+controller will validate real journal/action receipts only after the corrected
+backend and producer adapter are independently reviewed and released.
 
 - A supported deterministic offline backend/test executor, selected by an
   explicit documented argv/configuration surface. Prompt wording must not be

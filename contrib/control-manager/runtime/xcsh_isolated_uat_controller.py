@@ -201,15 +201,20 @@ class DisposableHerdrController(IsolatedController):
         session_file: str | None = None
         if len(files) == 1:
             try:
-                persisted = json.loads(files[0].read_text(encoding="utf-8").splitlines()[0])
+                with files[0].open("rb") as persisted_file:
+                    first_line = persisted_file.readline()
+                if not first_line.endswith(b"\n"):
+                    raise ControllerError("XCSH persisted session header lacks its terminating LF")
+                persisted = json.loads(first_line)
             except (OSError, IndexError, json.JSONDecodeError) as exc:
                 raise ControllerError("XCSH persisted session header is unreadable") from exc
             identity_fields = ("type", "version", "id", "timestamp", "cwd")
             if any(persisted.get(key) != header.get(key) for key in identity_fields):
                 raise ControllerError("XCSH stdout and persisted session headers disagree")
-            session_file = str(files[0])
+            session_file = str(files[0].resolve())
         return {"session_id": session, "session_file": session_file,
-                "header_sha256": hashlib.sha256(json.dumps(header, sort_keys=True).encode()).hexdigest(),
+                "session_dir": str(session_dir.resolve()),
+                "session_header": {"id": session, "sha256": hashlib.sha256(first_line).hexdigest()} if session_file else None,
                 "json_mode_session_header": True, "resume_ready": session_file is not None,
                 "xcsh_executable": str(xcsh_binary.resolve()),
                 "xcsh_executable_sha256": hashlib.sha256(xcsh_binary.read_bytes()).hexdigest()}
@@ -223,8 +228,8 @@ class DisposableHerdrController(IsolatedController):
                 "released XCSH emitted a JSON session header but did not persist a resume-ready session; "
                 "the producer needs a prompt-free durable session creation API"
             )
-        return {"session_id": receipt["session_id"], "session_file": receipt["session_file"],
-                "header_sha256": receipt["header_sha256"],
+        return {"session_id": receipt["session_id"], "session_dir": receipt["session_dir"],
+                "session_path": receipt["session_file"], "session_header": receipt["session_header"],
                 "xcsh_executable": receipt["xcsh_executable"],
                 "xcsh_executable_sha256": receipt["xcsh_executable_sha256"]}
 

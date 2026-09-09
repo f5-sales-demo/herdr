@@ -187,6 +187,9 @@ def preflight(manifest: dict[str, Any], catalog: dict[str, Any], *, probe: bool 
         raise PreflightError("manifest must bind a dedicated Herdr workspace_id")
     if not isinstance(runtime.get("xcsh_session_dir"), str) or not Path(runtime["xcsh_session_dir"]).is_absolute():
         raise PreflightError("manifest must bind an isolated absolute xcsh_session_dir")
+    if (not isinstance(runtime.get("xcsh_model"), str) or not runtime["xcsh_model"]
+            or any(char in runtime["xcsh_model"] for char in "\r\n\x00")):
+        raise PreflightError("manifest must bind a configured nonsecret xcsh_model")
     if not isinstance(runtime.get("xcsh_executable"), str) or not runtime["xcsh_executable"]:
         raise PreflightError("manifest must bind the measured xcsh_executable")
     declared_executable_digest = runtime.get("xcsh_executable_sha256")
@@ -201,11 +204,11 @@ def preflight(manifest: dict[str, Any], catalog: dict[str, Any], *, probe: bool 
     if catalog.get("catalog_version") != 1 or not isinstance(scenarios, list) or not scenarios:
         raise PreflightError("invalid installed prompt catalog")
     if catalog.get("native_resume_contract") != {
-            "execution_resume_schema": "execution.resume/v2",
-            "herdr_protocol_minimum": 21,
+            "execution_resume_schema": "execution.resume/v3",
+            "herdr_protocol_minimum": 22,
             "required_herdr_capabilities": ["tracked_executions", "agent_turn_journal"],
     }:
-        raise PreflightError("catalog does not bind the protocol-21 executable resume contract")
+        raise PreflightError("catalog does not bind the protocol-22 typed native-launch resume contract")
     names = {case.get("id") for case in scenarios}
     expected = {"success", "failure", "waiting_input", "cancel", "continuation", "reconnect_replay", "generation_supersession", "cleanup", "restart_loss"}
     if names != expected:
@@ -222,7 +225,7 @@ def preflight(manifest: dict[str, Any], catalog: dict[str, Any], *, probe: bool 
         contract = catalog["native_resume_contract"]
         if (int((pong or {}).get("protocol", 0)) < contract["herdr_protocol_minimum"]
                 or any(not capabilities.get(name) for name in contract["required_herdr_capabilities"])):
-            raise PreflightError("installed Herdr lacks protocol-21 executable binding, tracked_executions, and agent_turn_journal")
+            raise PreflightError("installed Herdr lacks protocol-22 typed native launch, tracked_executions, and agent_turn_journal")
         broker_capabilities = broker.get("capabilities") or {}
         result["probe"] = {"broker": broker.get("status"), "herdr_protocol": pong.get("protocol"),
                            "tracked_executions": True, "agent_turn_journal": True,
@@ -355,14 +358,25 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
                 or executable != str(manifest_executable)
                 or executable_sha256.lower() != manifest_sha256.lower()):
             raise PreflightError("controller session receipt does not bind the measured installed XCSH executable")
+        model = runtime.get("xcsh_model")
+        if not isinstance(model, str) or not model or any(char in model for char in "\r\n\x00"):
+            raise PreflightError("manifest must supply a configured nonsecret xcsh_model")
+        native_launch = {
+            "version": 3, "xcsh_executable": executable,
+            "session_dir": session_receipt.get("session_dir"), "session_path": session_receipt.get("session_path"),
+            "session_header": session_receipt.get("session_header"), "model": model,
+            "discovery": "reduced-v1", "tools": "read", "interactive": False,
+            "lifecycle_mode": "managed_turn_v1",
+        }
     except Exception as exc:
         raise PreflightError(f"controller could not create a measured XCSH session: {exc}") from exc
     task = unix_request(broker_socket, "native_xcsh_admit", {
         "target": "xcsh-native-uat", "cwd": runtime.get("cwd", "/isolated/xcsh-native-uat"),
         "priority": "routine", "prompt": case["prompt"], "text": prompt,
-        "session_id": session_id, "workspace_id": runtime["workspace_id"],
-        "xcsh_executable": executable, "xcsh_executable_sha256": executable_sha256,
-        "runtime_identity": {f"{name}_artifact": artifact_id(manifest["artifacts"][name], name) for name in ("xcsh", "herdr", "manager")},
+        "session_id": session_id, "workspace_id": runtime["workspace_id"], "native_launch": native_launch,
+        "xcsh_executable_sha256": executable_sha256,
+        "runtime_identity": ({f"{name}_artifact": artifact_id(manifest["artifacts"][name], name) for name in ("xcsh", "herdr", "manager")}
+                             | {"xcsh_model": model}),
         "idempotency_key": f"installed-xcsh-uat:{run_id}:{case['id']}",
     })
     if task.get("native_executable") != {"canonical_path": executable, "sha256": executable_sha256}:
@@ -428,7 +442,7 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
                 herdr_socket = Path(socket_after) if isinstance(socket_after, str) else herdr_socket
             pong = herdr_request(herdr_socket, "ping", {})
             if int((pong or {}).get("protocol", 0)) < 20 or not ((pong or {}).get("capabilities") or {}).get("agent_turn_journal"):
-                raise PreflightError("restart controller receipt did not reconnect to protocol-21 executable-binding journal runtime")
+                raise PreflightError("restart controller receipt did not reconnect to protocol-22 native-launch journal runtime")
         if states == case["expected_states"] and states[-1] == "waiting_input":
             observed = unix_request(broker_socket, "status", {"task_id": task["id"]})["tasks"][0]
             validate_journal(case, records, observed, None, fixture=fixture)
