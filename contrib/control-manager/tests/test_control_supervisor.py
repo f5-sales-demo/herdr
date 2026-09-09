@@ -123,6 +123,25 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(automatic['state'],'waiting_user')
             self.assertEqual(supervisor.status()['affected_sessions'],['Configured Manager'])
 
+    async def test_manual_all_ignores_optional_remote_transport_degradation(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw); config=root/'machine.json'; config.write_text('{}')
+            supervisor=Supervisor(root/'socket',root/'state.sqlite3',config)
+            check={
+                'state':'degraded','paused':False,'authoritative':{},
+                'components':[
+                    {'component':'broker','status':'healthy','reason':'responsive'},
+                    {'component':'manager_native','status':'healthy','reason':'exact canonical pane'},
+                    {'component':'remote_control','status':'degraded','reason':'remote transport: errored'},
+                ],
+            }
+            with patch.object(supervisor,'check',AsyncMock(return_value=check)), \
+                 patch.object(supervisor,'_run_action',AsyncMock()) as action:
+                result=await supervisor.recover('all',idempotency_key='healthy-all-optional-remote')
+            self.assertEqual(result['state'],'completed')
+            self.assertEqual(result['outcome']['note'],'requested components are already healthy')
+            action.assert_not_awaited()
+
     def test_explicit_affected_sessions_override_configured_manager(self):
         with tempfile.TemporaryDirectory() as raw:
             root=Path(raw); config=root/'machine.json'; config.write_text(json.dumps({

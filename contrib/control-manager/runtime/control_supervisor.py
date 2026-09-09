@@ -717,7 +717,12 @@ class Supervisor:
         outcome={"check_before":check}
         try:
             aliases={"manager":{"manager_thread","manager_turn","manager_native"},"observer":{"observer"}}
-            relevant=(set(by_name) if component == "all" else aliases.get(component,{component}))
+            # remote_control is a diagnostic-only adapter. It is explicitly
+            # excluded from automatic repair and must not make the aggregate
+            # Control Manager recovery action fail when every recoverable
+            # component is already healthy.
+            relevant=((set(by_name) - {"remote_control"})
+                      if component == "all" else aliases.get(component,{component}))
             diagnosed={name for name in relevant if name in by_name}
             if diagnosed and all(by_name[name].get("status") == "healthy" for name in diagnosed):
                 outcome.update({"state":"completed","note":"requested components are already healthy","verified_check":check})
