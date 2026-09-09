@@ -564,7 +564,18 @@ impl ExecutionManager {
     }
     fn enforce_retention(&self, state: &mut State) {
         while state.records.len() > MAX_RECORDS {
-            let record = state.records.remove(0);
+            let Some(index) = state.records.iter().position(|record| {
+                !matches!(
+                    record.state,
+                    ExecutionState::Starting | ExecutionState::Running
+                )
+            }) else {
+                // Active records carry the durable ownership required for
+                // reporter validation, cancellation, and native handoff. Do
+                // not trade that authority for a bounded history window.
+                break;
+            };
+            let record = state.records.remove(index);
             expired_filter_insert(&mut state.expired_id_filter, &record.execution_id);
             state.tombstones.push(ExecutionTombstone {
                 execution_id: record.execution_id,
@@ -974,7 +985,9 @@ mod tests {
         let path = temp("tombstone");
         let m = ExecutionManager::load_at(path.clone());
         for index in 0..=MAX_RECORDS {
-            m.admit_visible(&params(&format!("id-{index}"))).unwrap();
+            let id = format!("id-{index}");
+            m.admit_visible(&params(&id)).unwrap();
+            m.mark_start_failed(&id, "test settlement");
         }
         let error = m.admit_visible(&params("id-0")).unwrap_err();
         assert!(error.starts_with("execution_expired"));
@@ -987,6 +1000,7 @@ mod tests {
         let manager = ExecutionManager::load_at(path.clone());
         let (claimed, admitted, _) = manager.admit_xcsh_resume(&resume_params(6)).unwrap();
         assert!(admitted);
+        manager.mark_start_failed(&claimed.execution_id, "test settlement");
         for index in 0..MAX_RECORDS {
             manager
                 .admit_visible(&params(&format!("eviction-{index}")))
@@ -1002,6 +1016,50 @@ mod tests {
             .admit_visible(&params("semantic-task"))
             .unwrap_err();
         assert!(collision.starts_with("execution_namespace_conflict"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn active_native_record_survives_history_churn_and_restart() {
+        let path = temp("active-native-retention");
+        let manager = ExecutionManager::load_at(path.clone());
+        let (claimed, admitted, _) = manager.admit_xcsh_resume(&resume_params(6)).unwrap();
+        assert!(admitted);
+        manager
+            .attach_visible(
+                &claimed.execution_id,
+                77,
+                "w1:p77".into(),
+                "w1:t1".into(),
+                Some(77),
+            )
+            .unwrap();
+        for index in 0..=MAX_RECORDS {
+            let id = format!("settled-{index}");
+            manager.admit_visible(&params(&id)).unwrap();
+            manager.mark_start_failed(&id, "test settlement");
+        }
+        assert_eq!(
+            manager.get(&claimed.execution_id).unwrap().state,
+            ExecutionState::Running
+        );
+        drop(manager);
+
+        let reloaded = ExecutionManager::load_at(path.clone());
+        let retained = reloaded.get(&claimed.execution_id).unwrap();
+        assert_eq!(retained.state, ExecutionState::Lost);
+        assert_eq!(
+            reloaded
+                .resolve_agent_turn_execution(
+                    "semantic-task",
+                    "xcsh",
+                    "123e4567-e89b-12d3-a456-426614174000",
+                    6,
+                )
+                .unwrap()
+                .execution_id,
+            claimed.execution_id
+        );
         let _ = std::fs::remove_file(path);
     }
     #[test]

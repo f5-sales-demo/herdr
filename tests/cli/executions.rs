@@ -147,12 +147,107 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
     assert_eq!(&lines[..2], ["semantic-child", "11"]);
     assert!(!lines[2].is_empty() && !lines[3].is_empty());
     let backend_id = execution["execution_id"].as_str().unwrap();
+    for index in 0..=256 {
+        let churn = send_request(
+            &socket_path,
+            &serde_json::json!({
+                "id": format!("churn-{index}"), "method": "execution.start", "params": {
+                    "execution_id": format!("settled-history-{index}"),
+                    "cwd": base, "workspace_id": "w999", "mode": "argv", "argv": ["/bin/true"]
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(churn["error"]["code"], "workspace_not_found");
+    }
+    let retained = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"fixture-retained","method":"execution.get","params":{{"execution_id":"{backend_id}"}}}}"#
+        ),
+    );
+    assert_eq!(retained["result"]["execution"]["state"], "running");
+    let post_churn_report = send_request(
+        &socket_path,
+        &serde_json::json!({
+            "id": "fixture-after-churn", "method": "agent.turn.report", "params": {
+                "execution_id": "semantic-child", "pane_id": execution["pane_id"], "producer": "xcsh",
+                "session_id": "123e4567-e89b-12d3-a456-426614174000", "turn_id": "fixture-after-churn",
+                "generation": 11, "event_revision": 1, "state": "starting"
+            }
+        })
+        .to_string(),
+    );
+    assert!(
+        post_churn_report.get("error").is_none(),
+        "post-churn reporter was rejected: {post_churn_report}"
+    );
     let second = send_request(&socket_path, &serde_json::json!({
         "id":"fixture-next", "method":"execution.resume", "params": {
             "execution_id":"semantic-child", "generation":12, "session_id":"123e4567-e89b-12d3-a456-426614174000", "text":"fixture", "cwd":base
         }
     }).to_string());
     assert_eq!(second["result"]["admitted"], true);
+    let handoff_deadline = Instant::now() + Duration::from_secs(4);
+    let old_revision = loop {
+        let old = send_request(
+            &socket_path,
+            &format!(
+                r#"{{"id":"fixture-handoff-old","method":"execution.get","params":{{"execution_id":"{backend_id}"}}}}"#
+            ),
+        );
+        if old["result"]["execution"]["state"] == "cancelled" {
+            break old["result"]["execution"]["revision"].as_u64().unwrap();
+        }
+        assert!(
+            Instant::now() < handoff_deadline,
+            "next generation did not settle the old child: {old}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    let duplicate_second = send_request(&socket_path, &serde_json::json!({
+        "id":"fixture-next-retry", "method":"execution.resume", "params": {
+            "execution_id":"semantic-child", "generation":12, "session_id":"123e4567-e89b-12d3-a456-426614174000", "text":"fixture", "cwd":base
+        }
+    }).to_string());
+    assert_eq!(duplicate_second["result"]["admitted"], false);
+    let old_after_retry = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"fixture-handoff-old-retry","method":"execution.get","params":{{"execution_id":"{backend_id}"}}}}"#
+        ),
+    );
+    assert_eq!(
+        old_after_retry["result"]["execution"]["revision"],
+        old_revision
+    );
+    let current_backend_id = second["result"]["execution"]["execution_id"]
+        .as_str()
+        .unwrap();
+    let cancelled = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"fixture-current-cancel","method":"execution.cancel","params":{{"execution_id":"{current_backend_id}"}}}}"#
+        ),
+    );
+    assert!(cancelled.get("error").is_none());
+    let cancel_deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let current = send_request(
+            &socket_path,
+            &format!(
+                r#"{{"id":"fixture-current","method":"execution.get","params":{{"execution_id":"{current_backend_id}"}}}}"#
+            ),
+        );
+        if current["result"]["execution"]["state"] == "cancelled" {
+            break;
+        }
+        assert!(
+            Instant::now() < cancel_deadline,
+            "current backend cancellation did not terminate its child"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
     let old = send_request(
         &socket_path,
         &format!(
