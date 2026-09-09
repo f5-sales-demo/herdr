@@ -189,7 +189,7 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
     }).to_string());
     assert_eq!(second["result"]["admitted"], true);
     let handoff_deadline = Instant::now() + Duration::from_secs(4);
-    let old_revision = loop {
+    loop {
         let old = send_request(
             &socket_path,
             &format!(
@@ -197,14 +197,14 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
             ),
         );
         if old["result"]["execution"]["state"] == "cancelled" {
-            break old["result"]["execution"]["revision"].as_u64().unwrap();
+            break;
         }
         assert!(
             Instant::now() < handoff_deadline,
             "next generation did not settle the old child: {old}"
         );
         thread::sleep(Duration::from_millis(25));
-    };
+    }
     let duplicate_second = send_request(&socket_path, &serde_json::json!({
         "id":"fixture-next-retry", "method":"execution.resume", "params": {
             "execution_id":"semantic-child", "generation":12, "session_id":"123e4567-e89b-12d3-a456-426614174000", "text":"fixture", "cwd":base
@@ -217,9 +217,10 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
             r#"{{"id":"fixture-handoff-old-retry","method":"execution.get","params":{{"execution_id":"{backend_id}"}}}}"#
         ),
     );
+    assert_eq!(old_after_retry["result"]["execution"]["state"], "cancelled");
     assert_eq!(
-        old_after_retry["result"]["execution"]["revision"],
-        old_revision
+        old_after_retry["result"]["execution"]["superseded_by_backend_execution_id"],
+        second["result"]["execution"]["execution_id"]
     );
     let current_backend_id = second["result"]["execution"]["execution_id"]
         .as_str()
