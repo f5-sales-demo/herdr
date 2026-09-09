@@ -10,6 +10,9 @@
 - Relicensed Herdr from AGPL-3.0-or-later to Apache-2.0.
 
 ### Fixed
+- Native XCSH generation resumes now bind a measured absolute executable path
+  instead of resolving `xcsh` through the server `PATH`, preserving the binding
+  across retries and rejecting executable replacement before launch. (#43)
 - Agent prompts now wait briefly after sending text before pressing Enter, preventing prompts from remaining in agent composers without starting a turn. (#1878)
 - Empty clipboard writes from pane applications no longer erase existing clipboard contents or show a copied confirmation. (#1893)
 - Plain mouse movement no longer triggers continuous full renders while preserving Herdr menu hover and pane application mouse tracking. (#1865)

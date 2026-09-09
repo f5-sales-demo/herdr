@@ -67,6 +67,7 @@ fn parse_resume(args: &[String]) -> std::io::Result<Method> {
         .parse()
         .map_err(|_| std::io::Error::other("generation must be an integer"))?;
     let mut session_id = None;
+    let mut xcsh_executable = None;
     let mut cwd = None;
     let mut text = None;
     let mut index = 0;
@@ -77,11 +78,12 @@ fn parse_resume(args: &[String]) -> std::io::Result<Method> {
             .clone();
         match rest[index].as_str() {
             "--session" => session_id = Some(value),
+            "--xcsh" => xcsh_executable = Some(value),
             "--cwd" => cwd = Some(value),
             "--text" => text = Some(value),
             _ => {
                 return Err(std::io::Error::other(
-                    "expected --session ID --cwd PATH --text TEXT",
+                    "expected --session ID --xcsh PATH --cwd PATH --text TEXT",
                 ))
             }
         }
@@ -91,6 +93,8 @@ fn parse_resume(args: &[String]) -> std::io::Result<Method> {
         execution_id: execution_id.clone(),
         generation,
         session_id: session_id.ok_or_else(|| std::io::Error::other("--session is required"))?,
+        xcsh_executable: xcsh_executable
+            .ok_or_else(|| std::io::Error::other("--xcsh is required"))?,
         cwd: cwd.ok_or_else(|| std::io::Error::other("--cwd is required"))?,
         text: text.ok_or_else(|| std::io::Error::other("--text is required"))?,
         workspace_id: None,
@@ -158,7 +162,7 @@ fn usage_ok() -> std::io::Result<i32> {
     Ok(0)
 }
 fn print_usage() {
-    eprintln!("herdr execution commands:\n  herdr execution start <id> --cwd <absolute-path> [--shell bash|zsh] -- <argv...|command-text>\n  herdr execution resume <semantic-id> <generation> --session <canonical-xcsh-session-header-id> --cwd <absolute-path> --text <text>\n  herdr execution get <backend-id>\n  herdr execution list [--since <revision>]\n  herdr execution wait <after-revision>\n  herdr execution cancel <backend-id>");
+    eprintln!("herdr execution commands:\n  herdr execution start <id> --cwd <absolute-path> [--shell bash|zsh] -- <argv...|command-text>\n  herdr execution resume <semantic-id> <generation> --session <canonical-xcsh-session-header-id> --xcsh <absolute-executable-path> --cwd <absolute-path> --text <text>\n  herdr execution get <backend-id>\n  herdr execution list [--since <revision>]\n  herdr execution wait <after-revision>\n  herdr execution cancel <backend-id>");
 }
 
 #[cfg(test)]
@@ -172,6 +176,8 @@ mod tests {
             "7".into(),
             "--session".into(),
             "0123abcd4567ef89".into(),
+            "--xcsh".into(),
+            "/opt/xcsh/bin/xcsh".into(),
             "--cwd".into(),
             "/tmp".into(),
             "--text".into(),
@@ -184,5 +190,6 @@ mod tests {
         assert_eq!(params.execution_id, "semantic");
         assert_eq!(params.generation, 7);
         assert_eq!(params.session_id, "0123abcd4567ef89");
+        assert_eq!(params.xcsh_executable, "/opt/xcsh/bin/xcsh");
     }
 }

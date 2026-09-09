@@ -12,7 +12,7 @@ fn native_resume_socket_claim_is_idempotent_and_rejects_replay_conflicts() {
         serde_json::json!({
             "id": id, "method": "execution.resume", "params": {
                 "execution_id": "semantic-replay", "generation": 3,
-                "session_id": "0123abcd4567ef89", "text": text, "cwd": base,
+                "session_id": "0123abcd4567ef89", "xcsh_executable": "/bin/true", "text": text, "cwd": base,
             }
         })
     };
@@ -71,14 +71,9 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
     ).unwrap();
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&fixture, fs::Permissions::from_mode(0o755)).unwrap();
-    let inherited_path = std::env::var("PATH").unwrap_or_default();
-    let path_override = format!("{}:{inherited_path}", bin_dir.display());
-    let herdr = spawn_herdr_with_path(
-        &config_home,
-        &runtime_dir,
-        &socket_path,
-        Some(Path::new(&path_override)),
-    );
+    // Deliberately do not put the fixture on PATH. Native resume must launch
+    // the durable measured executable binding, not a server-global lookup.
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
     wait_for_socket(&socket_path, Duration::from_secs(5));
     assert!(run_cli(
         &socket_path,
@@ -103,7 +98,7 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
             &serde_json::json!({
                 "id": format!("invalid-{invalid_session}"), "method": "execution.resume", "params": {
                     "execution_id": "semantic-rejected", "generation": 10,
-                    "session_id": invalid_session, "text": "fixture", "cwd": base,
+                    "session_id": invalid_session, "xcsh_executable": fixture, "text": "fixture", "cwd": base,
                 }
             })
             .to_string(),
@@ -119,13 +114,27 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
         &serde_json::json!({
             "id": "native-child", "method": "execution.resume", "params": {
                 "execution_id": "semantic-child", "generation": 11,
-            "session_id": "0123abcd4567ef89", "text": "fixture", "cwd": base,
+            "session_id": "0123abcd4567ef89", "xcsh_executable": fixture, "text": "fixture", "cwd": base,
             }
         })
         .to_string(),
     );
     let execution = &resumed["result"]["execution"];
     assert_ne!(execution["execution_id"], "semantic-child");
+    assert_eq!(
+        execution["native_executable"]["canonical_path"],
+        fixture.canonicalize().unwrap().to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        execution["command"]["argv"][0],
+        fixture.canonicalize().unwrap().to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        execution["native_executable"]["sha256"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
     let deadline = Instant::now() + Duration::from_secs(4);
     loop {
         if args_path.exists() && env_path.exists() {
@@ -190,6 +199,7 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
     let second = send_request(&socket_path, &serde_json::json!({
         "id":"fixture-next", "method":"execution.resume", "params": {
             "execution_id":"semantic-child", "generation":12, "session_id":"0123abcd4567ef89", "text":"fixture", "cwd":base
+            ,"xcsh_executable":fixture
         }
     }).to_string());
     assert_eq!(second["result"]["admitted"], true);
@@ -213,6 +223,7 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
     let duplicate_second = send_request(&socket_path, &serde_json::json!({
         "id":"fixture-next-retry", "method":"execution.resume", "params": {
             "execution_id":"semantic-child", "generation":12, "session_id":"0123abcd4567ef89", "text":"fixture", "cwd":base
+            ,"xcsh_executable":fixture
         }
     }).to_string());
     assert_eq!(duplicate_second["result"]["admitted"], false);

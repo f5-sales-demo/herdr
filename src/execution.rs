@@ -1,15 +1,17 @@
 use std::collections::{BTreeMap, HashMap};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::schema::{
     ExecutionCommand, ExecutionRecord, ExecutionResumeParams, ExecutionStartParams, ExecutionState,
+    NativeExecutableBinding,
 };
 
 const MAX_RECORDS: usize = 256;
 const OUTPUT_TAIL_BYTES: usize = 4096;
+const MAX_NATIVE_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct ExecutionManager(Arc<Inner>);
@@ -138,6 +140,7 @@ impl ExecutionManager {
             semantic_execution_id: None,
             generation: None,
             native_producer: None,
+            native_executable: None,
             producer_session_id: None,
             injected_env: BTreeMap::new(),
             superseded_by_backend_execution_id: None,
@@ -178,10 +181,11 @@ impl ExecutionManager {
         params: &ExecutionResumeParams,
     ) -> Result<(ExecutionRecord, bool, Option<ExecutionRecord>), String> {
         validate_resume(params)?;
+        let executable = measure_xcsh_executable(&params.xcsh_executable)?;
         let backend_execution_id = native_backend_id(&params.execution_id, params.generation);
         let command = ExecutionCommand::Argv {
             argv: vec![
-                "xcsh".into(),
+                executable.canonical_path.clone(),
                 "--resume".into(),
                 params.session_id.clone(),
                 params.text.clone(),
@@ -212,6 +216,7 @@ impl ExecutionManager {
                 && existing.cwd == params.cwd
                 && existing.command == command
                 && existing.producer_session_id.as_deref() == Some(&params.session_id)
+                && existing.native_executable.as_ref() == Some(&executable)
                 && existing.injected_env == injected_env
             {
                 return Ok((existing.clone(), false, None));
@@ -279,6 +284,7 @@ impl ExecutionManager {
             semantic_execution_id: Some(params.execution_id.clone()),
             generation: Some(params.generation),
             native_producer: Some("xcsh".into()),
+            native_executable: Some(executable),
             producer_session_id: Some(params.session_id.clone()),
             injected_env,
             superseded_by_backend_execution_id: None,
@@ -714,7 +720,7 @@ fn validate_resume(p: &ExecutionResumeParams) -> Result<(), String> {
         workspace_id: None,
         label: None,
         command: ExecutionCommand::Argv {
-            argv: vec!["xcsh".into()],
+            argv: vec![p.xcsh_executable.clone()],
         },
     })?;
     if p.text.is_empty() || p.text.len() > 65_536 {
@@ -731,6 +737,80 @@ fn validate_resume(p: &ExecutionResumeParams) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Measure an explicit XCSH executable without consulting PATH. The binding is
+/// persisted in the native execution receipt and checked again at effect time,
+/// so a symlink replacement or in-place update cannot silently launch another
+/// program after the durable claim.
+pub(crate) fn measure_xcsh_executable(path: &str) -> Result<NativeExecutableBinding, String> {
+    let requested = Path::new(path);
+    if !requested.is_absolute() {
+        return Err(
+            "invalid_xcsh_executable: execution.resume requires an absolute XCSH executable path"
+                .into(),
+        );
+    }
+    let canonical = std::fs::canonicalize(requested)
+        .map_err(|error| format!("invalid_xcsh_executable: cannot resolve executable: {error}"))?;
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|error| format!("invalid_xcsh_executable: cannot inspect executable: {error}"))?;
+    if !metadata.is_file() {
+        return Err("invalid_xcsh_executable: path must name a regular executable file".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err("invalid_xcsh_executable: path is not executable".into());
+        }
+    }
+    if metadata.len() > MAX_NATIVE_EXECUTABLE_BYTES {
+        return Err(
+            "invalid_xcsh_executable: executable exceeds the maximum measurable size".into(),
+        );
+    }
+    let modified = metadata.modified().ok();
+    let mut file = std::fs::File::open(&canonical)
+        .map_err(|error| format!("invalid_xcsh_executable: cannot read executable: {error}"))?;
+    let mut digest = sha2::Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut bytes_hashed = 0_u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("invalid_xcsh_executable: cannot hash executable: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        bytes_hashed = bytes_hashed.saturating_add(read as u64);
+        if bytes_hashed > MAX_NATIVE_EXECUTABLE_BYTES {
+            return Err(
+                "invalid_xcsh_executable: executable exceeds the maximum measurable size".into(),
+            );
+        }
+        use sha2::Digest;
+        digest.update(&buffer[..read]);
+    }
+    let after = std::fs::metadata(&canonical)
+        .map_err(|error| format!("invalid_xcsh_executable: cannot recheck executable: {error}"))?;
+    if after.len() != metadata.len() || after.modified().ok() != modified {
+        return Err("invalid_xcsh_executable: executable changed while it was measured".into());
+    }
+    use sha2::Digest;
+    Ok(NativeExecutableBinding {
+        canonical_path: canonical.to_string_lossy().into_owned(),
+        sha256: format!("{:x}", digest.finalize()),
+    })
+}
+
+/// Recheck a durable binding immediately before launch. This detects ordinary
+/// replacement or mutation between admission and effect; it does not claim an
+/// atomic object-handle-to-exec guarantee against a concurrently hostile owner.
+pub(crate) fn verify_xcsh_executable_binding(
+    expected: &NativeExecutableBinding,
+) -> Result<bool, String> {
+    Ok(measure_xcsh_executable(&expected.canonical_path)? == *expected)
 }
 
 fn is_canonical_xcsh_session_id(value: &str) -> bool {
@@ -794,11 +874,28 @@ mod tests {
             execution_id: "semantic-task".into(),
             generation,
             session_id: "0123abcd4567ef89".into(),
+            xcsh_executable: std::env::current_exe()
+                .expect("test executable path")
+                .to_string_lossy()
+                .into_owned(),
             text: "continue the task".into(),
             cwd: "/tmp".into(),
             workspace_id: None,
             label: None,
         }
+    }
+
+    fn copied_test_executable(name: &str) -> PathBuf {
+        let path = temp(name);
+        std::fs::copy(std::env::current_exe().expect("test executable"), &path)
+            .expect("copy test executable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("mark copied executable");
+        }
+        path
     }
 
     #[test]
@@ -816,6 +913,9 @@ mod tests {
         );
         assert_eq!(first.generation, Some(4));
         assert_eq!(first.native_producer.as_deref(), Some("xcsh"));
+        let executable = first.native_executable.as_ref().expect("native executable");
+        assert!(Path::new(&executable.canonical_path).is_absolute());
+        assert_eq!(executable.sha256.len(), 64);
         assert_eq!(first.injected_env["HERDR_EXECUTION_ID"], "semantic-task");
         assert_eq!(first.injected_env["HERDR_EXECUTION_GENERATION"], "4");
         let (retry, admitted, _) = manager.admit_xcsh_resume(&params).unwrap();
@@ -827,7 +927,43 @@ mod tests {
             .admit_xcsh_resume(&conflict)
             .unwrap_err()
             .contains("generation_conflict"));
+        let alternate = copied_test_executable("native-alternate-binding");
+        let mut binding_conflict = resume_params(4);
+        binding_conflict.xcsh_executable = alternate.to_string_lossy().into_owned();
+        assert!(manager
+            .admit_xcsh_resume(&binding_conflict)
+            .unwrap_err()
+            .contains("generation_conflict"));
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(alternate);
+    }
+
+    #[test]
+    fn native_executable_binding_detects_prelaunch_mutation() {
+        let path = copied_test_executable("native-binding-mutation");
+        let binding = measure_xcsh_executable(path.to_str().expect("utf8 path")).unwrap();
+        assert!(verify_xcsh_executable_binding(&binding).unwrap());
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"mutation")
+            .unwrap();
+        assert!(!verify_xcsh_executable_binding(&binding).unwrap());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_native_executable_binding_accepts_regular_executable_file() {
+        let binding = measure_xcsh_executable(
+            std::env::current_exe()
+                .expect("test executable")
+                .to_str()
+                .expect("utf8 executable path"),
+        )
+        .unwrap();
+        assert!(Path::new(&binding.canonical_path).is_file());
     }
 
     #[test]
@@ -1072,6 +1208,7 @@ mod tests {
                 semantic_execution_id: None,
                 generation: None,
                 native_producer: None,
+                native_executable: None,
                 producer_session_id: None,
                 injected_env: BTreeMap::new(),
                 superseded_by_backend_execution_id: None,

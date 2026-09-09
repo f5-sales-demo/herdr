@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 20,
+  "protocol": 21,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -2272,12 +2272,17 @@
                 "string",
                 "null"
               ]
+            },
+            "xcsh_executable": {
+              "description": "Absolute path to the XCSH executable that owns this generation.\nHerdr measures and persists its canonical path and SHA-256 before\nadmission; launches do not resolve `xcsh` through the server PATH.",
+              "type": "string"
             }
           },
           "required": [
             "execution_id",
             "generation",
             "session_id",
+            "xcsh_executable",
             "text",
             "cwd"
           ],
@@ -7691,6 +7696,16 @@
               },
               "type": "object"
             },
+            "native_executable": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/NativeExecutableBinding"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "native_producer": {
               "type": [
                 "string",
@@ -8064,6 +8079,22 @@
               "type": "object"
             }
           ]
+        },
+        "NativeExecutableBinding": {
+          "description": "Immutable measurement of the XCSH program admitted for a native child.",
+          "properties": {
+            "canonical_path": {
+              "type": "string"
+            },
+            "sha256": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "canonical_path",
+            "sha256"
+          ],
+          "type": "object"
         },
         "NotificationShowReason": {
           "enum": [

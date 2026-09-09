@@ -106,6 +106,7 @@ Raw socket method names use dot notation:
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
+| Execution | `execution.start`, `execution.resume`, `execution.get`, `execution.list`, `execution.wait`, `execution.cancel` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
@@ -126,6 +127,26 @@ worktree discovery remains `worktree.list`.
 
 From the CLI, `herdr api snapshot` prints the live `session.snapshot` response
 as JSON for clients and agents that want a simple bootstrap command.
+
+## Native XCSH resume binding
+
+`execution.resume` is a native lifecycle protocol, not a shell-command
+shortcut. Supply the exact canonical XCSH `SessionHeader` ID and an absolute
+`xcsh_executable` path. Herdr canonicalizes and hashes that executable before
+the durable generation claim, stores the binding in the execution receipt, and
+checks it again immediately before launch. A retry must provide the same
+binding; a relative, unavailable, or ordinarily replaced executable fails
+closed. This is a measured owner-controlled-artifact boundary, not an atomic
+file-handle-to-exec guarantee against a concurrently hostile filesystem owner.
+Herdr never resolves a native child through the server `PATH`.
+
+On Unix the path must also have an execute permission bit. On Windows it must
+be an absolute regular file; executable admission follows the platform process
+launcher, which applies its normal executable-format and extension rules.
+
+```json
+{"id":"resume-1","method":"execution.resume","params":{"execution_id":"task-42","generation":1,"session_id":"0123abcd4567ef89","xcsh_executable":"/opt/xcsh/bin/xcsh","text":"continue","cwd":"/work/project"}}
+```
 
 Pane control methods use public pane ids such as `w1:p1`. Methods whose
 schema makes `pane_id` optional use the server's active focused pane when it is
