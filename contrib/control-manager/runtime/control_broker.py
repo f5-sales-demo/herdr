@@ -301,14 +301,16 @@ def native_model_selector(raw: Any, field: str) -> str:
     """
     if not isinstance(raw, str):
         raise ValueError(f"{field} must be a string")
-    model = raw.strip()
-    if not model:
+    # This is deliberately the raw selector, not a display label.  Rust
+    # validates the received String directly, so trimming here could remove a
+    # leading/trailing C0 or C1 character before the backend ever sees it.
+    if not raw:
         raise ValueError(f"{field} is required")
-    if len(model.encode("utf-8")) > 256:
+    if len(raw.encode("utf-8")) > 256:
         raise ValueError(f"{field} exceeds 256 UTF-8 bytes")
-    if any(unicodedata.category(char) == "Cc" for char in model):
+    if any(unicodedata.category(char) == "Cc" for char in raw):
         raise ValueError(f"{field} must be a configured nonsecret selector")
-    return model
+    return raw
 
 
 def measure_native_launch(raw: Any, *, expected_executable_sha256: str | None = None) -> dict[str, Any]:
@@ -2784,6 +2786,43 @@ class Broker:
             "sha256": request["xcsh_executable_sha256"],
         }, "native_launch": launch}
 
+    @staticmethod
+    def _validate_native_xcsh_cancel_receipt(binding: sqlite3.Row,
+                                             execution: dict[str, Any]) -> None:
+        """Accept only a cooperative cancel receipt for this exact child.
+
+        Protocol 22 deliberately does not make a native cancel synonymous
+        with a PTY signal or terminal state.  The backend durably records the
+        request and the authenticated producer later proves its safe point in
+        the semantic journal.  A reply-loss retry must therefore re-check the
+        immutable generation binding before completing the manager action.
+        """
+        request = json.loads(binding["request_json"])
+        launch = request.get("native_launch")
+        executable = launch.get("xcsh_executable") if isinstance(launch, dict) else None
+        expected = {
+            "execution_id": binding["backend_execution_id"],
+            "semantic_execution_id": binding["semantic_execution_id"],
+            "generation": int(binding["generation"]),
+            "native_producer": "xcsh",
+            "producer_session_id": binding["session_id"],
+            "workspace_id": binding["workspace_id"],
+            "native_launch": launch,
+            "native_executable": {
+                "canonical_path": executable,
+                "sha256": request.get("xcsh_executable_sha256"),
+            },
+        }
+        if (not isinstance(execution, dict)
+                or any(execution.get(field) != value for field, value in expected.items())
+                or (execution.get("backend_execution_id") is not None
+                    and execution.get("backend_execution_id") != binding["backend_execution_id"])
+                or execution.get("cancel_requested") is not True):
+            raise RuntimeError(
+                "Herdr cancellation receipt conflicts with the immutable native generation "
+                "or does not confirm cooperative cancellation"
+            )
+
     async def _resume_xcsh_generation(self, task_id: str, *, generation: int, session_id: str,
                                       text: str, label: str, source_generation: int | None = None,
                                       source_turn_id: str | None = None,
@@ -2884,8 +2923,10 @@ class Broker:
             try:
                 result = await self.herdr.request("execution.cancel", {"execution_id": action["backend_execution_id"]}, timeout=10)
                 execution = result.get("execution", result)
-                if execution.get("execution_id") != action["backend_execution_id"]:
-                    raise RuntimeError("cancellation reconciliation received a foreign backend receipt")
+                binding = self.db.native_generation(action["task_id"], int(action["generation"]))
+                if binding is None:
+                    raise RuntimeError("cancellation reconciliation lost its native generation binding")
+                self._validate_native_xcsh_cancel_receipt(binding, execution)
                 self.db.complete_native_action(action["action_key"], execution)
             except Exception as exc:
                 LOG.debug("native XCSH cancellation reconciliation pending for %s: %s", action["action_key"], exc)
@@ -3988,6 +4029,11 @@ class Broker:
                     execution_id = binding["backend_execution_id"]
                     action = self.db.claim_native_cancel(task_id or "", int(binding["generation"]), execution_id)
                     if action["state"] == "completed":
+                        try:
+                            receipt = json.loads(action["receipt_json"] or "")
+                        except (TypeError, json.JSONDecodeError) as exc:
+                            raise RuntimeError("completed native cancellation lacks a durable receipt") from exc
+                        self._validate_native_xcsh_cancel_receipt(binding, receipt)
                         return public_task(self.db.task(task_id or ""))  # type: ignore[arg-type]
                 result = await self.herdr.request(
                     "execution.cancel", {"execution_id": execution_id}, timeout=10
@@ -3996,8 +4042,7 @@ class Broker:
                     await self._apply_native_execution(task_id or "", result["execution"])
                 else:
                     execution = result.get("execution", result)
-                    if execution.get("execution_id") != execution_id:
-                        raise RuntimeError("Herdr cancellation receipt is for a different backend execution")
+                    self._validate_native_xcsh_cancel_receipt(binding, execution)
                     self.db.complete_native_action(action["action_key"], execution)
                     self.db.update(
                         task_id or "", event="xcsh_cancel_requested", stop_requested_at=self.clock(),

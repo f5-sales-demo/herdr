@@ -77,7 +77,13 @@ class FakeHerdr:
             return {"execution": self.executions[params["execution_id"]]}
         if method == "execution.cancel":
             execution = self.executions[params["execution_id"]]
-            execution.update(state="cancelled", signal_name="Interrupt", output_complete=True)
+            # Protocol-22 native cancellation is cooperative: this request
+            # persists intent, while only a later authenticated semantic turn
+            # can settle the task as cancelled.
+            if execution.get("native_launch") is not None:
+                execution.update(cancel_requested=True)
+            else:
+                execution.update(state="cancelled", signal_name="Interrupt", output_complete=True)
             return {"execution": execution, "admitted": False}
         if method == "ping":
             return {"protocol": 22, "capabilities": {"tracked_executions": True, "agent_turn_journal": True}}
@@ -1113,16 +1119,27 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
                 "idempotency_key": key,
             })
 
-        accepted = await admit("m" * 256, "model-256")
+        accepted = await admit(" model ", "model-whitespace")
         self.assertEqual(accepted["state"], "starting")
+        self.assertEqual(accepted["native_launch"]["model"], " model ")
+        accepted_boundary = await admit("m" * 256, "model-256")
+        self.assertEqual(accepted_boundary["native_launch"]["model"], "m" * 256)
         for model, key, field in (("m" * 257, "model-257", "native_launch.model"),
                                   ("é" * 129, "model-utf8", "native_launch.model"),
                                   ("safe\u0085selector", "model-control", "native_launch.model")):
             with self.assertRaisesRegex(ValueError, field):
                 await admit(model, key, runtime_model="test/model")
-        with self.assertRaisesRegex(ValueError, "runtime_identity.xcsh_model"):
-            await admit("test/model", "runtime-control", runtime_model="safe\u0085selector")
-        self.assertEqual(len([row for row in self.broker.db.list_tasks() if row["work_kind"] == "xcsh"]), 1)
+        # Python ``strip`` would silently remove these C0/C1 controls.  The
+        # manager must reject the raw launch and runtime identity exactly as
+        # Rust's ``char::is_control`` check does, before claiming a task.
+        for control, name in (("\u001c", "c0"), ("\u0085", "c1")):
+            for model, suffix in ((f"{control}selector", "leading"),
+                                  (f"selector{control}", "trailing")):
+                with self.assertRaisesRegex(ValueError, "native_launch.model"):
+                    await admit(model, f"model-{name}-{suffix}", runtime_model="test/model")
+                with self.assertRaisesRegex(ValueError, "runtime_identity.xcsh_model"):
+                    await admit("test/model", f"runtime-{name}-{suffix}", runtime_model=model)
+        self.assertEqual(len([row for row in self.broker.db.list_tasks() if row["work_kind"] == "xcsh"]), 2)
 
     async def test_native_xcsh_rejects_protocol20_before_durable_generation_claim(self):
         workspace = await self.configure_control_workspace()
@@ -1385,6 +1402,46 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recovered["state"], "completed")
         cancels = [call for call in self.broker.herdr.calls if call[0] == "execution.cancel"]
         self.assertEqual({call[1]["execution_id"] for call in cancels}, {binding["backend_execution_id"]})
+
+    async def test_xcsh_cancel_receipt_requires_exact_cooperative_generation_binding(self):
+        """Synthetic component fixture for protocol-22 cancel receipt validation."""
+        workspace = await self.configure_control_workspace()
+        task = await self.admit_native_xcsh({
+            "target": "xcsh-cancel-binding", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
+            "text": "safe", "session_id": "session-cancel-binding", "workspace_id": workspace["workspace"]["workspace_id"],
+            "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"},
+            "idempotency_key": "cancel-binding",
+        })
+        binding = self.broker.db.current_native_generation(task["id"])
+        original_request = self.broker.herdr.request
+
+        async def foreign_receipt(method, params=None, timeout=65):
+            result = await original_request(method, params, timeout)
+            if method != "execution.cancel":
+                return result
+            execution = dict(result["execution"])
+            execution["native_executable"] = {"canonical_path": "/foreign/xcsh", "sha256": "0" * 64}
+            return {**result, "execution": execution}
+
+        self.broker.herdr.request = foreign_receipt
+        with self.assertRaisesRegex(RuntimeError, "immutable native generation"):
+            await self.broker.request_stop({"task_id": task["id"]})
+        action = self.broker.db.conn.execute(
+            "SELECT * FROM native_execution_actions WHERE task_id=? AND generation=0 AND kind='cancel'",
+            (task["id"],),
+        ).fetchone()
+        self.assertEqual(action["state"], "claimed")
+        # The backend's real record is still cooperative and nonterminal; a
+        # recovery can accept it only after rechecking every durable field.
+        self.assertEqual(self.broker.herdr.executions[binding["backend_execution_id"]]["state"], "running")
+        self.assertTrue(self.broker.herdr.executions[binding["backend_execution_id"]]["cancel_requested"])
+        self.broker.herdr.request = original_request
+        await self.broker._reconcile_native_xcsh_admissions(task["id"])
+        recovered = self.broker.db.conn.execute(
+            "SELECT * FROM native_execution_actions WHERE action_key=?", (action["action_key"],)
+        ).fetchone()
+        self.assertEqual(recovered["state"], "completed")
+        self.assertTrue(json.loads(recovered["receipt_json"])["cancel_requested"])
 
     async def test_native_xcsh_offline_chain_uses_real_db_outbox_inbox_and_ack(self):
         workspace = await self.configure_control_workspace()
