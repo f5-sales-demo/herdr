@@ -980,6 +980,26 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay["id"], task["id"])
         self.assertEqual(len(self.broker.herdr.executions), 1)
 
+    async def test_native_xcsh_concurrent_same_key_reuses_atomic_gen0_claim(self):
+        """Synthetic component fixture for the post-preflight admission race."""
+        workspace = await self.configure_control_workspace()
+        params = {
+            "target": "xcsh-atomic-race", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
+            "text": "safe", "session_id": "session-atomic-race", "workspace_id": workspace["workspace"]["workspace_id"],
+            "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"},
+            "idempotency_key": "atomic-race",
+        }
+        first, second = await asyncio.gather(
+            self.broker.native_xcsh_admit(params), self.broker.native_xcsh_admit(dict(params)),
+        )
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(len(self.broker.herdr.executions), 1)
+        bindings = self.broker.db.conn.execute(
+            "SELECT generation,request_json FROM native_execution_generations WHERE task_id=?", (first["id"],)
+        ).fetchall()
+        self.assertEqual(len(bindings), 1)
+        self.assertEqual(bindings[0]["generation"], 0)
+
     async def test_xcsh_generation_history_rejects_foreign_panes_and_settles_old_child(self):
         """Synthetic component fixture for ledger rules; not UAT evidence."""
         workspace = await self.configure_control_workspace()

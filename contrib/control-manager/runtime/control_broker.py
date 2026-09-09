@@ -1221,6 +1221,22 @@ class StateDB:
         """Commit task, caller replay key, and gen-0 intent as one boundary."""
         self.conn.execute("BEGIN IMMEDIATE")
         try:
+            # The preflight replay lookup is intentionally only an optimization:
+            # concurrent callers can both observe its absence.  Recheck while
+            # holding the write transaction so the second caller reuses the
+            # first immutable gen-0 claim instead of failing or creating work.
+            prior = self.conn.execute(
+                "SELECT method,request_sha256,task_id FROM admission_idempotency WHERE idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+            if prior is not None:
+                if prior["method"] != "native_xcsh_admit" or prior["request_sha256"] != idempotency_digest:
+                    raise ValueError("idempotency_key was already used for a different admission")
+                row = self.task(prior["task_id"])
+                if row is None:
+                    raise RuntimeError("native XCSH admission evidence has no retained task")
+                self.conn.commit()
+                return row
             self.add_task(data, commit=False)
             self.conn.execute(
                 "INSERT INTO admission_idempotency(idempotency_key,method,request_sha256,task_id,created_at) VALUES(?,?,?,?,?)",
