@@ -1,6 +1,5 @@
 [Unit]
 Description=Control Manager observation-only recovery supervisor
-After=default.target
 
 [Service]
 Type=notify

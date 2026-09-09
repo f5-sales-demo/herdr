@@ -67,6 +67,43 @@ class NativeTransportAcceptance(unittest.TestCase):
             screen = plugin.render({'affected_sessions':['Configured Manager']})
         self.assertIn('Affected sessions:\n- Configured Manager', screen)
 
+    def test_popup_keeps_health_action_and_controls_at_120x40(self):
+        status = {
+            'state': 'degraded', 'paused': True,
+            'components': [{'component': f'component-{n}', 'status': 'failed', 'failures': n,
+                            'checked_at': 1, 'reason': 'a deliberately long diagnostic reason that must never wrap into another popup row'} for n in range(12)],
+            'affected_sessions': [f'session-{n}' for n in range(10)],
+            'recent_outcomes': [{'state': 'completed', 'component': f'component-{n}', 'updated_at': 1,
+                                 'outcome_json': '{"note":"a deliberately long durable result"}'} for n in range(4)],
+        }
+        with patch.object(plugin, '_config', return_value={}):
+            screen = plugin.render(status, notice='pause requested', width=120, height=40)
+        rows = screen.splitlines()
+        self.assertLessEqual(len(rows), 40)
+        self.assertTrue(all(len(row) <= 120 for row in rows))
+        self.assertIn('Health: degraded', screen)
+        self.assertIn('Automatic recovery: paused', screen)
+        self.assertIn('Action: pause requested', screen)
+        self.assertIn('Controls: Recover now', screen)
+        self.assertIn('Durable recent outcomes:', screen)
+        self.assertFalse(screen.endswith('\n'))
+
+    def test_popup_keeps_health_and_controls_at_80x24(self):
+        status = {'state': 'healthy', 'paused': True,
+                  'components': [{'component': 'broker', 'status': 'healthy', 'failures': 0,
+                                  'checked_at': 1, 'reason': 'long diagnostic ' * 20}],
+                  'recent_outcomes': [{'state': 'completed', 'component': 'broker', 'updated_at': 1,
+                                       'outcome_json': '{"note":"long durable result"}'} for _ in range(4)]}
+        with patch.object(plugin, '_config', return_value={}):
+            screen = plugin.render(status, notice='resume requested', width=80, height=24)
+        rows = screen.splitlines()
+        self.assertLessEqual(len(rows), 24)
+        self.assertTrue(all(len(row) <= 80 for row in rows))
+        self.assertIn('Health: healthy', screen)
+        self.assertIn('Automatic recovery: paused', screen)
+        self.assertIn('Controls: Recover now', screen)
+        self.assertIn('Durable recent outcomes:', screen)
+
     def test_recovery_progress_opens_before_waiting_for_response(self):
         events = []
         def stalled(method):

@@ -111,49 +111,79 @@ def _brief(value: Any, limit: int = 120) -> str:
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
-def render(status: dict[str, Any], *, notice: str | None = None) -> str:
+def _clip_line(value: str, width: int) -> str:
+    """Keep output on one terminal row; the native popup does not wrap safely."""
+    if width <= 1:
+        return "…"
+    return value if len(value) <= width else value[:width - 1] + "…"
+
+
+def _fit_popup(header: list[str], sections: list[list[str]], footer: list[str], *, width: int, height: int) -> str:
+    """Fit a live popup without sacrificing its health header or controls."""
+    width = max(1, width)
+    available = max(0, height - len(header) - len(footer))
+    body: list[str] = []
+    # Reserve durable-outcome rows before optional component/session details.
+    outcomes = sections[-1] if sections else []
+    reserved_outcomes = min(len(outcomes), 3) if outcomes and available else 0
+    for section in sections[:-1]:
+        for line in section:
+            if len(body) >= max(0, available - reserved_outcomes):
+                break
+            body.append(line)
+    for line in outcomes:
+        if len(body) >= available:
+            break
+        body.append(line)
+    return "\n".join(_clip_line(line, width) for line in [*header, *body, *footer][:height])
+
+
+def render(status: dict[str, Any], *, notice: str | None = None,
+           width: int | None = None, height: int | None = None) -> str:
     """Render stable, terminal-readable popup content rather than raw JSON."""
-    lines = ["Control Manager recovery", "=" * 24]
-    lines.append(f"Health: {status.get('state', 'unavailable')}")
+    header = ["Control Manager recovery", "=" * 24]
+    header.append(f"Health: {status.get('state', 'unavailable')}")
     mode = status.get("supervisor_mode", _config().get("supervisor_mode", "observation_only"))
     automatic = "paused" if status.get("paused") else (
         "enabled" if mode == "isolated_active" or (
             mode == "guarded_live" and status.get("recovery_live_enabled", _config().get("recovery_live_enabled")) is True
         ) else "observation only")
-    lines.append(f"Automatic recovery: {automatic}")
+    header.append(f"Automatic recovery: {automatic}")
     if notice:
-        lines.extend(("", f"Action: {notice}"))
+        header.append(f"Action: {notice}")
     active = [item for item in status.get("recent_outcomes", []) if item.get("state") in {"claimed", "recovering"}]
-    lines.extend(("", "Current recovery action:"))
+    current = ["", "Current recovery action:"]
     if active:
         for item in active[:3]:
-            lines.append(f"- {item.get('component', 'unknown')} / {item.get('kind', 'unknown')} ({item.get('state')})")
+            current.append(f"- {item.get('component', 'unknown')} / {item.get('kind', 'unknown')} ({item.get('state')})")
     else:
-        lines.append("- none")
-    lines.extend(("", "Component health:"))
+        current.append("- none")
+    health = ["", "Component health:"]
     components = status.get("components", [])
     if not components:
-        lines.append("- no supervisor observations yet")
+        health.append("- no supervisor observations yet")
     for item in components:
         detail = _brief(item.get("reason"), 46)
         suffix = f" — {detail}" if detail else ""
-        lines.append(f"- {item.get('component', 'unknown')}: {item.get('status', 'unknown')} ({item.get('failures', 0)} failures) [{_when(item.get('checked_at'))}]{suffix}")
+        health.append(f"- {item.get('component', 'unknown')}: {item.get('status', 'unknown')} ({item.get('failures', 0)} failures) [{_when(item.get('checked_at'))}]{suffix}")
     sessions = status.get("affected_sessions") or _config().get("affected_sessions") or []
-    lines.extend(("", "Affected sessions:"))
+    affected = ["", "Affected sessions:"]
     if sessions:
         for session in sessions[:10]:
-            lines.append(f"- {session}")
+            affected.append(f"- {session}")
     else:
-        lines.append("- none reported by supervisor")
-    lines.extend(("", "Durable recent outcomes:"))
+        affected.append("- none reported by supervisor")
+    outcomes = ["", "Durable recent outcomes:"]
     recent = status.get("recent_outcomes", [])
     if recent:
         for item in recent[:4]:
-            lines.append(f"- {_when(item.get('updated_at'))} {item.get('component', 'unknown')}: {_brief(_outcome(item))}")
+            outcomes.append(f"- {_when(item.get('updated_at'))} {item.get('component', 'unknown')}: {_brief(_outcome(item))}")
     else:
-        lines.append("- none")
-    lines.extend(("", "", "Controls: Recover now · Pause automatic recovery · Resume automatic recovery"))
-    return "\n".join(lines) + "\n"
+        outcomes.append("- none")
+    footer = ["", "Controls: Recover now · Pause automatic recovery · Resume automatic recovery"]
+    if width is None or height is None:
+        return "\n".join([*header, *current, *health, *affected, *outcomes, *footer])
+    return _fit_popup(header, [current, health, affected, outcomes], footer, width=width, height=height)
 
 
 def main() -> int:
@@ -182,10 +212,13 @@ def popup() -> int:
     notice = os.environ.get("CODEX_CONTROL_RECOVERY_NOTICE")
     while True:
         try:
-            screen = render(_request("status"), notice=notice)
+            size = os.get_terminal_size()
+            screen = render(_request("status"), notice=notice, width=size.columns, height=size.lines)
         except Exception as exc:
-            screen = f"Control Manager recovery\n\nUnavailable: {exc}\n"
-        print("\033[H\033[2J" + screen + "\nUse native Recover now, Pause automatic recovery, or Resume automatic recovery.\n", flush=True)
+            size = os.get_terminal_size()
+            screen = _fit_popup(["Control Manager recovery", "", f"Unavailable: {exc}"], [], ["", "Controls: Recover now · Pause automatic recovery · Resume automatic recovery"], width=size.columns, height=size.lines)
+        sys.stdout.write("\033[H\033[2J" + screen)
+        sys.stdout.flush()
         time.sleep(0.5)
 
 

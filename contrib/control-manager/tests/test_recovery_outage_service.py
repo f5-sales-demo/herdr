@@ -21,7 +21,7 @@ class OutageService(unittest.IsolatedAsyncioTestCase):
       if cooldown:break
       await asyncio.sleep(.05)
      else:self.fail('component budget never exhausted')
-     reader,writer=await asyncio.open_unix_connection(str(root/'sock'));writer.write(b'{"method":"status"}\n');await writer.drain();reply=json.loads(await asyncio.wait_for(reader.readline(),1));writer.close();await writer.wait_closed()
+     reader,writer=await asyncio.open_unix_connection(str(root/'sock'),limit=1_000_000);writer.write(b'{"method":"status"}\n');await writer.drain();reply=json.loads(await asyncio.wait_for(reader.readline(),1));writer.close();await writer.wait_closed()
      self.assertTrue(reply['ok']);self.assertFalse(service.done());self.assertEqual(s.db.conn.execute("SELECT count(*) FROM recovery_restart_attempts WHERE component='broker'").fetchone()[0],3)
     finally:
      s.stop.set();await asyncio.wait_for(service,3);s.db.conn.close()
