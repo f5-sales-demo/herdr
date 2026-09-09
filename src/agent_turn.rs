@@ -548,6 +548,29 @@ mod tests {
             tombstones: vec![],
         };
         std::fs::write(&turn_path, serde_json::to_vec(&journal).unwrap()).unwrap();
+        executions
+            .confirm_native_start_journaled(&claimed, &starting)
+            .unwrap();
+        executions
+            .request_native_cancel(&claimed.execution_id)
+            .unwrap();
+        let target = crate::api::schema::AgentTurnActionTarget {
+            execution_id: "semantic".into(),
+            pane_id: "w1:p1".into(),
+            producer: "xcsh".into(),
+            session_id: "0123abcd4567ef89".into(),
+            generation: 1,
+            native_capability: cap.clone(),
+            after_revision: 0,
+        };
+        executions
+            .acknowledge_native_action(&crate::api::schema::AgentTurnActionAckParams {
+                target,
+                action_id: "cancel".into(),
+                action_revision: 1,
+                state: crate::api::schema::AgentTurnActionState::SafePoint,
+            })
+            .unwrap();
         drop(executions);
         let executions = crate::execution::ExecutionManager::load_at(exec_path.clone());
         let turns = AgentTurnManager::load_at(turn_path.clone());
@@ -568,19 +591,45 @@ mod tests {
             .unwrap()
             .journaled_at_unix_ms
             .is_some());
+        // Crash window: terminal frame is durable in the turn journal after a
+        // safe point, but execution/action settlement has not run yet.
+        let terminal = AgentTurnReportParams {
+            event_revision: 2,
+            state: AgentTurnState::Cancelled,
+            native_capability: Some(cap.clone()),
+            ..starting.clone()
+        };
+        {
+            let mut journal = turns.0.state.lock().unwrap();
+            journal.revision += 1;
+            let revision = journal.revision;
+            journal.records.push(AgentTurnRecord {
+                report: AgentTurnReportParams {
+                    native_capability: None,
+                    ..terminal.clone()
+                },
+                revision,
+                reported_at_unix_ms: now_ms(),
+            });
+            turns.persist_locked(&journal).unwrap();
+        }
         drop(turns);
         drop(executions);
         let executions = crate::execution::ExecutionManager::load_at(exec_path);
         let turns = AgentTurnManager::load_at(turn_path);
         assert!(
             !turns
-                .report_with_execution_manager(starting.clone(), &executions)
+                .report_with_execution_manager(terminal.clone(), &executions)
                 .unwrap()
                 .1
         );
         assert_eq!(
             executions.get(&claimed.execution_id).unwrap().state,
-            crate::api::schema::ExecutionState::Lost
+            crate::api::schema::ExecutionState::Cancelled
+        );
+        assert_eq!(
+            executions.get(&claimed.execution_id).unwrap().state,
+            crate::api::schema::ExecutionState::Cancelled
         );
         assert!(executions
             .get(&claimed.execution_id)
@@ -598,7 +647,7 @@ mod tests {
             native_capability: cap.clone(),
             after_revision: 0,
         };
-        assert!(executions.native_actions(&target).unwrap().is_empty());
+        assert!(executions.native_actions(&target).unwrap()[0].settled_at_unix_ms.is_some());
         let mut altered = starting;
         altered.reason = Some("altered".into());
         assert!(turns
