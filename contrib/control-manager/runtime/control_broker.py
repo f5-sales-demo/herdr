@@ -30,7 +30,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from control_portable import STATE_SCHEMA_VERSION, machine_config_path, package_root, state_root
+from control_portable import STATE_SCHEMA_VERSION, machine_config_path, package_root, runtime_root, state_root
 
 
 LOG = logging.getLogger("control-broker")
@@ -1796,7 +1796,7 @@ class Broker:
             try:
                 process = await asyncio.create_subprocess_exec(
                     "/usr/bin/python3",
-                    str(package_root() / "appserver_manager.py"),
+                    str(runtime_root() / "appserver_manager.py"),
                     "hold",
                     str(thread_id),
                     stdout=asyncio.subprocess.PIPE,
@@ -1877,7 +1877,13 @@ class Broker:
         if not isinstance(method, str) or not isinstance(params, dict):
             raise ValueError("method and params are required")
         if method == "ping":
-            return {"status": "ok", "running": self.db.running_count(), "capabilities": {"native_xcsh_admit": True}}
+            config = self.config()
+            return {"status": "ok", "running": self.db.running_count(), "capabilities": {
+                "native_xcsh_admit": True,
+                "native_turn_consumer": bool(config.get("agent_turn_consumer_enabled")),
+                "native_turn_producer": str(config.get("agent_turn_producer", "xcsh")),
+                "native_turn_cursor": self.db.native_turn_cursor("__herdr_global__"),
+            }}
         if method == "dispatch":
             return await self.dispatch(params)
         if method == "native_xcsh_admit":
@@ -3999,7 +4005,7 @@ class Broker:
         result = await self._run_json_required(
             [
                 "/usr/bin/python3",
-                str(package_root() / "worker_appserver.py"),
+                str(runtime_root() / "worker_appserver.py"),
                 "create",
                 "--cwd",
                 row["cwd"],
@@ -4038,7 +4044,7 @@ class Broker:
         result = await self._run_json_required(
             [
                 "/usr/bin/python3",
-                str(package_root() / "worker_appserver.py"),
+                str(runtime_root() / "worker_appserver.py"),
                 "prompt",
                 "--thread-id",
                 session_id,
@@ -4097,7 +4103,7 @@ class Broker:
                     return
                 try:
                     result = await self._run_json_required(
-                        ["/usr/bin/python3", str(package_root() / "worker_appserver.py"),
+                        ["/usr/bin/python3", str(runtime_root() / "worker_appserver.py"),
                          "status", "--thread-id", row["agent_session_id"], "--turn-id", turn_id], timeout=10,
                     )
                     status = result.get("turn_status")
@@ -4148,7 +4154,7 @@ class Broker:
                     result = await self._run_json_required(
                         [
                             "/usr/bin/python3",
-                            str(package_root() / "worker_appserver.py"),
+                            str(runtime_root() / "worker_appserver.py"),
                             "status",
                             "--thread-id",
                             row["agent_session_id"],
@@ -4897,7 +4903,7 @@ Requested task:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--socket", type=Path, default=Path(os.environ.get("CONTROL_BROKER_SOCKET", str(package_root() / "control.sock"))))
+    parser.add_argument("--socket", type=Path, default=Path(os.environ.get("CONTROL_BROKER_SOCKET", str(state_root() / "control.sock"))))
     parser.add_argument(
         "--database", type=Path, default=Path(os.environ.get("CONTROL_BROKER_DATABASE", str(state_root() / "tasks.sqlite3")))
     )

@@ -17,10 +17,11 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
-from control_portable import machine_config_path, package_root, state_root
+from control_portable import machine_config_path, package_root, runtime_root, state_root
 
 
 CONTROL_ROOT = package_root()
+RUNTIME_ROOT = runtime_root(CONTROL_ROOT)
 CODEX = os.environ.get("CODEX_BINARY", "codex")
 MANAGER_NAME = os.environ.get("CODEX_CONTROL_MANAGER_NAME", "Control Manager")
 MANAGER_CWD = os.environ.get("CODEX_CONTROL_MANAGER_CWD", str(CONTROL_ROOT))
@@ -65,7 +66,7 @@ def manager_config() -> dict[str, Any]:
             "playwright-headless": {"enabled": False},
             "control_broker": {
                 "command": "/usr/bin/python3",
-                "args": [str(CONTROL_ROOT / "control_mcp.py")],
+                "args": [str(RUNTIME_ROOT / "control_mcp.py")],
                 "cwd": MANAGER_CWD,
                 "env": {"CONTROL_BROKER_SOCKET": BROKER_SOCKET},
                 "enabled": True,

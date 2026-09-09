@@ -62,9 +62,8 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_hung_probe_failures_are_parallel_and_bounded(self):
         # The real Unix-socket hang is exercised by the native harness.  This
-        # unit test verifies only supervisor fan-out. Stub its independent
-        # app-server/native subprocess probes so runner load cannot turn this
-        # timing assertion into an unrelated process-scheduling failure.
+        # unit test verifies only supervisor fan-out. Stub independent
+        # subprocess probes so runner load cannot invalidate its timing bound.
         async def hung(path, payload=None):
             await asyncio.sleep(.05)
             return False, 'TimeoutError: injected hung probe'

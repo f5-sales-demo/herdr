@@ -12,6 +12,8 @@ import argparse, asyncio, contextlib, fcntl, json, os, signal, socket, sqlite3, 
 from pathlib import Path
 from typing import Any
 
+from control_portable import runtime_root
+
 INTERVAL, PROBE_TIMEOUT, FAILURE_THRESHOLD = 10.0, 5.0, 3
 CLAIM_LEASE_SECONDS = 120.0
 RESTART_LIMIT, RESTART_WINDOW, COOLDOWN = 3, 900.0, 900.0
@@ -259,7 +261,7 @@ async def appserver_probe(cfg: dict[str, Any], config_path: Path) -> tuple[bool,
     """Authoritatively read the configured manager thread and actual tools."""
     thread=str(cfg.get("manager_thread_id") or "")
     if not cfg.get("app_server_socket") or not thread: return False,"app-server socket or canonical manager thread is not configured",{}
-    command=cfg.get("appserver_probe_command") or ["/usr/bin/python3",str(Path(__file__).with_name("appserver_manager.py")),"probe",thread]
+    command=cfg.get("appserver_probe_command") or ["/usr/bin/python3",str(runtime_root() / "appserver_manager.py"),"probe",thread]
     if not isinstance(command,list) or not all(isinstance(item,str) for item in command): return False,"invalid appserver_probe_command",{}
     env=os.environ | {"CODEX_APP_SERVER_SOCKET":str(cfg["app_server_socket"]),"CODEX_CONTROL_CONFIG_PATH":str(config_path)}
     try:
@@ -283,7 +285,7 @@ async def native_manager_probe(cfg: dict[str, Any], config_path: Path) -> tuple[
         # Do not invent a pane binding.  This is fail-closed readiness (not an
         # automatic recovery target) until rollout has supplied both ids.
         return "degraded","configured native manager pane binding is incomplete",{}
-    command=cfg.get("native_manager_probe_command") or ["/usr/bin/python3",str(Path(__file__).with_name("appserver_manager.py")),"native-pane-health",thread]
+    command=cfg.get("native_manager_probe_command") or ["/usr/bin/python3",str(runtime_root() / "appserver_manager.py"),"native-pane-health",thread]
     if not isinstance(command,list) or not all(isinstance(item,str) for item in command):
         return "degraded","invalid native_manager_probe_command",{}
     env=os.environ | {"CODEX_CONTROL_CONFIG_PATH":str(config_path)}
@@ -643,7 +645,7 @@ class Supervisor:
                 return {"state":"waiting_rollout","reason":"manager continuation requires isolated_active or explicitly enabled guarded_live mode"}
             if not failed_turn:
                 return {"state":"blocked","reason":"exact failed turn id was not retained for authoritative reread"}
-            argv=["/usr/bin/python3",str(Path(__file__).with_name("appserver_manager.py")),"resume",thread,failed_turn]
+            argv=["/usr/bin/python3",str(runtime_root() / "appserver_manager.py"),"resume",thread,failed_turn]
             env=os.environ | {"CODEX_APP_SERVER_SOCKET":str(cfg.get("app_server_socket") or ""),"CODEX_CONTROL_CONFIG_PATH":str(self.config)}
             try:
                 code,out,err=await bounded_process(argv,env,timeout=float(cfg.get("recovery_action_timeout",30)))
@@ -654,7 +656,7 @@ class Supervisor:
             if not allowed:
                 return {"state":"waiting_rollout","reason":"capability candidate refresh requires isolated_active or explicitly enabled guarded_live mode"}
             command="refresh-tools-activate" if mode == "guarded_live" and cfg.get("recovery_live_enabled") is True else "refresh-tools"
-            argv=["/usr/bin/python3",str(Path(__file__).with_name("appserver_manager.py")),command,thread]
+            argv=["/usr/bin/python3",str(runtime_root() / "appserver_manager.py"),command,thread]
             env=os.environ | {"CODEX_APP_SERVER_SOCKET":str(cfg.get("app_server_socket") or ""),"CODEX_CONTROL_CONFIG_PATH":str(self.config)}
             try: code,out,err=await bounded_process(argv,env,timeout=float(cfg.get("recovery_action_timeout",30)))
             except Exception as exc: return {"state":"failed","reason":str(exc)}

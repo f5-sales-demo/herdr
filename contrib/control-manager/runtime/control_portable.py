@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Any
 
 
-PACKAGE_VERSION = 18
-STATE_SCHEMA_VERSION = 9
+PACKAGE_VERSION = 20
+STATE_SCHEMA_VERSION = 10
 
 
 def package_root() -> Path:

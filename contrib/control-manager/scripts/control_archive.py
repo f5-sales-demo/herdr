@@ -165,6 +165,7 @@ def attest(args: argparse.Namespace) -> None:
         config = json.loads((state / "machine.json").read_text())
         if config.get("control_root") != str(installed) or config.get("state_dir") != str(state):
             raise ValueError("installed bootstrap did not preserve the new package/state roots")
+        subprocess.run([sys.executable, str(installed / "scripts" / "runtime_smoke.py")], env=environment, check=True)
     print(json.dumps({"attested": True, "archive": args.archive.name}, sort_keys=True))
 
 

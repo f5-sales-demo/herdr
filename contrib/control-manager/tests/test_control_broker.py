@@ -876,6 +876,30 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(replay["idempotency_replayed"])
         self.assertEqual(len([call for call in self.broker.herdr.calls if call[0] == "execution.start"]), 1)
 
+    async def test_native_xcsh_offline_chain_uses_real_db_outbox_inbox_and_ack(self):
+        workspace = await self.configure_control_workspace()
+        self.broker.config_path.write_text(json.dumps({"agent_turn_consumer_enabled": True, "agent_turn_producer": "xcsh"}))
+        task = await self.broker.native_xcsh_admit({
+            "target": "xcsh-e2e", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
+            "workspace_id": workspace["workspace"]["workspace_id"], "argv": ["/isolated/xcsh", "--prompt", "safe"],
+            "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"}, "idempotency_key": "xcsh-e2e",
+        })
+        row = self.broker.db.task(task["id"])
+        result = "offline semantic completion"
+        base = {"execution_id": task["id"], "pane_id": row["pane_id"], "producer": "xcsh", "session_id": "s1", "turn_id": "t1", "generation": 0}
+        self.broker.herdr.agent_turns = [
+            {"revision": 1, "report": base | {"event_revision": 1, "state": "starting"}},
+            {"revision": 2, "report": base | {"event_revision": 2, "state": "completed", "result": result, "result_digest": hashlib.sha256(result.encode()).hexdigest()}},
+        ]
+        applied = await self.broker.consume_native_turns()
+        self.assertEqual([item["state"] for item in applied["applied"]], ["starting", "completed"])
+        inbox = self.broker.db.deliver_inbox()
+        event = next(item for item in inbox if item["task_id"] == task["id"])
+        self.assertEqual(event["delivery_state"], "delivered")
+        self.broker.db.ack_completion(event["event_id"], "consumed", "offline_manager", "offline-e2e", "turn-1")
+        state = self.broker.db.conn.execute("SELECT state FROM completion_outbox WHERE event_id=?", (event["event_id"],)).fetchone()["state"]
+        self.assertEqual(state, "consumed")
+
     async def test_duplicate_command_launch_is_refused_before_a_second_wrapper(self):
         command = await self.broker.run_command(
             {"label": "exactly once", "cwd": str(self.root), "shell": "zsh", "command": "xcsh"}

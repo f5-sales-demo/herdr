@@ -1,9 +1,15 @@
 # Control Manager
 
-Control Manager is a portable, versioned task-orchestration runtime for Herdr
-and Codex. A release archive contains only reusable source, policy, fixtures,
-and tests. It never contains credentials, machine configuration, SQLite state,
-terminal/session history, screenshots, or personal operational documents.
+Control Manager is a portable, versioned recovery/manager runtime for Herdr
+and Codex. A release archive contains only reviewed reusable recovery source,
+policy, fixtures, and tests. It never contains credentials, machine
+configuration, SQLite state, terminal/session history, screenshots, or
+personal operational documents.
+
+Release scope deliberately excludes unfinished XCSH UAT/controller modules,
+their fixtures, and XCSH acceptance tests. It also excludes live-release UAT
+drivers. Those are separate products/workstreams and cannot be inferred from
+this recovery-manager distribution.
 
 ## Verify and install a release
 
@@ -45,8 +51,8 @@ python3 /opt/control-manager/runtime/control_broker.py \
 
 ## Validation boundary
 
-`scripts/control_archive.py test` runs the portable unit suite. The included
-native journal fixtures validate protocol boundaries but cannot prove an
-installed terminal, provider prompt, or visual TUI. Operators must separately
-run the release-specific installed prompt/visual UAT against their authorized
-environment and retain its evidence before accepting a durable recovery claim.
+`scripts/control_archive.py test` runs the portable recovery/manager unit
+suite. It cannot prove an installed terminal, provider prompt, or visual TUI.
+Operators must separately run release-specific installed prompt/visual UAT in
+their authorized environment and retain its evidence before accepting a
+durable recovery claim.

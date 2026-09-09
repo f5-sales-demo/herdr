@@ -13,11 +13,12 @@ from typing import Any
 
 
 def _config() -> dict[str, Any]:
-    # A linked/installed plugin does not inherit the systemd unit environment.
-    # Prefer an explicit plugin-owned binding, then retain the direct-launch
-    # override and development-root fallback for isolated harnesses.
+    # A linked/installed plugin does not inherit the supervisor's service
+    # environment. Prefer explicit bindings and otherwise use the package's
+    # machine-local state location; never assume a sibling package-root config.
     plugin_config = os.environ.get("HERDR_PLUGIN_CONFIG_DIR")
-    default = Path(plugin_config) / "machine.json" if plugin_config else Path(__file__).resolve().parents[1] / "machine.json"
+    xdg = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
+    default = Path(plugin_config) / "machine.json" if plugin_config else xdg / "codex-control" / "machine.json"
     path = Path(os.environ.get("CODEX_CONTROL_CONFIG_PATH", default))
     return json.loads(path.read_text())
 
