@@ -117,6 +117,9 @@ pub struct NativeProducerRegistration {
     pub pid: u32,
     pub turn_id: String,
     pub registered_at_unix_ms: u64,
+    /// Set only after the matching starting frame is durable in the turn journal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journaled_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

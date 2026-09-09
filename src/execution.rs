@@ -352,6 +352,7 @@ impl ExecutionManager {
                     acknowledged_at_unix_ms: None,
                     turn_id: None,
                     timed_out_at_unix_ms: None,
+                    settled_at_unix_ms: None,
                 });
         }
         state.records.push(record.clone());
@@ -418,6 +419,11 @@ impl ExecutionManager {
                 Some(status) => {
                     if let Some(signal) = status.signal() {
                         record.signal_name = Some(signal.into());
+                        if record.native_launch.is_some()
+                            && record.state == ExecutionState::Cancelled
+                        {
+                            return;
+                        }
                         record.state = if record.cancel_requested && record.native_launch.is_none()
                         {
                             ExecutionState::Cancelled
@@ -426,6 +432,11 @@ impl ExecutionManager {
                         };
                     } else {
                         record.exit_code = i32::try_from(status.exit_code()).ok();
+                        if record.native_launch.is_some()
+                            && record.state == ExecutionState::Cancelled
+                        {
+                            return;
+                        }
                         record.state = if record.cancel_requested
                             && !status.success()
                             && record.native_launch.is_none()
@@ -554,6 +565,7 @@ impl ExecutionManager {
                 acknowledged_at_unix_ms: None,
                 turn_id: None,
                 timed_out_at_unix_ms: None,
+                settled_at_unix_ms: None,
             });
         let result = state.records[index].clone();
         self.persist_locked(&state)?;
@@ -637,6 +649,9 @@ impl ExecutionManager {
         let Some(registered) = record.native_registration.as_ref() else {
             return Err("agent_turn_native_not_registered: actions require the child's authenticated starting report".into());
         };
+        if registered.journaled_at_unix_ms.is_none() {
+            return Err("agent_turn_native_not_registered: starting report is not yet durable in the turn journal".into());
+        }
         if registered.producer != target.producer
             || registered.session_id != target.session_id
             || registered.generation != target.generation
@@ -709,6 +724,7 @@ impl ExecutionManager {
             pid,
             turn_id: report.turn_id.clone(),
             registered_at_unix_ms: now_ms(),
+            journaled_at_unix_ms: None,
         };
         state.revision += 1;
         let revision = state.revision;
@@ -743,7 +759,70 @@ impl ExecutionManager {
         }
         Ok(())
     }
-    fn reconcile_native_action_deadlines(&self) -> Result<(), String> {
+    pub(crate) fn confirm_native_start_journaled(
+        &self,
+        record: &ExecutionRecord,
+        report: &crate::api::schema::AgentTurnReportParams,
+    ) -> Result<(), String> {
+        if record.native_launch.is_none()
+            || report.state != crate::api::schema::AgentTurnState::Starting
+        {
+            return Ok(());
+        }
+        self.mutate(&record.execution_id, |current| {
+            if let Some(registration) = current.native_registration.as_mut() {
+                if registration.turn_id == report.turn_id
+                    && registration.producer == report.producer
+                {
+                    registration.journaled_at_unix_ms.get_or_insert(now_ms());
+                }
+            }
+        })
+    }
+
+    pub(crate) fn settle_native_cancelled_report(
+        &self,
+        record: &ExecutionRecord,
+        report: &crate::api::schema::AgentTurnReportParams,
+    ) -> Result<(), String> {
+        if record.native_launch.is_none()
+            || report.state != crate::api::schema::AgentTurnState::Cancelled
+        {
+            return Ok(());
+        }
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| "execution state lock poisoned")?;
+        let index = state
+            .records
+            .iter()
+            .position(|candidate| candidate.execution_id == record.execution_id)
+            .ok_or("execution_not_found")?;
+        let action = state
+            .native_actions
+            .get_mut(&record.execution_id)
+            .ok_or("agent_turn_native_cancel_not_requested")?;
+        if action.state != AgentTurnActionState::SafePoint
+            || action.turn_id.as_deref() != Some(report.turn_id.as_str())
+        {
+            return Err("agent_turn_native_cancel_not_at_authenticated_safe_point".into());
+        }
+        if action.settled_at_unix_ms.is_some() {
+            return Ok(());
+        }
+        action.settled_at_unix_ms = Some(now_ms());
+        state.revision += 1;
+        let revision = state.revision;
+        let current = &mut state.records[index];
+        current.state = ExecutionState::Cancelled;
+        current.finished_at_unix_ms = Some(now_ms());
+        current.revision = revision;
+        self.persist_locked(&state)
+    }
+
+    pub(crate) fn reconcile_native_action_deadlines(&self) -> Result<(), String> {
         let mut state = self
             .0
             .state
@@ -1611,6 +1690,9 @@ mod tests {
         };
         manager.register_native_start(&claimed, &starting).unwrap();
         manager.register_native_start(&claimed, &starting).unwrap();
+        manager
+            .confirm_native_start_journaled(&claimed, &starting)
+            .unwrap();
         assert!(manager.native_actions(&target).unwrap().is_empty());
         assert!(
             manager
@@ -1629,6 +1711,25 @@ mod tests {
         };
         assert!(manager.acknowledge_native_action(&ack).unwrap().1);
         assert!(!manager.acknowledge_native_action(&ack).unwrap().1);
+        let cancelled = crate::api::schema::AgentTurnReportParams {
+            event_revision: 2,
+            state: crate::api::schema::AgentTurnState::Cancelled,
+            native_capability: Some(capability.clone()),
+            ..starting.clone()
+        };
+        manager
+            .validate_native_cancelled_report(&claimed, &cancelled)
+            .unwrap();
+        manager
+            .settle_native_cancelled_report(&claimed, &cancelled)
+            .unwrap();
+        manager
+            .settle_native_cancelled_report(&claimed, &cancelled)
+            .unwrap();
+        assert_eq!(
+            manager.get(&claimed.execution_id).unwrap().state,
+            ExecutionState::Cancelled
+        );
         let mut foreign = target;
         foreign.native_capability = "wrong".into();
         assert!(manager
@@ -1668,6 +1769,9 @@ mod tests {
             native_capability: Some(capability.clone()),
         };
         manager.register_native_start(&claimed, &starting).unwrap();
+        manager
+            .confirm_native_start_journaled(&claimed, &starting)
+            .unwrap();
         manager
             .request_native_cancel(&claimed.execution_id)
             .unwrap();

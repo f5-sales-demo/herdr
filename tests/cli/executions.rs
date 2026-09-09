@@ -309,6 +309,49 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
     assert!(old["result"]["execution"]["cancel_requested"]
         .as_bool()
         .unwrap());
+    let action_target = serde_json::json!({
+        "execution_id":"semantic-child", "pane_id":execution["pane_id"], "producer":"xcsh",
+        "session_id":"0123abcd4567ef89", "generation":11, "native_capability":capability
+    });
+    let actions = send_request(
+        &socket_path,
+        &serde_json::json!({
+            "id":"fixture-old-actions", "method":"agent.turn.action.get", "params":action_target
+        })
+        .to_string(),
+    );
+    assert_eq!(actions["result"]["actions"][0]["state"], "requested");
+    let ack = send_request(
+        &socket_path,
+        &serde_json::json!({
+            "id":"fixture-old-ack", "method":"agent.turn.action.ack", "params":{
+                "execution_id":"semantic-child", "pane_id":execution["pane_id"], "producer":"xcsh",
+                "session_id":"0123abcd4567ef89", "generation":11, "native_capability":capability,
+                "action_id":"cancel", "action_revision":1, "state":"safe_point"
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(ack["result"]["action"]["state"], "safe_point");
+    let terminal = send_request(
+        &socket_path,
+        &serde_json::json!({
+            "id":"fixture-old-terminal", "method":"agent.turn.report", "params":{
+                "execution_id":"semantic-child", "pane_id":execution["pane_id"], "producer":"xcsh",
+                "session_id":"0123abcd4567ef89", "turn_id":"fixture-turn", "generation":11,
+                "event_revision":3, "state":"cancelled", "native_capability":capability
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(terminal["result"]["turn"]["state"], "cancelled");
+    let settled = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"fixture-old-settled","method":"execution.get","params":{{"execution_id":"{backend_id}"}}}}"#
+        ),
+    );
+    assert_eq!(settled["result"]["execution"]["state"], "cancelled");
     cleanup_spawned_herdr(herdr, base);
 }
 

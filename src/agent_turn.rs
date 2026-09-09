@@ -123,6 +123,10 @@ impl AgentTurnManager {
             }
             if report.event_revision == latest.report.event_revision {
                 if latest.report == report {
+                    crate::execution::ExecutionManager::global()
+                        .confirm_native_start_journaled(&execution, &latest.report)?;
+                    crate::execution::ExecutionManager::global()
+                        .settle_native_cancelled_report(&execution, &latest.report)?;
                     return Ok((latest.clone(), false));
                 }
                 return Err("agent_turn_revision_conflict: revision content differs".into());
@@ -150,6 +154,10 @@ impl AgentTurnManager {
         state.records.push(record.clone());
         enforce_retention(&mut state);
         self.persist_locked(&state)?;
+        drop(state);
+        let executions = crate::execution::ExecutionManager::global();
+        executions.confirm_native_start_journaled(&execution, &record.report)?;
+        executions.settle_native_cancelled_report(&execution, &record.report)?;
         Ok((record, true))
     }
 

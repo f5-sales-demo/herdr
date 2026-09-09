@@ -7044,6 +7044,14 @@
               "minimum": 0,
               "type": "integer"
             },
+            "settled_at_unix_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "state": {
               "$ref": "#/schemas/success_response/$defs/AgentTurnActionState"
             },
@@ -8482,6 +8490,15 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            },
+            "journaled_at_unix_ms": {
+              "description": "Set only after the matching starting frame is durable in the turn journal.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "pane_id": {
               "type": "string"
