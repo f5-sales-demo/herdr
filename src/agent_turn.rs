@@ -107,24 +107,7 @@ impl AgentTurnManager {
         // same authenticated revision-1 starting frame may remove that exact
         // synthetic marker and resume confirmation; no terminal producer event
         // is reset or fabricated.
-        if report.state == AgentTurnState::Starting && report.event_revision == 1 {
-            if let Some(index) = state.records.iter().rposition(|candidate| {
-                same_turn(&candidate.report, &report)
-                    && candidate.report.state == AgentTurnState::Lost
-                    && candidate.report.reason.as_deref()
-                        == Some("Herdr restarted before the semantic turn reached a terminal state")
-                    && candidate.report.event_revision == 2
-            }) {
-                if state.records[..index].iter().rev().any(|candidate| {
-                    same_turn(&candidate.report, &report)
-                        && candidate.report.state == AgentTurnState::Starting
-                        && candidate.report.event_revision == 1
-                        && candidate.report == report
-                }) {
-                    state.records.remove(index);
-                }
-            }
-        }
+        recover_synthetic_restart_lost(&mut state, &report);
         let latest = state
             .records
             .iter()
@@ -306,6 +289,32 @@ fn same_turn(left: &AgentTurnReportParams, right: &AgentTurnReportParams) -> boo
         && left.generation == right.generation
 }
 
+fn recover_synthetic_restart_lost(state: &mut State, report: &AgentTurnReportParams) -> bool {
+    if report.state != AgentTurnState::Starting || report.event_revision != 1 {
+        return false;
+    }
+    let Some(index) = state.records.iter().rposition(|candidate| {
+        same_turn(&candidate.report, report)
+            && candidate.report.state == AgentTurnState::Lost
+            && candidate.report.reason.as_deref()
+                == Some("Herdr restarted before the semantic turn reached a terminal state")
+            && candidate.report.event_revision == 2
+    }) else {
+        return false;
+    };
+    if state.records[..index].iter().rev().any(|candidate| {
+        same_turn(&candidate.report, report)
+            && candidate.report.state == AgentTurnState::Starting
+            && candidate.report.event_revision == 1
+            && candidate.report == *report
+    }) {
+        state.records.remove(index);
+        true
+    } else {
+        false
+    }
+}
+
 fn matches_target(target: &AgentTurnTarget, report: &AgentTurnReportParams) -> bool {
     target.producer == report.producer
         && target.session_id == report.session_id
@@ -404,6 +413,50 @@ mod tests {
         let persisted: State = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(persisted.revision, 5);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn persisted_starting_replay_removes_only_the_synthetic_restart_marker() {
+        let starting = AgentTurnReportParams {
+            execution_id: "native".into(),
+            pane_id: "w1:p1".into(),
+            producer: "xcsh".into(),
+            session_id: "0123abcd4567ef89".into(),
+            turn_id: "turn".into(),
+            generation: 1,
+            event_revision: 1,
+            state: AgentTurnState::Starting,
+            result: None,
+            reason: None,
+            result_digest: None,
+            native_capability: None,
+        };
+        let mut lost = starting.clone();
+        lost.event_revision = 2;
+        lost.state = AgentTurnState::Lost;
+        lost.reason =
+            Some("Herdr restarted before the semantic turn reached a terminal state".into());
+        let mut state = State {
+            revision: 2,
+            records: vec![
+                AgentTurnRecord {
+                    report: starting.clone(),
+                    revision: 1,
+                    reported_at_unix_ms: 1,
+                },
+                AgentTurnRecord {
+                    report: lost,
+                    revision: 2,
+                    reported_at_unix_ms: 2,
+                },
+            ],
+            tombstones: Vec::new(),
+        };
+        assert!(recover_synthetic_restart_lost(&mut state, &starting));
+        assert_eq!(state.records.len(), 1);
+        let mut foreign = starting.clone();
+        foreign.pane_id = "w1:p2".into();
+        assert!(!recover_synthetic_restart_lost(&mut state, &foreign));
     }
 
     #[test]

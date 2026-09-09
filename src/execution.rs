@@ -1805,6 +1805,9 @@ mod tests {
         }
         drop(manager);
         let reloaded = ExecutionManager::load_at(path.clone());
+        // This is the same server-owned reconciliation invoked by the
+        // headless timer; no producer action.get/ack call causes expiry.
+        reloaded.reconcile_native_action_deadlines().unwrap();
         let actions = reloaded.native_actions(&target).unwrap();
         assert_eq!(actions[0].state, AgentTurnActionState::TimedOut);
         assert!(actions[0].timed_out_at_unix_ms.is_some());
