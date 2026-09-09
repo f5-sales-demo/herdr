@@ -167,8 +167,9 @@ class DisposableHerdrController(IsolatedController):
         emits a SessionHeader first on stdout, before any prompt is submitted.
         The controller uses that observable behavior; it does not accept a
         caller-supplied session id or manifest-declared capability.  The
-        returned ``resume_ready`` fact is evidence, not a guessed feature:
-        current releases emit a header without durably creating a resume file.
+        returned ``resume_ready`` fact is evidence, not a guessed feature: the
+        historical 21.19.0 release emitted a header without durably creating a
+        resume file.
         """
         if (not xcsh_binary.is_file() or hashlib.sha256(xcsh_binary.read_bytes()).hexdigest() != expected_sha256
                 or not cwd.is_dir() or not session_dir.is_absolute() or session_dir.exists()):
@@ -209,7 +210,9 @@ class DisposableHerdrController(IsolatedController):
             session_file = str(files[0])
         return {"session_id": session, "session_file": session_file,
                 "header_sha256": hashlib.sha256(json.dumps(header, sort_keys=True).encode()).hexdigest(),
-                "json_mode_session_header": True, "resume_ready": session_file is not None}
+                "json_mode_session_header": True, "resume_ready": session_file is not None,
+                "xcsh_executable": str(xcsh_binary.resolve()),
+                "xcsh_executable_sha256": hashlib.sha256(xcsh_binary.read_bytes()).hexdigest()}
 
     def create_xcsh_session(self, xcsh_binary: Path, expected_sha256: str, cwd: Path,
                             session_dir: Path) -> dict[str, str]:
@@ -221,7 +224,9 @@ class DisposableHerdrController(IsolatedController):
                 "the producer needs a prompt-free durable session creation API"
             )
         return {"session_id": receipt["session_id"], "session_file": receipt["session_file"],
-                "header_sha256": receipt["header_sha256"]}
+                "header_sha256": receipt["header_sha256"],
+                "xcsh_executable": receipt["xcsh_executable"],
+                "xcsh_executable_sha256": receipt["xcsh_executable_sha256"]}
 
     def _restart(self) -> dict[str,Any]:
         session,service=self.ownership["session_id"],self.ownership["service_id"]

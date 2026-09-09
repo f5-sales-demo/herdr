@@ -1,6 +1,6 @@
 {
   "name": "control-manager",
-  "package_version": 21,
+  "package_version": 22,
   "state_schema_version": 12,
   "policy": "POLICY.md",
   "shared_policy": "control-policy.json",
@@ -9,15 +9,14 @@
   "scope": "recovery_manager_with_native_xcsh_uat_source",
   "excluded_product_modules": ["XCSH native synthetic fixture runner", "test/dev state and receipts", "installed prompt UAT evidence", "live-release UAT drivers"],
   "native_uat_source_handoff": {
-    "control_broker.py": "a125a6c6bd3907794419fca092710e47c4f2c087bd7288b01ce75a0052520329",
-    "control_mcp.py": "fc95361f59c7350c0e239ab572ea012749445cd6320178e82dba6db23a624171",
-    "control_portable.py": "109b13d8abf180de0d13bdb9bb65d97a5dbacdd4b846cc17d2cb27fb7056f8fd",
-    "control-package.json": "ed0b88f36b2329c550dc4566c42ced51ba43c9ff13bc87ee9526cd8a97b32a90",
-    "runtime/xcsh_isolated_uat_controller.py": "9231a712f9642316c041983a2e75a4e63ed706bc76b2f4bcf9011cbd21a864e4",
-    "runtime/xcsh_installed_uat.py": "420c5a4dc2611494723843d496923fa6b05fb364b467a8ea1a9542972f2d23d4",
-    "runtime/xcsh-installed-uat/manifest.example.json": "f8faaed94e8e0a1cf9a44c5fd589ed9a1e5e5c5378eb27026ffb5290a830c6ab",
-    "runtime/xcsh-installed-uat/scenarios-v1.json": "6479ea93325e91b4578baa7f405931246e15441772642170cf31bc93ffebfdbc",
-    "XCSH_NATIVE_UAT_ACCEPTANCE.md": "5ebf19e6fa2c928c5a95b69e5b4c8fcbcd23d923f300c4eeaba9000dd0846167"
+    "control_broker.py": "1b598b24dbe7734be432757ff2cc850994759df11e22ee949c28b2beb13a1963",
+    "control_mcp.py": "f19fa2924b525e5cec98e35f1f2f58c1f967c38ed9792da905566d37a7657b01",
+    "control_portable.py": "a66c02663db2a23d766204148034aafde6dec8bb34c09a2d50e87fac4629233b",
+    "runtime/xcsh_isolated_uat_controller.py": "ca3c4ca47a309f0cea5e522e607f279673629260ee73c471dbe524c3e896ea82",
+    "runtime/xcsh_installed_uat.py": "a908a147214aad2200621c54952a20ae90c557cea6b646589b1629eb4b210dcb",
+    "runtime/xcsh-installed-uat/manifest.example.json": "4e8b75a45ad0263b0878ca5190ae4eccf8a1215f6ac6ee749ee96479b1225dea",
+    "runtime/xcsh-installed-uat/scenarios-v1.json": "69b1d4189900997f86bff67d700e09aca4df9d55de7a212983e5feca5e3ef483",
+    "XCSH_NATIVE_UAT_ACCEPTANCE.md": "480ab02f58a18b50853bedb948f8c0ef9caa52c1560a81b415277889c218d9b7"
   },
   "contains_credentials": false,
   "contains_runtime_sessions": false,

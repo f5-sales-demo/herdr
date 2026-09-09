@@ -1,6 +1,11 @@
 {
   "catalog_version": 1,
   "kind": "installed_runtime_synthesized_prompts",
+  "native_resume_contract": {
+    "execution_resume_schema": "execution.resume/v2",
+    "herdr_protocol_minimum": 21,
+    "required_herdr_capabilities": ["tracked_executions", "agent_turn_journal"]
+  },
   "scenarios": [
     {"id":"success","prompt":"[isolated UAT] Read {fixture_path} and return only its exact contents without the trailing newline.","expected_states":["starting","working","completed"],"expected_generations":[0,0,0],"expected_result":"fixture_value"},
     {"id":"failure","prompt":"[isolated UAT] Execute the producer-provided unhandled local-operation fixture for {fixture_path}.","expected_states":["starting","working","failed"],"expected_generations":[0,0,0]},
