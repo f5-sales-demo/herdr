@@ -79,6 +79,18 @@ class WorkerAppServerTests(unittest.TestCase):
             "threadId": "thread-1", "queuedSubmissionId": "queued-1",
         }), server.calls)
 
+    def test_worker_config_binds_remote_shell_tools_to_herdr_pane(self):
+        config = worker_appserver.worker_config(
+            "task-1", "/tmp/control.sock", "", "gpt-5.6-sol", "low",
+            "/tmp/herdr.sock", "w7", "w7:t3", "w7:p9",
+        )
+        environment = config["shell_environment_policy"]["set"]
+        self.assertEqual(environment["HERDR_ENV"], "1")
+        self.assertEqual(environment["HERDR_SOCKET_PATH"], "/tmp/herdr.sock")
+        self.assertEqual(environment["HERDR_WORKSPACE_ID"], "w7")
+        self.assertEqual(environment["HERDR_TAB_ID"], "w7:t3")
+        self.assertEqual(environment["HERDR_PANE_ID"], "w7:p9")
+
 
 if __name__ == "__main__":
     unittest.main()

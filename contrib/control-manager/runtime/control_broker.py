@@ -4944,14 +4944,20 @@ class Broker:
             await self._wait_pane_shell(pane["pane_id"])
             agent_name = f"ctl_{uuid.uuid4().hex[:12]}"
             worker_prompt = self._worker_prompt(row, row["prompt_pending"])
-            native_session, native_turn_id = await self._create_native_worker(row, worker_prompt)
-            self.db.update(
+            row = self.db.update(
                 task_id,
+                event="worker_pane_created",
                 workspace_id=workspace_id,
                 tab_id=tab["tab_id"],
                 pane_id=pane["pane_id"],
                 agent_kind="codex",
                 agent_name=agent_name,
+                herdr_state="starting",
+                summary="Herdr pane created; starting native worker turn.",
+            )
+            native_session, native_turn_id = await self._create_native_worker(row, worker_prompt)
+            self.db.update(
+                task_id,
                 agent_session_id=native_session,
                 native_turn_id=native_turn_id,
                 herdr_state="starting",
@@ -5205,6 +5211,18 @@ class Broker:
             f"(state={last.get('agent_status')}, seq={last.get('state_change_seq')})"
         )
 
+    def _worker_herdr_args(
+        self, workspace_id: str, tab_id: str, pane_id: str
+    ) -> list[str]:
+        if not workspace_id or not tab_id or not pane_id:
+            raise RuntimeError("worker has no complete Herdr pane binding")
+        return [
+            "--herdr-socket", str(self.herdr.socket_path),
+            "--herdr-workspace-id", workspace_id,
+            "--herdr-tab-id", tab_id,
+            "--herdr-pane-id", pane_id,
+        ]
+
     async def _create_native_worker(self, row: sqlite3.Row, text: str) -> tuple[str, str]:
         result = await self._run_json_required(
             [
@@ -5223,6 +5241,11 @@ class Broker:
                 row["model"] or "gpt-5.6-sol",
                 "--reasoning-effort",
                 row["reasoning_effort"] or "low",
+                *self._worker_herdr_args(
+                    str(row["workspace_id"] or ""),
+                    str(row["tab_id"] or ""),
+                    str(row["pane_id"] or ""),
+                ),
                 "--name",
                 f"Control worker {row['id']}",
                 "--text",
@@ -5264,6 +5287,11 @@ class Broker:
                 row["model"] or "gpt-5.6-sol",
                 "--reasoning-effort",
                 row["reasoning_effort"] or "low",
+                *self._worker_herdr_args(
+                    str(row["workspace_id"] or ""),
+                    str(row["tab_id"] or ""),
+                    str(row["pane_id"] or ""),
+                ),
                 "--text",
                 text,
             ]

@@ -52,7 +52,7 @@ class AppServerResponseError(RuntimeError):
 
 
 def manager_config() -> dict[str, Any]:
-    return {
+    config: dict[str, Any] = {
         "default_permissions": ":danger-full-access",
         "model": MANAGER_MODEL,
         "model_reasoning_effort": MANAGER_EFFORT,
@@ -93,6 +93,25 @@ def manager_config() -> dict[str, Any]:
             },
         },
     }
+    try:
+        binding = json.loads(CONFIG_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        binding = {}
+    workspace_id = str(binding.get("manager_workspace_id") or "")
+    tab_id = str(binding.get("manager_tab_id") or "")
+    pane_id = str(binding.get("manager_pane_id") or "")
+    if workspace_id and tab_id and pane_id:
+        config["shell_environment_policy"] = {
+            "inherit": "all",
+            "set": {
+                "HERDR_ENV": "1",
+                "HERDR_SOCKET_PATH": HERDR_SOCKET,
+                "HERDR_WORKSPACE_ID": workspace_id,
+                "HERDR_TAB_ID": tab_id,
+                "HERDR_PANE_ID": pane_id,
+            },
+        }
+    return config
 
 
 class AppServer:
