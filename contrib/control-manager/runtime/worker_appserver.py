@@ -15,6 +15,10 @@ def worker_config(
     parent_id: str,
     model: str,
     reasoning_effort: str,
+    herdr_socket: str,
+    herdr_workspace_id: str,
+    herdr_tab_id: str,
+    herdr_pane_id: str,
 ) -> dict:
     return {
         "default_permissions": ":danger-full-access",
@@ -30,9 +34,30 @@ def worker_config(
                 "CONTROL_TASK_ID": task_id,
                 "CONTROL_BROKER_SOCKET": broker_socket,
                 "CONTROL_PARENT_ID": parent_id,
+                # A remote Codex TUI runs in the Herdr pane, while shell tools
+                # run in the shared app-server process.  Bind the app-server
+                # thread to the pane explicitly instead of relying on process
+                # inheritance across that boundary.
+                "HERDR_ENV": "1",
+                "HERDR_SOCKET_PATH": herdr_socket,
+                "HERDR_WORKSPACE_ID": herdr_workspace_id,
+                "HERDR_TAB_ID": herdr_tab_id,
+                "HERDR_PANE_ID": herdr_pane_id,
             },
         },
     }
+
+
+def add_worker_context(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--task-id", required=True)
+    parser.add_argument("--broker-socket", required=True)
+    parser.add_argument("--parent-id", default="")
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--reasoning-effort", required=True)
+    parser.add_argument("--herdr-socket", required=True)
+    parser.add_argument("--herdr-workspace-id", required=True)
+    parser.add_argument("--herdr-tab-id", required=True)
+    parser.add_argument("--herdr-pane-id", required=True)
 
 
 def main() -> int:
@@ -40,20 +65,12 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     create = sub.add_parser("create")
     create.add_argument("--cwd", required=True)
-    create.add_argument("--task-id", required=True)
-    create.add_argument("--broker-socket", required=True)
-    create.add_argument("--parent-id", default="")
-    create.add_argument("--model", required=True)
-    create.add_argument("--reasoning-effort", required=True)
+    add_worker_context(create)
     create.add_argument("--name", required=True)
     create.add_argument("--text", required=True)
     prompt = sub.add_parser("prompt")
     prompt.add_argument("--thread-id", required=True)
-    prompt.add_argument("--task-id", required=True)
-    prompt.add_argument("--broker-socket", required=True)
-    prompt.add_argument("--parent-id", default="")
-    prompt.add_argument("--model", required=True)
-    prompt.add_argument("--reasoning-effort", required=True)
+    add_worker_context(prompt)
     prompt.add_argument("--text", required=True)
     prompt.add_argument("--client-user-message-id")
     steer = sub.add_parser("steer")
@@ -187,6 +204,10 @@ def main() -> int:
                 args.parent_id,
                 args.model,
                 args.reasoning_effort,
+                args.herdr_socket,
+                args.herdr_workspace_id,
+                args.herdr_tab_id,
+                args.herdr_pane_id,
             )
             result = server.request(
                 "thread/start",
@@ -230,6 +251,10 @@ def main() -> int:
                 args.parent_id,
                 args.model,
                 args.reasoning_effort,
+                args.herdr_socket,
+                args.herdr_workspace_id,
+                args.herdr_tab_id,
+                args.herdr_pane_id,
             )
             server.request(
                 "thread/resume",

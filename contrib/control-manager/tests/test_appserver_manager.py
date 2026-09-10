@@ -53,6 +53,26 @@ class ManagerRealtimeConfigTests(unittest.TestCase):
         profile = manager_config()
         self.assertIs(profile["features"]["realtime_conversation"], True)
 
+    def test_manager_config_binds_remote_shell_tools_to_saved_herdr_pane(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "config.json"
+            path.write_text(json.dumps({
+                "manager_workspace_id": "wP",
+                "manager_tab_id": "wP:t2",
+                "manager_pane_id": "wP:p2",
+            }))
+            with patch("appserver_manager.CONFIG_PATH", path), \
+                 patch("appserver_manager.HERDR_SOCKET", "/tmp/herdr.sock"):
+                config = manager_config()
+        environment = config["shell_environment_policy"]["set"]
+        self.assertEqual(environment, {
+            "HERDR_ENV": "1",
+            "HERDR_SOCKET_PATH": "/tmp/herdr.sock",
+            "HERDR_WORKSPACE_ID": "wP",
+            "HERDR_TAB_ID": "wP:t2",
+            "HERDR_PANE_ID": "wP:p2",
+        })
+
     def test_refresh_tools_verifies_candidate_without_replacing_canonical(self):
         server = FakeRefreshServer()
         with patch("appserver_manager.persist_config"):
