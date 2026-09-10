@@ -97,6 +97,13 @@ AUTONOMOUS_COMMIT_MESSAGE_GUIDANCE = (
     "alignment. Preserve actual repository rights, branch protections, review, CI, release, and all "
     "other consequential safeguards."
 )
+# A remote TUI inherits the app-server thread's permissions. Codex rejects
+# client-side permission settings while resuming a remote thread, so clear the
+# local configuration values explicitly on every visible remote attachment.
+REMOTE_PERMISSION_INHERIT_ARGS = (
+    "-c", "approval_policy=null",
+    "-c", "default_permissions=null",
+)
 
 
 def now() -> float:
@@ -3973,6 +3980,7 @@ class Broker:
         )
         self.subscription_refresh.set()
         args = [
+            *REMOTE_PERMISSION_INHERIT_ARGS,
             "--remote",
             str(self.config().get("app_server_remote", "unix://")),
             "resume",
@@ -4408,7 +4416,7 @@ class Broker:
         except (RuntimeError,ValueError) as exc:
             raise RuntimeError(f"canonical manager execution is not configured: {exc}") from exc
         remote=str(config.get("app_server_remote","unix://")); profile=str(config.get("profile","control-manager"))
-        argv=[codex,"--disable","hooks","--remote",remote,"--profile",profile,"-C",cwd,"resume",str(config["manager_thread_id"])]
+        argv=[codex,"--disable","hooks",*REMOTE_PERMISSION_INHERIT_ARGS,"--remote",remote,"--profile",profile,"-C",cwd,"resume",str(config["manager_thread_id"])]
         result=await self.herdr.request("execution.start",{
             "execution_id":execution_id,"workspace_id":workspace_id,"cwd":cwd,"label":"manager",
             "mode":"argv","argv":argv,
@@ -4453,7 +4461,8 @@ class Broker:
             cwd = normalized_cwd(str(config.get("manager_cwd") or ""))
         except (RuntimeError, ValueError) as exc:
             return {"proven": False, "reason": f"canonical runtime binding is invalid: {exc}"}
-        expected = [codex, "--disable", "hooks", "--remote", str(config.get("app_server_remote") or ""),
+        expected = [codex, "--disable", "hooks", *REMOTE_PERMISSION_INHERIT_ARGS,
+                    "--remote", str(config.get("app_server_remote") or ""),
                     "--profile", str(config.get("profile") or "control-manager"), "-C", cwd,
                     "resume", thread_id]
         foreground = process_info.get("foreground_processes") or []
@@ -4968,6 +4977,7 @@ class Broker:
             self._schedule_native_turn_monitor(task_id, native_turn_id)
             try:
                 agent_args = [
+                    *REMOTE_PERMISSION_INHERIT_ARGS,
                     "--remote",
                     str(self.config().get("app_server_remote", "unix://")),
                     "resume",
@@ -5782,6 +5792,7 @@ Requested task:
             str(codex),
             "--disable",
             "hooks",
+            *REMOTE_PERMISSION_INHERIT_ARGS,
             "--remote",
             remote,
             "--profile",
@@ -5895,7 +5906,8 @@ Requested task:
         except ValueError:
             return False
         profile = str(config.get("profile") or "control-manager")
-        expected = [codex, "--disable", "hooks", "--remote", remote, "--profile", profile,
+        expected = [codex, "--disable", "hooks", *REMOTE_PERMISSION_INHERIT_ARGS,
+                    "--remote", remote, "--profile", profile,
                     "-C", cwd, "resume", thread_id]
         foreground = process_info.get("foreground_processes") or []
         if len(foreground) != 1 or foreground[0].get("name") != "codex":
