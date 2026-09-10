@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+- Managed agent launches now bypass interactive shell aliases so aliases cannot silently add arguments that break remote Codex resumes.
+- Control Manager remote Codex panes now isolate client-only configuration and preserve their exact Herdr session context across worker and manager resumes. (#58)
+
 ## [0.7.5] - 2026-07-21
 
 ### Breaking Changes

@@ -66,7 +66,10 @@ class FakeHerdr:
             tab = {"tab_id": tid, "workspace_id": wid, "label": params.get("label"), "number": len([t for t in self.tabs.values() if t["workspace_id"] == wid]) + 1, "pane_count": 1}
             pane = {"pane_id": pid, "workspace_id": wid, "tab_id": tid, "agent_status": "unknown", "cwd": params.get("cwd")}
             if params.get("mode") == "argv":
-                pane.update({"process_name":"codex","process_argv":list(params.get("argv") or []),
+                process_argv = list(params.get("argv") or [])
+                if process_argv[:1] == ["/usr/bin/env"]:
+                    process_argv = process_argv[2:]
+                pane.update({"process_name":"codex","process_argv":process_argv,
                              "agent_status":"working"})
             execution = {"execution_id": params["execution_id"], "state": "running", "pane_id": pid, "tab_id": tid, "exit_code": None, "signal_name": None, "stdout_tail": "", "output_complete": False}
             self.tabs[tid] = tab
@@ -222,7 +225,10 @@ class FakeHerdr:
                 pane["agent_status"] = "working"
                 pane["state_change_seq"] = self.seq
                 pane["process_name"] = "codex"
-                pane["process_argv"] = shlex.split(pane.get("sent_text", "codex"))
+                process_argv = shlex.split(pane.get("sent_text", "codex"))
+                if process_argv[:1] == ["/usr/bin/env"]:
+                    process_argv = process_argv[2:]
+                pane["process_argv"] = process_argv
             return {}
         if method == "pane.close":
             pane = self.panes.pop(params["pane_id"], None)
@@ -964,10 +970,20 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("native_turn_started", events)
         starts = [call for call in self.broker.herdr.calls if call[0] == "agent.start"]
         self.assertEqual(len(starts), 1)
-        self.assertEqual(
-            starts[0][1]["args"][:6],
-            ["-c", "approval_policy=null", "-c", "default_permissions=null", "--remote", "unix://"],
+        self.assertIn(["--remote", "unix://"], [starts[0][1]["args"][i:i + 2]
+                                                for i in range(len(starts[0][1]["args"]) - 1)])
+        self.assertIn(
+            f'shell_environment_policy.set.HERDR_PANE_ID="{self.broker.db.task(codex["id"])["pane_id"]}"',
+            starts[0][1]["args"],
         )
+        codex_panes = [params for method, params in self.broker.herdr.calls
+                       if method in {"workspace.create", "tab.create"}
+                       and (params.get("env") or {}).get("CONTROL_TASK_ID") == codex["id"]]
+        self.assertEqual(
+            codex_panes[-1]["env"]["CODEX_HOME"],
+            str(self.root / "remote-client-codex-home"),
+        )
+        self.assertEqual((self.root / "remote-client-codex-home" / "config.toml").read_text(), "")
         native_starts = [call for call in self.broker.herdr.calls if call[0] == "execution.start"]
         self.assertEqual(len(native_starts), 1)
         self.assertEqual(native_starts[0][1]["execution_id"], command["id"])
@@ -2045,9 +2061,18 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rebound["agent_session_id"], row["agent_session_id"])
         self.assertEqual(rebound["resume_count"], 1)
         started = [params for method, params in self.broker.herdr.calls if method == "agent.start"]
+        self.assertIn(["--remote", "unix://"], [started[-1]["args"][i:i + 2]
+                                                for i in range(len(started[-1]["args"]) - 1)])
+        self.assertIn(
+            f'shell_environment_policy.set.HERDR_PANE_ID="{rebound["pane_id"]}"',
+            started[-1]["args"],
+        )
+        rebound_panes = [params for method, params in self.broker.herdr.calls
+                         if method in {"workspace.create", "tab.create"}
+                         and (params.get("env") or {}).get("CONTROL_TASK_ID") == task["id"]]
         self.assertEqual(
-            started[-1]["args"][:6],
-            ["-c", "approval_policy=null", "-c", "default_permissions=null", "--remote", "unix://"],
+            rebound_panes[-1]["env"]["CODEX_HOME"],
+            str(self.root / "remote-client-codex-home"),
         )
         self.assertEqual(started[-1]["args"][-2:], ["resume", row["agent_session_id"]])
 
@@ -2370,6 +2395,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
                     "manager_workspace_id": created["workspace"]["workspace_id"],
                     "manager_pane_id": pane["pane_id"],
                     "app_server_remote": "unix://",
+                    "app_server_socket": "/owned/appserver.sock",
                     "profile": "control-manager",
                     "codex_binary": "/bin/true",
                 }
@@ -2378,7 +2404,8 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         await self.broker.reconcile()
         sent = pane["sent_text"]
         self.assertTrue(sent.startswith(
-            "/usr/bin/true --disable hooks -c approval_policy=null -c default_permissions=null --remote unix://"
+            f"/usr/bin/env CODEX_HOME={self.root}/remote-client-codex-home /usr/bin/true "
+            "--disable hooks --remote unix:///owned/appserver.sock"
         ))
         self.assertIn("resume 01a07cad-d970-7393-82a4-14ae9a1c16ee", sent)
 
@@ -2564,7 +2591,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         created = await self.broker.herdr.request("workspace.create", {"cwd": str(self.root), "label": "control"})
         pane = created["root_pane"]
         thread = "01a07cad-d970-7393-82a4-14ae9a1c16ee"
-        pane.update({"process_name": "codex", "process_argv": [str(Path("/bin/true").resolve()), "--disable", "hooks", "-c", "approval_policy=null", "-c", "default_permissions=null", "--remote", "unix://", "--profile", "control-manager", "-C", str(self.root), "resume", thread], "agent_status": "idle"})
+        pane.update({"process_name": "codex", "process_argv": [str(Path("/bin/true").resolve()), "--disable", "hooks", "--remote", "unix://", "-C", str(self.root), "resume", thread], "agent_status": "idle"})
         self.broker.config_path.write_text(json.dumps({
             "manager_thread_id": thread, "manager_cwd": str(self.root),
             "manager_workspace_id": created["workspace"]["workspace_id"], "manager_pane_id": pane["pane_id"],
@@ -2580,7 +2607,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         created = await self.broker.herdr.request("workspace.create", {"cwd": str(self.root), "label": "control"})
         pane = created["root_pane"]
         thread = "01a07cad-d970-7393-82a4-14ae9a1c16ee"
-        pane.update({"process_name": "codex", "process_argv": [str(Path("/bin/true").resolve()), "--disable", "hooks", "-c", "approval_policy=null", "-c", "default_permissions=null", "--remote", "unix://", "--profile", "control-manager", "-C", str(self.root), "resume", thread], "agent_status": "working", "agent_session": {"value": "foreign-session"}})
+        pane.update({"process_name": "codex", "process_argv": [str(Path("/bin/true").resolve()), "--disable", "hooks", "--remote", "unix://", "-C", str(self.root), "resume", thread], "agent_status": "working", "agent_session": {"value": "foreign-session"}})
         self.broker.config_path.write_text(json.dumps({
             "manager_thread_id": thread, "manager_cwd": str(self.root),
             "manager_workspace_id": created["workspace"]["workspace_id"], "manager_pane_id": pane["pane_id"],
@@ -2598,8 +2625,8 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         thread = "01a07cad-d970-7393-82a4-14ae9a1c16ee"
         pane.update({
             "process_name": "codex",
-            "process_argv": [str(Path("/bin/true").resolve()), "--disable", "hooks", "-c", "approval_policy=null", "-c", "default_permissions=null", "--remote", "unix://",
-                             "--profile", "control-manager", "-C", str(self.root), "resume", thread],
+            "process_argv": [str(Path("/bin/true").resolve()), "--disable", "hooks", "--remote", "unix://",
+                             "-C", str(self.root), "resume", thread],
             # Herdr reports the fatal reconnect spinner as working in the real
             # Codex TUI; the complete terminal footer is the decisive proof.
             "agent_status": "working", "agent_session": {"value": thread},
@@ -2632,8 +2659,8 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         thread = "01a07cad-d970-7393-82a4-14ae9a1c16ee"
         pane.update({
             "process_name": "codex",
-            "process_argv": [str(Path("/bin/true").resolve()), "--disable", "hooks", "-c", "approval_policy=null", "-c", "default_permissions=null", "--remote", "unix://",
-                             "--profile", "control-manager", "-C", str(self.root), "resume", thread],
+            "process_argv": [str(Path("/bin/true").resolve()), "--disable", "hooks", "--remote", "unix://",
+                             "-C", str(self.root), "resume", thread],
             "agent_status": "working", "agent_session": {"value": thread},
             "output": "app-server session could not be restored\nReconnect failed — check the endpoint",
         })

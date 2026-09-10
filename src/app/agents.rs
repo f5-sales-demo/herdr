@@ -192,7 +192,16 @@ impl App {
 
         let mut argv = vec![crate::detect::interactive_agent_executable(kind).to_string()];
         argv.extend(params.args);
-        let command = crate::platform::interactive_shell_command(&argv, &shell_name)
+        // Managed launches must execute the requested agent with exactly the
+        // supplied arguments. Interactive aliases can otherwise silently add
+        // permission flags that are invalid for remote resume operations.
+        #[cfg(unix)]
+        let launch_argv = std::iter::once("command".to_string())
+            .chain(argv.iter().cloned())
+            .collect::<Vec<_>>();
+        #[cfg(not(unix))]
+        let launch_argv = argv.clone();
+        let command = crate::platform::interactive_shell_command(&launch_argv, &shell_name)
             .ok_or(AgentStartError::InvalidArgument)?;
         let bytes = crate::app::api_helpers::encode_api_submission(runtime, &command);
         let timeout = Duration::from_millis(

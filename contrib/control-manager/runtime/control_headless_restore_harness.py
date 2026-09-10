@@ -125,7 +125,7 @@ def main() -> None:
                 launched=foreground(socket_path,pane)
                 if len(launched)==1 and launched[0].get("name")=="codex": break
                 time.sleep(.1)
-            expected=[str(shim),"--disable","hooks","--remote","unix://","--profile","control-manager","-C",str(root),"resume",manager_thread]
+            expected=[str(shim),"--disable","hooks","--remote","unix://","-C",str(root),"resume",manager_thread]
             if admitted.get("state") != "admitted" or len(launched)!=1 or launched[0].get("argv") != expected: raise AssertionError(f"broker exact resume not proven: {admitted} {launched}")
             evidence["broker_exact_resume_isolation"]={"state":admitted["state"],"argv":launched[0]["argv"],"no_model_prompt":True}
         finally:
