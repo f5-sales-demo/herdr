@@ -4524,6 +4524,11 @@ mod tests {
             app.state.terminals[&terminal_id].agent_name.as_deref(),
             Some("worker")
         );
+        #[cfg(unix)]
+        assert!(receiver
+            .try_recv()
+            .expect("managed launch input")
+            .starts_with(b"command pi"));
         let rename = app.handle_api_request(crate::api::schema::Request {
             id: "req_agent_rename_pending".into(),
             method: crate::api::schema::Method::AgentRename(

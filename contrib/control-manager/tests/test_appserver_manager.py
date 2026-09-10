@@ -167,11 +167,12 @@ class ManagerRealtimeConfigTests(unittest.TestCase):
             root = Path(raw)
             path = root / "config.json"
             thread = "canonical-thread"
-            argv = [str(Path("/bin/true").resolve()), "--disable", "hooks", "--remote", "unix://",
-                    "--profile", "control-manager", "-C", str(root), "resume", thread]
+            argv = [str(Path("/bin/true").resolve()), "--disable", "hooks", "--remote", "unix:///owned/appserver.sock",
+                    "-C", str(root), "resume", thread]
             path.write_text(json.dumps({
                 "manager_thread_id": thread, "manager_pane_id": "wE:p1", "manager_cwd": str(root),
-                "codex_binary": "/bin/true", "app_server_remote": "unix://", "profile": "control-manager",
+                "codex_binary": "/bin/true", "app_server_remote": "unix://",
+                "app_server_socket": "/owned/appserver.sock", "profile": "control-manager",
             }))
             def request(method, _params):
                 if method == "agent.get":
@@ -199,7 +200,7 @@ class ManagerRealtimeConfigTests(unittest.TestCase):
             path = root / "config.json"
             thread = "canonical-thread"
             argv = [str(Path("/bin/true").resolve()), "--disable", "hooks", "--remote", "unix://",
-                    "--profile", "control-manager", "-C", str(root), "resume", thread]
+                    "-C", str(root), "resume", thread]
             path.write_text(json.dumps({
                 "manager_thread_id": thread, "manager_pane_id": "wE:p1", "manager_cwd": str(root),
                 "codex_binary": "/bin/true", "app_server_remote": "unix://", "profile": "control-manager",

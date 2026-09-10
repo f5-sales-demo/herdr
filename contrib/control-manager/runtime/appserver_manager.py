@@ -800,9 +800,11 @@ def native_pane_health(thread_id: str) -> dict[str, Any]:
     binary = Path(str(config.get("codex_binary") or "")).expanduser()
     expected: list[str] | None = None
     if binary.is_file() and os.access(binary, os.X_OK):
+        remote = str(config.get("app_server_remote") or "")
+        if remote == "unix://" and config.get("app_server_socket"):
+            remote = f"unix://{config['app_server_socket']}"
         expected = [str(binary.resolve()), "--disable", "hooks", "--remote",
-                    str(config.get("app_server_remote") or ""), "--profile",
-                    str(config.get("profile") or "control-manager"), "-C",
+                    remote, "-C",
                     str(config.get("manager_cwd") or ""), "resume", thread_id]
     exact_runtime = (expected is not None and len(foreground) == 1
                      and foreground[0].get("name") == "codex"

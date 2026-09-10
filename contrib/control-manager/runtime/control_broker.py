@@ -97,15 +97,6 @@ AUTONOMOUS_COMMIT_MESSAGE_GUIDANCE = (
     "alignment. Preserve actual repository rights, branch protections, review, CI, release, and all "
     "other consequential safeguards."
 )
-# A remote TUI inherits the app-server thread's permissions. Codex rejects
-# client-side permission settings while resuming a remote thread, so clear the
-# local configuration values explicitly on every visible remote attachment.
-REMOTE_PERMISSION_INHERIT_ARGS = (
-    "-c", "approval_policy=null",
-    "-c", "default_permissions=null",
-)
-
-
 def now() -> float:
     return time.time()
 
@@ -2144,7 +2135,9 @@ class Broker:
         self.clock = clock
         self.db = StateDB(db_path, clock=clock)
         self.herdr = HerdrRPC(herdr_socket)
+        self.herdr_socket = herdr_socket
         self.config_path = config_path
+        self.remote_client_codex_home = socket_path.parent / "remote-client-codex-home"
         self.cleanup_delay = cleanup_delay
         self.scheduler_event = asyncio.Event()
         self.subscription_refresh = asyncio.Event()
@@ -2173,6 +2166,29 @@ class Broker:
         except (OSError, json.JSONDecodeError) as exc:
             LOG.warning("cannot load %s: %s", self.config_path, exc)
             return {}
+
+    def _prepare_remote_client_codex_home(self) -> str:
+        """Return a managed config root with no client-side permissions."""
+        root = self.remote_client_codex_home
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if root.is_symlink() or not root.is_dir() or root.stat().st_uid != os.getuid():
+            raise RuntimeError("remote client Codex home has unsafe ownership")
+        os.chmod(root, 0o700)
+        config = root / "config.toml"
+        temporary = root / f".config.toml.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(fd)
+        os.replace(temporary, config)
+        return str(root)
+
+    def _visible_app_server_remote(self, config: dict[str, Any] | None = None) -> str:
+        config = config or self.config()
+        remote = str(config.get("app_server_remote") or "unix://")
+        if remote == "unix://":
+            socket_path = str(config.get("app_server_socket") or os.environ.get("CODEX_APP_SERVER_SOCKET") or "")
+            if socket_path:
+                return f"unix://{socket_path}"
+        return remote
 
     def _appserver_env(self) -> dict[str, str]:
         config = self.config()
@@ -3967,6 +3983,7 @@ class Broker:
             "CONTROL_TASK_ID": row["id"],
             "CONTROL_BROKER_SOCKET": str(self.socket_path),
             "CONTROL_PARENT_ID": row["parent_id"] or "",
+            "CODEX_HOME": self._prepare_remote_client_codex_home(),
         }
         # The persisted pane is demonstrably foreign or gone.  Never wait for
         # or attach to it: Herdr may have recycled its IDs after a restart.
@@ -3980,9 +3997,11 @@ class Broker:
         )
         self.subscription_refresh.set()
         args = [
-            *REMOTE_PERMISSION_INHERIT_ARGS,
+            *self._visible_worker_config_args(
+                row, workspace_id, tab["tab_id"], pane["pane_id"]
+            ),
             "--remote",
-            str(self.config().get("app_server_remote", "unix://")),
+            self._visible_app_server_remote(),
             "resume",
             row["agent_session_id"],
         ]
@@ -4415,8 +4434,9 @@ class Broker:
             cwd=normalized_cwd(str(config["manager_cwd"]))
         except (RuntimeError,ValueError) as exc:
             raise RuntimeError(f"canonical manager execution is not configured: {exc}") from exc
-        remote=str(config.get("app_server_remote","unix://")); profile=str(config.get("profile","control-manager"))
-        argv=[codex,"--disable","hooks",*REMOTE_PERMISSION_INHERIT_ARGS,"--remote",remote,"--profile",profile,"-C",cwd,"resume",str(config["manager_thread_id"])]
+        remote=self._visible_app_server_remote(config)
+        client_home=self._prepare_remote_client_codex_home()
+        argv=["/usr/bin/env",f"CODEX_HOME={client_home}",codex,"--disable","hooks","--remote",remote,"-C",cwd,"resume",str(config["manager_thread_id"])]
         result=await self.herdr.request("execution.start",{
             "execution_id":execution_id,"workspace_id":workspace_id,"cwd":cwd,"label":"manager",
             "mode":"argv","argv":argv,
@@ -4461,9 +4481,8 @@ class Broker:
             cwd = normalized_cwd(str(config.get("manager_cwd") or ""))
         except (RuntimeError, ValueError) as exc:
             return {"proven": False, "reason": f"canonical runtime binding is invalid: {exc}"}
-        expected = [codex, "--disable", "hooks", *REMOTE_PERMISSION_INHERIT_ARGS,
-                    "--remote", str(config.get("app_server_remote") or ""),
-                    "--profile", str(config.get("profile") or "control-manager"), "-C", cwd,
+        expected = [codex, "--disable", "hooks", "--remote", self._visible_app_server_remote(config),
+                    "-C", cwd,
                     "resume", thread_id]
         foreground = process_info.get("foreground_processes") or []
         if (len(foreground) != 1 or foreground[0].get("name") != "codex"
@@ -4944,6 +4963,7 @@ class Broker:
                 "CONTROL_TASK_ID": task_id,
                 "CONTROL_BROKER_SOCKET": str(self.socket_path),
                 "CONTROL_PARENT_ID": row["parent_id"] or "",
+                "CODEX_HOME": self._prepare_remote_client_codex_home(),
             }
             workspace_id, tab, pane = await self._create_worker_pane(row, env)
             # Herdr creates the pane before its foreground-process classifier
@@ -4977,9 +4997,11 @@ class Broker:
             self._schedule_native_turn_monitor(task_id, native_turn_id)
             try:
                 agent_args = [
-                    *REMOTE_PERMISSION_INHERIT_ARGS,
+                    *self._visible_worker_config_args(
+                        row, workspace_id, tab["tab_id"], pane["pane_id"]
+                    ),
                     "--remote",
-                    str(self.config().get("app_server_remote", "unix://")),
+                    self._visible_app_server_remote(),
                     "resume",
                     native_session,
                 ]
@@ -5232,6 +5254,25 @@ class Broker:
             "--herdr-tab-id", tab_id,
             "--herdr-pane-id", pane_id,
         ]
+
+    def _visible_worker_config_args(
+        self, row: sqlite3.Row, workspace_id: str, tab_id: str, pane_id: str
+    ) -> list[str]:
+        """Keep the pane binding when the remote TUI resumes the app-server thread."""
+        values = {
+            "CONTROL_TASK_ID": row["id"],
+            "CONTROL_BROKER_SOCKET": str(self.socket_path),
+            "CONTROL_PARENT_ID": row["parent_id"] or "",
+            "HERDR_ENV": "1",
+            "HERDR_SOCKET_PATH": str(self.herdr_socket),
+            "HERDR_WORKSPACE_ID": workspace_id,
+            "HERDR_TAB_ID": tab_id,
+            "HERDR_PANE_ID": pane_id,
+        }
+        args = ["-c", 'shell_environment_policy.inherit="all"']
+        for key, value in values.items():
+            args.extend(["-c", f"shell_environment_policy.set.{key}={json.dumps(value)}"])
+        return args
 
     async def _create_native_worker(self, row: sqlite3.Row, text: str) -> tuple[str, str]:
         result = await self._run_json_required(
@@ -5718,7 +5759,7 @@ Requested task:
         """Resume the canonical manager in its reserved pane when it is at a shell.
 
         This deliberately does not use Herdr's generic agent restore machinery: the
-        broker owns the exact remote endpoint, profile, CWD, thread, and hook flags.
+        broker owns the exact remote endpoint, CWD, thread, and hook flags.
         """
         config = self.config()
         if config.get("supervisor_owns_recovery") and not allow_supervisor_reattach:
@@ -5734,11 +5775,7 @@ Requested task:
             LOG.warning("manager recovery disabled: invalid thread id")
             return {"state": "unverified", "reason": "invalid canonical manager thread id"}
         manager_cwd = normalized_cwd(str(config["manager_cwd"]))
-        profile = str(config.get("profile", "control-manager"))
-        if not TARGET_RE.fullmatch(profile):
-            LOG.warning("manager recovery disabled: invalid profile")
-            return {"state": "unverified", "reason": "invalid canonical manager profile"}
-        remote = str(config.get("app_server_remote", "unix://"))
+        remote = self._visible_app_server_remote(config)
         if remote != "unix://" and not re.fullmatch(r"unix:///[A-Za-z0-9_./-]{1,400}", remote):
             LOG.warning("manager recovery disabled: invalid app-server remote")
             return {"state": "unverified", "reason": "invalid canonical manager app-server binding"}
@@ -5789,14 +5826,13 @@ Requested task:
             LOG.warning("manager recovery disabled: %s", exc)
             return {"state": "unverified", "reason": str(exc)}
         argv = [
+            "/usr/bin/env",
+            f"CODEX_HOME={self._prepare_remote_client_codex_home()}",
             str(codex),
             "--disable",
             "hooks",
-            *REMOTE_PERMISSION_INHERIT_ARGS,
             "--remote",
             remote,
-            "--profile",
-            profile,
             "-C",
             manager_cwd,
             "resume",
@@ -5900,14 +5936,11 @@ Requested task:
             codex = str(Path(configured_codex_binary(config)))
         except RuntimeError:
             return False
-        remote = str(config.get("app_server_remote") or "")
         try:
             cwd = normalized_cwd(str(config.get("manager_cwd") or ""))
         except ValueError:
             return False
-        profile = str(config.get("profile") or "control-manager")
-        expected = [codex, "--disable", "hooks", *REMOTE_PERMISSION_INHERIT_ARGS,
-                    "--remote", remote, "--profile", profile,
+        expected = [codex, "--disable", "hooks", "--remote", self._visible_app_server_remote(config),
                     "-C", cwd, "resume", thread_id]
         foreground = process_info.get("foreground_processes") or []
         if len(foreground) != 1 or foreground[0].get("name") != "codex":
