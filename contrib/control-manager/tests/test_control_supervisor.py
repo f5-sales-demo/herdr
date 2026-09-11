@@ -11,7 +11,7 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
             supervisor=Supervisor(root/'socket',root/'state.sqlite3',config)
             first=await supervisor.check(); self.assertEqual(
                 {x['component'] for x in first['components']},
-                {'herdr','broker','app_server','manager_observer','remote_control','manager_thread','manager_turn','manager_native','provider_auth','provider_health','broker_tools'},
+                {'herdr','broker','app_server','manager_observer','remote_control','manager_thread','manager_turn','manager_native','manager_goal','provider_auth','provider_health','broker_tools'},
             )
             admitted=await supervisor.recover(); duplicate=await supervisor.recover()
             self.assertTrue(admitted['admitted']); self.assertFalse(duplicate['admitted'])
@@ -97,6 +97,115 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
             first=await supervisor.automatic_recover(check); second=await supervisor.automatic_recover(check)
             self.assertTrue(first['admitted']); self.assertFalse(second['admitted'])
             self.assertEqual(len(supervisor.db.status()['recent_outcomes']),1)
+
+    async def test_present_goal_is_immediately_actionable_and_objective_stays_redacted(self):
+        async def app_probe(_cfg,_config):
+            return True,'canonical thread and turn read successfully',{
+                'thread':{'id':'canonical','status':'idle'},'turn':{'status':'completed'},
+                'control_broker':{'inventory_verified':False},
+                'goal':{'presence_verified':True,'present':True,'status':'blocked'},
+            }
+        async def native_probe(_cfg,_config): return 'healthy','exact canonical pane',{}
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw); config=root/'machine.json'; config.write_text(json.dumps({
+                'manager_thread_id':'canonical','app_server_socket':'fixture',
+            }))
+            supervisor=Supervisor(root/'socket',root/'state.sqlite3',config)
+            with patch('control_supervisor.unix_probe',AsyncMock(return_value=(True,'responsive'))), \
+                 patch('control_supervisor.appserver_probe',app_probe), \
+                 patch('control_supervisor.native_manager_probe',native_probe):
+                check=await supervisor.check()
+            goal=next(item for item in check['components'] if item['component']=='manager_goal')
+            self.assertEqual(goal['status'],'unavailable')
+            self.assertEqual(goal['failures'],1)
+            self.assertNotIn('objective',json.dumps(check))
+
+    async def test_unsupported_goal_api_is_degraded_and_never_auto_cleared(self):
+        async def app_probe(_cfg,_config):
+            return True,'canonical thread and turn read successfully',{
+                'thread':{'id':'canonical'},'turn':{'status':'completed'},
+                'control_broker':{'inventory_verified':False},
+                'goal':{'presence_verified':False,'present':None,'status':'unknown','error':'method not found'},
+            }
+        async def native_probe(_cfg,_config): return 'healthy','exact canonical pane',{}
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw); config=root/'machine.json'; config.write_text(json.dumps({
+                'manager_thread_id':'canonical','app_server_socket':'fixture','supervisor_mode':'isolated_active',
+            }))
+            supervisor=Supervisor(root/'socket',root/'state.sqlite3',config)
+            with patch('control_supervisor.unix_probe',AsyncMock(return_value=(True,'responsive'))), \
+                 patch('control_supervisor.appserver_probe',app_probe), \
+                 patch('control_supervisor.native_manager_probe',native_probe), \
+                 patch.object(supervisor,'recover',AsyncMock()) as recover:
+                check=await supervisor.check(); result=await supervisor.automatic_recover(check)
+            goal=next(item for item in check['components'] if item['component']=='manager_goal')
+            self.assertEqual(goal['status'],'degraded')
+            self.assertIsNone(result)
+            recover.assert_not_awaited()
+
+    async def test_goal_recovery_admits_one_clear_action_without_turn_or_restart(self):
+        present={'state':'unavailable','paused':False,
+            'components':[{'component':'manager_goal','status':'unavailable','reason':'forbidden goal present'}],
+            'authoritative':{'manager_goal':{'presence_verified':True,'present':True,'status':'blocked'}}}
+        absent={'state':'healthy','paused':False,
+            'components':[{'component':'manager_goal','status':'healthy','reason':'no goal'}],
+            'authoritative':{'manager_goal':{'presence_verified':True,'present':False,'status':None}}}
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw); config=root/'machine.json'; config.write_text(json.dumps({
+                'manager_thread_id':'canonical','supervisor_mode':'isolated_active',
+            }))
+            supervisor=Supervisor(root/'socket',root/'state.sqlite3',config)
+            with patch.object(supervisor,'check',AsyncMock(side_effect=[present,absent,present,absent])), \
+                 patch.object(supervisor,'_run_action',AsyncMock(return_value={'state':'completed'})) as action:
+                first=await supervisor.automatic_recover(present)
+                duplicate=await supervisor.automatic_recover(present)
+            self.assertTrue(first['admitted'])
+            self.assertFalse(duplicate['admitted'])
+            self.assertEqual(first['kind'],'clear_manager_goal')
+            action.assert_awaited_once()
+            self.assertEqual(action.await_args.args[2],'clear_manager_goal')
+            history=supervisor.db.status()['recent_outcomes']
+            self.assertEqual(len(history),1)
+            self.assertEqual(history[0]['kind'],'clear_manager_goal')
+            self.assertNotIn('manager_continuation',json.dumps(first))
+            self.assertNotIn('restart_',json.dumps(first))
+
+    async def test_paused_goal_cleanup_skips_automatic_but_allows_manual_recovery(self):
+        present={'state':'waiting_user','paused':True,
+            'components':[{'component':'manager_goal','status':'unavailable','reason':'forbidden goal present'}],
+            'authoritative':{'manager_goal':{'presence_verified':True,'present':True,'status':'active'}}}
+        absent={'state':'waiting_user','paused':True,
+            'components':[{'component':'manager_goal','status':'healthy','reason':'no goal'}],
+            'authoritative':{'manager_goal':{'presence_verified':True,'present':False,'status':None}}}
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw); config=root/'machine.json'; config.write_text(json.dumps({
+                'manager_thread_id':'canonical','supervisor_mode':'isolated_active',
+            }))
+            supervisor=Supervisor(root/'socket',root/'state.sqlite3',config); supervisor.db.set_paused(True)
+            with patch.object(supervisor,'check',AsyncMock(side_effect=[present,absent])), \
+                 patch.object(supervisor,'_run_action',AsyncMock(return_value={'state':'completed'})) as action:
+                automatic=await supervisor.automatic_recover(present)
+                manual=await supervisor.recover('manager_goal',idempotency_key='manual-goal-clear')
+            self.assertIsNone(automatic)
+            self.assertEqual(manual['state'],'completed')
+            action.assert_awaited_once()
+
+    async def test_goal_clear_timeout_is_reconciled_by_authoritative_absence(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw); config=root/'machine.json'; config.write_text(json.dumps({
+                'manager_thread_id':'canonical','manager_cwd':str(root),
+                'app_server_socket':'fixture','supervisor_mode':'isolated_active',
+            }))
+            supervisor=Supervisor(root/'socket',root/'state.sqlite3',config)
+            with patch('control_supervisor.bounded_process',AsyncMock(side_effect=RuntimeError('TimeoutError'))), \
+                 patch('control_supervisor.appserver_probe',AsyncMock(return_value=(True,'verified',{
+                     'goal':{'presence_verified':True,'present':False,'status':None},
+                 }))):
+                result=await supervisor._run_action(
+                    supervisor.bindings(),{'action_id':'goal-timeout'},'clear_manager_goal'
+                )
+            self.assertEqual(result['state'],'completed')
+            self.assertTrue(result['reconciled_after_uncertain_response'])
 
     async def test_native_controls_when_broker_model_absent_and_input_saturated(self):
         with tempfile.TemporaryDirectory() as raw:

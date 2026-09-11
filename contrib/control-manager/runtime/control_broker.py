@@ -91,6 +91,7 @@ SESSION_RETENTION_SECONDS = 30 * 86400
 OUTBOX_LEASE_SECONDS = 60.0
 OUTBOX_RETRY_MAX_SECONDS = 300.0
 AUTONOMOUS_COMMIT_MESSAGE_POLICY = "autonomous_conventional"
+MANAGER_CLI_DISABLE_ARGS = ("--disable", "hooks", "--disable", "goals")
 AUTONOMOUS_COMMIT_MESSAGE_GUIDANCE = (
     "Standing user policy: for authorized repository changes, select a concise Conventional Commit "
     "message and any repository-required body autonomously. Do not pause for human commit-wording "
@@ -4436,7 +4437,7 @@ class Broker:
             raise RuntimeError(f"canonical manager execution is not configured: {exc}") from exc
         remote=self._visible_app_server_remote(config)
         client_home=self._prepare_remote_client_codex_home()
-        argv=["/usr/bin/env",f"CODEX_HOME={client_home}",codex,"--disable","hooks","--remote",remote,"-C",cwd,"resume",str(config["manager_thread_id"])]
+        argv=["/usr/bin/env",f"CODEX_HOME={client_home}",codex,*MANAGER_CLI_DISABLE_ARGS,"--remote",remote,"-C",cwd,"resume",str(config["manager_thread_id"])]
         result=await self.herdr.request("execution.start",{
             "execution_id":execution_id,"workspace_id":workspace_id,"cwd":cwd,"label":"manager",
             "mode":"argv","argv":argv,
@@ -4481,7 +4482,7 @@ class Broker:
             cwd = normalized_cwd(str(config.get("manager_cwd") or ""))
         except (RuntimeError, ValueError) as exc:
             return {"proven": False, "reason": f"canonical runtime binding is invalid: {exc}"}
-        expected = [codex, "--disable", "hooks", "--remote", self._visible_app_server_remote(config),
+        expected = [codex, *MANAGER_CLI_DISABLE_ARGS, "--remote", self._visible_app_server_remote(config),
                     "-C", cwd,
                     "resume", thread_id]
         foreground = process_info.get("foreground_processes") or []
@@ -5829,8 +5830,7 @@ Requested task:
             "/usr/bin/env",
             f"CODEX_HOME={self._prepare_remote_client_codex_home()}",
             str(codex),
-            "--disable",
-            "hooks",
+            *MANAGER_CLI_DISABLE_ARGS,
             "--remote",
             remote,
             "-C",
@@ -5940,7 +5940,7 @@ Requested task:
             cwd = normalized_cwd(str(config.get("manager_cwd") or ""))
         except ValueError:
             return False
-        expected = [codex, "--disable", "hooks", "--remote", self._visible_app_server_remote(config),
+        expected = [codex, *MANAGER_CLI_DISABLE_ARGS, "--remote", self._visible_app_server_remote(config),
                     "-C", cwd, "resume", thread_id]
         foreground = process_info.get("foreground_processes") or []
         if len(foreground) != 1 or foreground[0].get("name") != "codex":

@@ -62,6 +62,9 @@ class ManagerAttachmentRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["manager_binding_generation"],8)
         self.assertEqual(sum(name=="workspace.create" for name,_ in self.broker.herdr.calls),2)
         self.assertFalse(any(name=="agent.prompt" for name,_ in self.broker.herdr.calls))
+        launch=next(params for name,params in self.broker.herdr.calls if name=="execution.start")
+        self.assertIn(["--disable","hooks","--disable","goals"],
+                      [launch["argv"][i:i+4] for i in range(len(launch["argv"])-3)])
         await self.call(action)
         self.assertEqual(sum(name=="workspace.create" for name,_ in self.broker.herdr.calls),2)
 

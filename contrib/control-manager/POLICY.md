@@ -9,6 +9,13 @@ installation, and live-UAT evidence. A worker summary alone is not proof of a
 stage. Do not recreate a consequential action after a restart merely because a
 local process binding is missing or uncertain.
 
+Broker feature lifecycles are the Control Manager's sole durable scheduler.
+The canonical manager thread must never carry a Codex goal: every manager
+launch disables goals, forks explicitly decline goal inheritance, and the
+supervisor treats any present goal as an immediately actionable policy
+violation. Goal cleanup preserves the exact thread and transcript and never
+starts or replays a turn.
+
 `continue_task` corrects the current tracked workstream. While a Codex turn is
 active, deliver it only through exact-turn steering with a durable caller
 idempotency identity; never place it in a native future-turn queue. Preserve an

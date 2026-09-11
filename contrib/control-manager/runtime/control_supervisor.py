@@ -516,9 +516,23 @@ class Supervisor:
                 self.db.conn.execute("DELETE FROM recovery_observations WHERE component = ?", ("manager_observer",))
                 self.db.conn.commit()
             results.append(self.db.observe("app_server",app_ok,app_reason))
-            thread=app.get("thread") or {}; turn=app.get("turn") or {}; control=app.get("control_broker") or {}
+            thread=app.get("thread") or {}; turn=app.get("turn") or {}; control=app.get("control_broker") or {}; goal=app.get("goal") or {}
             results.append(self.db.observe("manager_thread",app_ok and bool(thread.get("id")),str(thread.get("status") or app_reason)))
             results.append(self.db.observe_state("manager_native",native_state,native_reason))
+            if not app_ok:
+                results.append(self.db.observe_state("manager_goal","degraded",app_reason))
+            elif goal.get("presence_verified") is not True:
+                results.append(self.db.observe_state(
+                    "manager_goal","degraded",
+                    str(goal.get("error") or "goal API is unsupported or goal presence was not verified"),
+                ))
+            elif goal.get("present") is True:
+                status=str(goal.get("status") or "unknown")
+                results.append(self.db.observe_state(
+                    "manager_goal","unavailable",f"forbidden Control Manager goal is present (status: {status})",
+                ))
+            else:
+                results.append(self.db.observe_state("manager_goal","healthy","no Control Manager goal is present"))
         # A silent active turn is not a failure. Only an authoritative terminal
         # error is classified separately from Herdr's activity label.
             terminal=str(turn.get("status") or "") in {"failed","interrupted","cancelled"}
@@ -545,7 +559,7 @@ class Supervisor:
             if app_ok and not inventory_verified:
                 results.append(self.db.observe_state("broker_tools","degraded",tools_reason))
             else: results.append(self.db.observe("broker_tools",tools_ok,tools_reason))
-            return {"state":self.db.overall_status(),"checked_at":utc(),"components":results,"authoritative":{"thread":thread,"turn":turn,"control_broker":control,"manager_native":native},"paused":self.db.paused(),"interrupted_actions_reconciled":self.interrupted_actions}
+            return {"state":self.db.overall_status(),"checked_at":utc(),"components":results,"authoritative":{"thread":thread,"turn":turn,"control_broker":control,"manager_native":native,"manager_goal":goal},"paused":self.db.paused(),"interrupted_actions_reconciled":self.interrupted_actions}
         finally: self._end_work(token)
     @staticmethod
     def _transient(error: Any) -> bool:
@@ -595,6 +609,41 @@ class Supervisor:
         # action needs both guarded_live mode and the separate live gate; mode
         # alone is never an authorization to touch a shared service/thread.
         allowed = mode == "isolated_active" or (mode == "guarded_live" and cfg.get("recovery_live_enabled") is True)
+        if name == "clear_manager_goal":
+            if not allowed:
+                return {"state":"waiting_rollout","reason":"goal cleanup requires isolated_active or explicitly enabled guarded_live mode"}
+            thread=str(cfg.get("manager_thread_id") or "")
+            argv=["/usr/bin/python3",str(runtime_root() / "appserver_manager.py"),"clear-goal",thread]
+            env=os.environ | {
+                "CODEX_APP_SERVER_SOCKET":str(cfg.get("app_server_socket") or ""),
+                "CODEX_CONTROL_CONFIG_PATH":str(self.config),
+                "CODEX_CONTROL_MANAGER_CWD":str(cfg.get("manager_cwd") or ""),
+            }
+            if cfg.get("app_server_remote"): env["CODEX_APP_SERVER_REMOTE"]=str(cfg["app_server_remote"])
+
+            async def reconcile_uncertain(reason: str) -> dict[str,Any]:
+                ok,probe_reason,probe=await appserver_probe(cfg,self.config)
+                goal=(probe.get("goal") or {}) if isinstance(probe,dict) else {}
+                if ok and goal.get("presence_verified") is True and goal.get("present") is False:
+                    return {"state":"completed","reason":"goal absence verified after uncertain clear response",
+                            "reconciled_after_uncertain_response":True}
+                return {"state":"failed","reason":reason[-1000:],"verification_reason":probe_reason[-500:]}
+
+            try:
+                code,out,err=await bounded_process(argv,env,timeout=float(cfg.get("recovery_action_timeout",30)))
+            except Exception as exc:
+                return await reconcile_uncertain(str(exc))
+            if code:
+                return await reconcile_uncertain(err or out or f"clear-goal exited {code}")
+            try: result=json.loads(out)
+            except json.JSONDecodeError:
+                return await reconcile_uncertain("clear-goal returned invalid JSON")
+            if result.get("thread_id") != thread or result.get("goal_present") is not False:
+                return await reconcile_uncertain("clear-goal did not verify the configured thread and absent goal")
+            return {"state":"completed","reason":"forbidden Control Manager goal cleared and verified",
+                    "clear_requested":bool(result.get("clear_requested")),
+                    "already_absent":bool(result.get("already_absent")),
+                    "reconciled_after_uncertain_response":bool(result.get("reconciled_after_uncertain_response"))}
         if name == "observer_reconnect" and cfg.get("observer_command"):
             ok,reason=await self._observer_status(cfg,reconnect=True)
             return {"state":"completed" if ok else "waiting_rollout" if "observation_only" in reason else "failed","reason":reason,"output":self.observer_output}
@@ -710,7 +759,8 @@ class Supervisor:
         # A terminal-binding replacement is a distinct, capability-scoped
         # action.  It cannot be authorized merely by guessing an action id for
         # an unrelated restart/reconnect claim.
-        kind="recover_manager_binding" if component in {"manager","herdr","all"} else "reconnect_observer"
+        kind=("clear_manager_goal" if component == "manager_goal" else
+              "recover_manager_binding" if component in {"manager","herdr","all"} else "reconnect_observer")
         action=self.db.claim(component,kind,"automatic threshold recovery" if automatic else "manual recovery",idempotency_key=idempotency_key,admission_budget=False)
         if not action.get("admitted"): return action
         cfg=self.bindings()
@@ -728,6 +778,19 @@ class Supervisor:
                 outcome.update({"state":"completed","note":"requested components are already healthy","verified_check":check})
                 self.db.finish(action,outcome,"completed")
                 return action | {"state":"completed","outcome":outcome}
+            if component == "manager_goal":
+                cleanup=await self._run_action(cfg,action,"clear_manager_goal")
+                verified=await self.check()
+                outcome.update({"clear_manager_goal":cleanup,"verified_check":verified})
+                goal_health=next((item for item in verified["components"] if item.get("component")=="manager_goal"),{})
+                final=("completed" if cleanup.get("state")=="completed" and goal_health.get("status")=="healthy"
+                       else "blocked" if cleanup.get("state") in {"blocked","waiting_rollout","waiting_user"}
+                       else "failed")
+                outcome["state"]=final
+                if final != "completed":
+                    outcome["verification_reason"]="authoritative goal absence was not verified"
+                self.db.finish(action,outcome,final)
+                return action | {"state":final,"outcome":outcome}
             # Observer reconnect is always first and may run in isolated mode only.
             reconnect=await self._run_action(cfg,action,"observer_reconnect")
             outcome["observer_reconnect"]=reconnect
@@ -841,7 +904,11 @@ class Supervisor:
             cfg.get("supervisor_mode") == "guarded_live" and cfg.get("recovery_live_enabled") is True
         ):
             return None
-        if self.db.paused() or not any(item["status"] == "unavailable" for item in check["components"]): return None
+        if self.db.paused(): return None
+        goal=next((item for item in check["components"] if item.get("component")=="manager_goal"),{})
+        if goal.get("status") == "unavailable":
+            return await self.recover("manager_goal",automatic=True)
+        if not any(item["status"] == "unavailable" for item in check["components"]): return None
         return await self.recover("all",automatic=True)
     async def client(self, reader, writer):
         try:
@@ -861,7 +928,7 @@ class Supervisor:
             elif method=="check": result=await asyncio.wait_for(self.check(),timeout)
             elif method=="recover":
                 component=req.get("component","all"); idempotency_key=req.get("idempotency_key")
-                if component not in {"all","broker","app_server","herdr","manager","observer"}: raise ValueError("invalid recovery component")
+                if component not in {"all","broker","app_server","herdr","manager","manager_goal","observer"}: raise ValueError("invalid recovery component")
                 if idempotency_key is not None and (not isinstance(idempotency_key,str) or len(idempotency_key)>256): raise ValueError("invalid recovery idempotency key")
                 result=await asyncio.wait_for(self.recover(component,idempotency_key=idempotency_key),timeout)
             elif method=="pause": self.db.set_paused(True); result=self.status()
