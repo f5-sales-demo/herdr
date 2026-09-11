@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-from appserver_manager import MANAGER_CWD, MANAGER_EFFORT, MANAGER_MODEL, REQUIRED_CONTROL_TOOLS, activate_refreshed_tools, ensure, hold, manager_config, native_pane_health, probe, refresh_tools, refresh_tools_in_place, resume_once
+from appserver_manager import MANAGER_CWD, MANAGER_EFFORT, MANAGER_MODEL, REQUIRED_CONTROL_TOOLS, activate_refreshed_tools, clear_goal, ensure, hold, manager_config, native_pane_health, probe, refresh_tools, refresh_tools_in_place, resume_once
 
 
 class FakeRefreshServer:
@@ -26,6 +26,8 @@ class FakeRefreshServer:
             return {"thread": {"id": params["threadId"], "name": "Control Manager", "cwd": MANAGER_CWD}}
         if method == "thread/fork":
             return {"thread": {"id": "new-thread"}}
+        if method == "thread/goal/get":
+            return {"goal": None}
         if method == "mcpServerStatus/list":
             return {"data": [{"name": "control_broker", "runtimeStatus": "connected",
                               "tools": {name: {} for name in self.tools}}]}
@@ -45,6 +47,7 @@ class ManagerRealtimeConfigTests(unittest.TestCase):
         self.assertEqual(config["model"], MANAGER_MODEL)
         self.assertEqual(config["model_reasoning_effort"], MANAGER_EFFORT)
         self.assertIs(config["features"]["realtime_conversation"], True)
+        self.assertIs(config["features"]["goals"], False)
         tools = config["mcp_servers"]["control_broker"]["enabled_tools"]
         self.assertIn("completion_inbox", tools)
         self.assertIn("ack_completion", tools)
@@ -112,6 +115,8 @@ class ManagerRealtimeConfigTests(unittest.TestCase):
         self.assertTrue(result["full_history_forked"])
         fork=next(params for method,params in server.calls if method == "thread/fork")
         self.assertFalse(fork["excludeTurns"])
+        self.assertIs(fork["copyGoal"],False)
+        self.assertIs(fork["deferGoalContinuation"],False)
         persist.assert_called_once_with("new-thread")
         self.assertIn(("thread/archive",{"threadId":"old-thread"}),server.calls)
 
@@ -120,6 +125,30 @@ class ManagerRealtimeConfigTests(unittest.TestCase):
         self.assertEqual(result["thread"]["id"], "old-thread")
         self.assertEqual(result["control_broker"]["runtime_status"], "connected")
         self.assertEqual(set(result["control_broker"]["tools"]), REQUIRED_CONTROL_TOOLS)
+        self.assertEqual(result["goal"],{"presence_verified":True,"present":False,"status":None})
+
+    def test_probe_redacts_goal_objective_and_reports_presence_status_only(self):
+        server=FakeRefreshServer()
+        original=server.request
+        def request(method,params=None):
+            if method == "thread/goal/get":
+                return {"goal":{"objective":"never expose me","status":"blocked","tokensUsed":7}}
+            return original(method,params)
+        server.request=request
+        result=probe(server,"old-thread")
+        self.assertEqual(result["goal"],{"presence_verified":True,"present":True,"status":"blocked"})
+        self.assertNotIn("never expose me",json.dumps(result))
+
+    def test_probe_degrades_goal_health_when_api_is_unsupported(self):
+        server=FakeRefreshServer()
+        original=server.request
+        def request(method,params=None):
+            if method == "thread/goal/get": raise RuntimeError("method not found")
+            return original(method,params)
+        server.request=request
+        result=probe(server,"old-thread")
+        self.assertFalse(result["goal"]["presence_verified"])
+        self.assertIsNone(result["goal"]["present"])
 
     def test_probe_keeps_exact_thread_healthy_when_inventory_lookup_fails(self):
         server = FakeRefreshServer()
@@ -167,7 +196,7 @@ class ManagerRealtimeConfigTests(unittest.TestCase):
             root = Path(raw)
             path = root / "config.json"
             thread = "canonical-thread"
-            argv = [str(Path("/bin/true").resolve()), "--disable", "hooks", "--remote", "unix:///owned/appserver.sock",
+            argv = [str(Path("/bin/true").resolve()), "--disable", "hooks", "--disable", "goals", "--remote", "unix:///owned/appserver.sock",
                     "-C", str(root), "resume", thread]
             path.write_text(json.dumps({
                 "manager_thread_id": thread, "manager_pane_id": "wE:p1", "manager_cwd": str(root),
@@ -199,7 +228,7 @@ class ManagerRealtimeConfigTests(unittest.TestCase):
             root = Path(raw)
             path = root / "config.json"
             thread = "canonical-thread"
-            argv = [str(Path("/bin/true").resolve()), "--disable", "hooks", "--remote", "unix://",
+            argv = [str(Path("/bin/true").resolve()), "--disable", "hooks", "--disable", "goals", "--remote", "unix://",
                     "-C", str(root), "resume", thread]
             path.write_text(json.dumps({
                 "manager_thread_id": thread, "manager_pane_id": "wE:p1", "manager_cwd": str(root),
@@ -302,6 +331,77 @@ class ManagerRealtimeConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'failed turn changed'):
             resume_once(server,'old-thread','stale-failed-turn')
         self.assertNotIn('turn/start',[method for method,_ in server.calls])
+
+    def test_clear_goal_validates_exact_configured_thread_before_mutation(self):
+        server=FakeRefreshServer()
+        with tempfile.TemporaryDirectory() as raw:
+            config=Path(raw)/"machine.json"
+            config.write_text(json.dumps({
+                "manager_thread_id":"old-thread","manager_thread_name":"Control Manager",
+                "manager_cwd":MANAGER_CWD,
+            }))
+            with patch("appserver_manager.CONFIG_PATH",config):
+                with self.assertRaisesRegex(RuntimeError,"exact configured"):
+                    clear_goal(server,"foreign-thread")
+        self.assertNotIn("thread/goal/clear",[method for method,_ in server.calls])
+
+    def test_clear_goal_is_idempotent_when_goal_is_already_absent(self):
+        server=FakeRefreshServer()
+        with tempfile.TemporaryDirectory() as raw:
+            config=Path(raw)/"machine.json"
+            config.write_text(json.dumps({
+                "manager_thread_id":"old-thread","manager_thread_name":"Control Manager",
+                "manager_cwd":MANAGER_CWD,
+            }))
+            with patch("appserver_manager.CONFIG_PATH",config):
+                result=clear_goal(server,"old-thread")
+        self.assertTrue(result["already_absent"])
+        self.assertFalse(result["clear_requested"])
+        self.assertNotIn("thread/goal/clear",[method for method,_ in server.calls])
+
+    def test_clear_goal_redacts_objective_and_verifies_absence(self):
+        class GoalServer(FakeRefreshServer):
+            def __init__(self):
+                super().__init__(); self.goal={"objective":"secret objective","status":"blocked",
+                    "tokenBudget":100,"tokensUsed":8,"timeUsedSeconds":3}
+            def request(self,method,params=None):
+                if method == "thread/goal/get":
+                    self.calls.append((method,params)); return {"goal":self.goal}
+                if method == "thread/goal/clear":
+                    self.calls.append((method,params)); self.goal=None; return {"cleared":True}
+                return super().request(method,params)
+        server=GoalServer()
+        with tempfile.TemporaryDirectory() as raw:
+            config=Path(raw)/"machine.json"
+            config.write_text(json.dumps({
+                "manager_thread_id":"old-thread","manager_thread_name":"Control Manager",
+                "manager_cwd":MANAGER_CWD,
+            }))
+            with patch("appserver_manager.CONFIG_PATH",config): result=clear_goal(server,"old-thread")
+        self.assertTrue(result["cleared"])
+        self.assertFalse(result["goal_present"])
+        self.assertEqual(result["prior_goal_accounting"]["status"],"blocked")
+        self.assertNotIn("secret objective",json.dumps(result))
+
+    def test_clear_goal_reconciles_a_lost_success_response_by_rereading(self):
+        class LostResponseServer(FakeRefreshServer):
+            def __init__(self): super().__init__(); self.goal={"objective":"hidden","status":"active"}
+            def request(self,method,params=None):
+                if method == "thread/goal/get":
+                    self.calls.append((method,params)); return {"goal":self.goal}
+                if method == "thread/goal/clear":
+                    self.calls.append((method,params)); self.goal=None; raise RuntimeError("response lost")
+                return super().request(method,params)
+        server=LostResponseServer()
+        with tempfile.TemporaryDirectory() as raw:
+            config=Path(raw)/"machine.json"
+            config.write_text(json.dumps({
+                "manager_thread_id":"old-thread","manager_thread_name":"Control Manager",
+                "manager_cwd":MANAGER_CWD,
+            }))
+            with patch("appserver_manager.CONFIG_PATH",config): result=clear_goal(server,"old-thread")
+        self.assertTrue(result["reconciled_after_uncertain_response"])
+        self.assertFalse(result["goal_present"])
 
 
 if __name__ == "__main__":

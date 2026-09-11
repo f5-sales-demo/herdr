@@ -6,6 +6,10 @@ policy, fixtures, and tests. It never contains credentials, machine
 configuration, SQLite state, terminal/session history, screenshots, or
 personal operational documents.
 
+Broker feature lifecycles are its only durable scheduler. The canonical
+manager runs with Codex goals disabled; the supervisor detects and idempotently
+clears any persisted goal without creating a turn or replacing the thread.
+
 Release scope includes the reviewed source-only native XCSH admission consumer,
 installed-runtime UAT driver, disposable-runtime controller, catalog, and
 acceptance boundary. It deliberately excludes synthetic fixture runners,

@@ -62,6 +62,7 @@ def manager_config() -> dict[str, Any]:
             "browser_use": True,
             "browser_use_external": True,
             "computer_use": True,
+            "goals": False,
             "hooks": False,
             "image_generation": True,
             "in_app_browser": True,
@@ -373,6 +374,101 @@ def enforce_manager_model(server: AppServer, thread_id: str) -> None:
     )
 
 
+def configured_manager(server: AppServer, thread_id: str) -> dict[str, Any]:
+    """Return the exact configured canonical manager or fail closed."""
+    try:
+        configured = json.loads(CONFIG_PATH.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"canonical manager configuration is unavailable: {exc}") from exc
+    expected_id = str(configured.get("manager_thread_id") or "")
+    expected_name = str(configured.get("manager_thread_name") or "")
+    expected_cwd = str(configured.get("manager_cwd") or "")
+    if (
+        not expected_id
+        or thread_id != expected_id
+        or expected_name != MANAGER_NAME
+        or expected_cwd != MANAGER_CWD
+    ):
+        raise RuntimeError("requested thread is not the exact configured Control Manager")
+    thread = server.request(
+        "thread/read", {"threadId": thread_id, "includeTurns": False}
+    )["thread"]
+    if (
+        thread.get("id") != expected_id
+        or thread.get("name") != expected_name
+        or thread.get("cwd") != expected_cwd
+    ):
+        raise RuntimeError("app-server thread does not match the configured Control Manager identity")
+    return thread
+
+
+def goal_probe(server: AppServer, thread_id: str) -> dict[str, Any]:
+    """Return redacted goal presence/status without exposing its objective."""
+    try:
+        response = server.request("thread/goal/get", {"threadId": thread_id})
+        goal = response.get("goal") if isinstance(response, dict) else None
+        return {
+            "presence_verified": True,
+            "present": goal is not None,
+            "status": goal.get("status") if isinstance(goal, dict) else None,
+        }
+    except Exception as exc:
+        return {
+            "presence_verified": False,
+            "present": None,
+            "status": "unknown",
+            "error": f"{type(exc).__name__}: {exc}"[:500],
+        }
+
+
+def clear_goal(server: AppServer, thread_id: str) -> dict[str, Any]:
+    """Idempotently clear a forbidden goal from the exact canonical manager."""
+    configured_manager(server, thread_id)
+    before = server.request("thread/goal/get", {"threadId": thread_id})
+    goal = before.get("goal") if isinstance(before, dict) else None
+    if goal is None:
+        return {
+            "thread_id": thread_id,
+            "goal_present": False,
+            "clear_requested": False,
+            "cleared": False,
+            "already_absent": True,
+            "reconciled_after_uncertain_response": False,
+        }
+
+    accounting = {
+        "status": goal.get("status"),
+        "token_budget": goal.get("tokenBudget"),
+        "tokens_used": goal.get("tokensUsed"),
+        "time_used_seconds": goal.get("timeUsedSeconds"),
+    }
+    reconciled = False
+    try:
+        response = server.request("thread/goal/clear", {"threadId": thread_id})
+    except AppServerResponseError:
+        raise
+    except Exception as exc:
+        # A timeout can occur after the app-server committed the clear. Reread
+        # authoritative state before reporting an uncertain or failed action.
+        after = server.request("thread/goal/get", {"threadId": thread_id})
+        if after.get("goal") is not None:
+            raise RuntimeError("manager goal clear outcome remains unverified") from exc
+        response = {"cleared": True}
+        reconciled = True
+    after = server.request("thread/goal/get", {"threadId": thread_id})
+    if after.get("goal") is not None:
+        raise RuntimeError("manager goal remained present after clear")
+    return {
+        "thread_id": thread_id,
+        "goal_present": False,
+        "clear_requested": True,
+        "cleared": bool((response or {}).get("cleared")),
+        "already_absent": False,
+        "reconciled_after_uncertain_response": reconciled,
+        "prior_goal_accounting": accounting,
+    }
+
+
 def persist_config(thread_id: str) -> None:
     try:
         existing = json.loads(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else {}
@@ -623,6 +719,8 @@ def refresh_tools(server: AppServer, thread_id: str) -> dict[str, Any]:
             "model": MANAGER_MODEL,
             "config": manager_config(),
             "excludeTurns": False,
+            "copyGoal": False,
+            "deferGoalContinuation": False,
         },
     )["thread"]
     candidate_id = forked["id"]
@@ -755,6 +853,7 @@ def probe(server: AppServer, thread_id: str) -> dict[str, Any]:
         "thread": {"id": thread.get("id"), "status": thread.get("status"), "cwd": thread.get("cwd"), "name": thread.get("name")},
         "turn": {"id": last.get("id"), "status": last.get("status"), "error": last.get("error")},
         "control_broker": control_state,
+        "goal": goal_probe(server, thread_id),
         "remote_control": remote_control,
     }
 
@@ -803,7 +902,7 @@ def native_pane_health(thread_id: str) -> dict[str, Any]:
         remote = str(config.get("app_server_remote") or "")
         if remote == "unix://" and config.get("app_server_socket"):
             remote = f"unix://{config['app_server_socket']}"
-        expected = [str(binary.resolve()), "--disable", "hooks", "--remote",
+        expected = [str(binary.resolve()), "--disable", "hooks", "--disable", "goals", "--remote",
                     remote, "-C",
                     str(config.get("manager_cwd") or ""), "resume", thread_id]
     exact_runtime = (expected is not None and len(foreground) == 1
@@ -1036,7 +1135,7 @@ def hold(server: AppServer, thread_id: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "command", choices=("ensure", "verify", "candidate", "replace", "refresh-tools", "refresh-tools-in-place", "refresh-tools-activate", "hold", "probe", "native-pane-health", "resume"), nargs="?", default="ensure"
+        "command", choices=("ensure", "verify", "candidate", "replace", "refresh-tools", "refresh-tools-in-place", "refresh-tools-activate", "clear-goal", "hold", "probe", "native-pane-health", "resume"), nargs="?", default="ensure"
     )
     parser.add_argument("thread_id", nargs="?")
     parser.add_argument("expected_failed_turn_id", nargs="?")
@@ -1057,6 +1156,11 @@ def main() -> int:
             if not args.thread_id:
                 raise RuntimeError("probe requires a thread id")
             print(json.dumps(probe(server, args.thread_id), sort_keys=True))
+            return 0
+        if args.command == "clear-goal":
+            if not args.thread_id:
+                raise RuntimeError("clear-goal requires a thread id")
+            print(json.dumps(clear_goal(server, args.thread_id), sort_keys=True))
             return 0
         if args.command == "resume":
             if not args.thread_id or not args.expected_failed_turn_id:
