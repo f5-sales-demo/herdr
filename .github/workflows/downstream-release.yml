@@ -252,10 +252,11 @@ jobs:
           keychain="$RUNNER_TEMP/herdr-signing.keychain-db"
           keychain_password="$(openssl rand -hex 32)"
           certificate="$RUNNER_TEMP/developer-id.p12"
+          intermediate="$RUNNER_TEMP/developer-id-g2.cer"
           notarization_archive="$RUNNER_TEMP/${{ matrix.artifact }}.zip"
           cleanup() {
             security delete-keychain "$keychain" >/dev/null 2>&1 || true
-            rm -f "$certificate" "$notarization_archive"
+            rm -f "$certificate" "$intermediate" "$notarization_archive"
           }
           trap cleanup EXIT
 
@@ -269,6 +270,10 @@ jobs:
           security create-keychain -p "$keychain_password" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
           security unlock-keychain -p "$keychain_password" "$keychain"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
+            --output "$intermediate" \
+            https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          security import "$intermediate" -k "$keychain" -T /usr/bin/codesign
           security import "$certificate" -k "$keychain" \
             -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
