@@ -5,7 +5,20 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from downstream_release_plan import bump, release_level, replace_lockfile_version, replace_package_version
+if __package__:
+    from scripts.downstream_release_plan import (
+        bump,
+        release_level,
+        replace_lockfile_version,
+        replace_package_version,
+    )
+else:
+    from downstream_release_plan import (
+        bump,
+        release_level,
+        replace_lockfile_version,
+        replace_package_version,
+    )
 
 
 class ReleasePlanTests(unittest.TestCase):

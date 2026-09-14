@@ -1,5 +1,7 @@
 name: Downstream release
 
+# Release contract and credential setup: .github/DOWNSTREAM_DEPLOYMENT.md
+
 on:
   workflow_run:
     workflows: [CI]
@@ -89,6 +91,34 @@ jobs:
             echo "version=$version"
             echo "release_sha=$release_sha"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Require deployment credentials before creating a tag
+        if: steps.plan.outputs.release == 'true' || steps.retry.outputs.release == 'true'
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            APPLE_CERTIFICATE_BASE64 \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_ID \
+            APPLE_PASSWORD \
+            APPLE_TEAM_ID \
+            HOMEBREW_TAP_TOKEN; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -ne 0 ]; then
+            printf 'Missing required downstream release secret: %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
 
       - id: publish
         if: steps.plan.outputs.release == 'true'
@@ -183,11 +213,124 @@ jobs:
       - name: Build a verified binary
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Package binary and checksum
+      - name: Stage release binary
         shell: bash
         run: |
           set -euo pipefail
           cp "target/${{ matrix.target }}/release/herdr" "${{ matrix.artifact }}"
+
+      - name: Verify static Linux artifact
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          file "${{ matrix.artifact }}" | tee BUILD_INFO.txt
+          grep -Eq 'statically linked|static-pie linked' BUILD_INFO.txt
+          if readelf -l "${{ matrix.artifact }}" | grep -q 'INTERP'; then
+            echo "error: Linux release artifact contains a dynamic interpreter" >&2
+            exit 1
+          fi
+          if nm -u "${{ matrix.artifact }}" 2>/dev/null | grep -Eq '(__cxa|GLIBCXX|CXXABI|_ZSt)'; then
+            echo "error: Linux release artifact has unresolved C++ runtime symbols" >&2
+            exit 1
+          fi
+          if [ "${{ matrix.target }}" = x86_64-unknown-linux-musl ]; then
+            test "$(./${{ matrix.artifact }} --version)" = "herdr ${{ needs.prepare.outputs.version }}"
+          fi
+
+      - name: Sign and notarize macOS artifact
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/herdr-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          certificate="$RUNNER_TEMP/developer-id.p12"
+          notarization_archive="$RUNNER_TEMP/${{ matrix.artifact }}.zip"
+          cleanup() {
+            security delete-keychain "$keychain" >/dev/null 2>&1 || true
+            rm -f "$certificate" "$notarization_archive"
+          }
+          trap cleanup EXIT
+
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$certificate"
+          chmod 600 "$certificate"
+          openssl pkcs12 -info -in "$certificate" -noout \
+            -passin pass:"$APPLE_CERTIFICATE_PASSWORD" >/dev/null
+
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" "$keychain"
+
+          signing_identity="$(
+            security find-identity -v -p codesigning "$keychain" \
+              | awk -v team="$APPLE_TEAM_ID" \
+                'index($0, "Developer ID Application:") && index($0, "(" team ")") { print $2; exit }'
+          )"
+          if [ -z "$signing_identity" ]; then
+            echo "error: imported keychain does not contain the requested Developer ID Application identity" >&2
+            exit 1
+          fi
+
+          codesign --force --options runtime --timestamp --keychain "$keychain" \
+            --sign "$signing_identity" "${{ matrix.artifact }}"
+          codesign --verify --strict --verbose=4 "${{ matrix.artifact }}"
+          ditto -c -k --keepParent "${{ matrix.artifact }}" "$notarization_archive"
+          notarization_accepted=false
+          for attempt in 1 2 3; do
+            notary_exit=0
+            notary_output="$(xcrun notarytool submit "$notarization_archive" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait --verbose 2>&1)" || notary_exit=$?
+            printf '%s\n' "$notary_output"
+            if [ "$notary_exit" -eq 0 ] && grep -q 'status: Accepted' <<< "$notary_output"; then
+              notarization_accepted=true
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 30))
+            fi
+          done
+          if [ "$notarization_accepted" != true ]; then
+            echo "error: Apple did not accept the notarization submission" >&2
+            exit 1
+          fi
+
+          signing_details="$(codesign -d --verbose=4 "${{ matrix.artifact }}" 2>&1)"
+          grep -F "Authority=Developer ID Application:" <<< "$signing_details"
+          grep -F "TeamIdentifier=$APPLE_TEAM_ID" <<< "$signing_details"
+          if grep -Fq 'Signature=adhoc' <<< "$signing_details"; then
+            echo "error: macOS release artifact is only ad-hoc signed" >&2
+            exit 1
+          fi
+          spctl --assess --type execute --verbose=4 "${{ matrix.artifact }}"
+
+      - name: Verify macOS architecture
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_arch="${{ matrix.target }}"
+          expected_arch="${expected_arch%%-*}"
+          actual_arch="$(lipo -archs "${{ matrix.artifact }}")"
+          test "$actual_arch" = "$expected_arch"
+
+      - name: Write artifact checksum
+        shell: bash
+        run: |
+          set -euo pipefail
           python3 -c "import hashlib, pathlib; path = pathlib.Path('${{ matrix.artifact }}'); print(f'{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}')" > "${{ matrix.artifact }}.sha256"
 
       - name: Upload release asset
@@ -260,6 +403,21 @@ jobs:
       - name: Download release assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
 
+      - name: Verify release binary checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > SHA256SUMS
+          for artifact in \
+            herdr-linux-x86_64 \
+            herdr-linux-aarch64 \
+            herdr-macos-x86_64 \
+            herdr-macos-aarch64; do
+            (cd "$artifact" && shasum -a 256 -c "${artifact}.sha256")
+            cat "$artifact/${artifact}.sha256" >> SHA256SUMS
+          done
+          sort -k2 -o SHA256SUMS SHA256SUMS
+
       - name: Verify Control Manager asset provenance
         env:
           RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
@@ -279,6 +437,10 @@ jobs:
           TAG: v${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "$TAG already exists; preserving the immutable release."
+            exit 0
+          fi
           gh release create "$TAG" \
             herdr-linux-x86_64/herdr-linux-x86_64 \
             herdr-linux-x86_64/herdr-linux-x86_64.sha256 \
@@ -288,6 +450,7 @@ jobs:
             herdr-macos-x86_64/herdr-macos-x86_64.sha256 \
             herdr-macos-aarch64/herdr-macos-aarch64 \
             herdr-macos-aarch64/herdr-macos-aarch64.sha256 \
+            SHA256SUMS \
             control-manager-release/control-manager-${{ needs.prepare.outputs.version }}.tar.gz \
             control-manager-release/control-manager-${{ needs.prepare.outputs.version }}.tar.gz.sha256 \
             control-manager-release/control-manager-${{ needs.prepare.outputs.version }}.provenance.json \
@@ -300,3 +463,80 @@ jobs:
         run: |
           set -euo pipefail
           test "$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq .immutable)" = true
+
+  publish-homebrew:
+    needs: [prepare, publish]
+    if: needs.prepare.outputs.release == 'true'
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout release tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
+          path: herdr-source
+          persist-credentials: false
+
+      - name: Checkout the Homebrew tap
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: f5-sales-demo/homebrew-tap
+          ref: main
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Download published checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir checksums
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'herdr-*.sha256' --dir checksums
+
+      - id: formula
+        name: Render the cross-platform formula
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 herdr-source/scripts/render_downstream_homebrew_formula.py \
+            --version "$VERSION" \
+            --checksums-dir checksums \
+            --output homebrew-tap/herdr.rb
+          ruby -c homebrew-tap/herdr.rb
+          git -C homebrew-tap diff --check
+          git -C homebrew-tap config user.name "github-actions[bot]"
+          git -C homebrew-tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C homebrew-tap add herdr.rb
+          if git -C homebrew-tap diff --cached --quiet; then
+            echo "Homebrew formula is already at v$VERSION."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git -C homebrew-tap commit -m "herdr: update to v$VERSION"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Install and test the rendered formula
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          brew untap f5-sales-demo/tap >/dev/null 2>&1 || true
+          if brew command trust >/dev/null 2>&1; then
+            brew trust --formula f5-sales-demo/tap/herdr
+          fi
+          HOMEBREW_NO_AUTO_UPDATE=1 brew tap --custom-remote \
+            f5-sales-demo/tap "file://$GITHUB_WORKSPACE/homebrew-tap"
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install f5-sales-demo/tap/herdr
+          HOMEBREW_NO_AUTO_UPDATE=1 brew test f5-sales-demo/tap/herdr
+          test "$(herdr --version)" = "herdr $VERSION"
+
+      - name: Publish the tap formula
+        if: steps.formula.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git -C homebrew-tap pull --rebase origin main
+          git -C homebrew-tap push origin HEAD:main
