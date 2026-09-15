@@ -59,10 +59,14 @@ the two repositories use the same credential contract.
 
 ## Release flow
 
-1. Merge a conventional `feat`, `fix`, `perf`, or `refactor` commit to
-   `build-xcsh`.
-2. Wait for `CI` to succeed. The downstream workflow derives the next SemVer,
-   commits it, and creates the matching annotated tag.
+1. Merge conventional `feat`, `fix`, `perf`, or `refactor` commits to
+   `build-xcsh` and require the push-triggered `CI` run to pass. Push CI is a
+   verification gate only and never creates a release.
+2. When the branch is ready to release, manually dispatch `CI` on
+   `build-xcsh`. Its successful completion is the explicit release-intent
+   signal. The downstream workflow derives the next SemVer, commits it, and
+   creates the matching annotated tag. This mirrors the `f5-sales-demo/xcsh`
+   separation between ordinary CI and an explicit version-release decision.
 3. Wait for both architecture builds on both operating systems. macOS binary
    notarization, package notarization, stapling, and Gatekeeper assessment must
    all pass.
@@ -74,7 +78,12 @@ the two repositories use the same credential contract.
 An existing tag whose release workflow failed can be retried through the
 `Downstream release` workflow's `tag` input. If the immutable GitHub Release
 already exists, the workflow preserves it and republishes the tap formula from
-the checksums attached to that release.
+the checksums attached to that release. Recovery keeps all build and package
+inputs pinned to the tag commit, but pins formula/cask rendering and release
+verification to the `build-xcsh` commit from which the recovery was manually
+dispatched. Both identities are recorded by the workflow. This permits a
+reviewed release-tooling correction to recover publication without changing,
+reusing, or rewriting the immutable tag and its payloads.
 
 ## Consumer installation and verification
 

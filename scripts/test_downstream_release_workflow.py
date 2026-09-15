@@ -42,6 +42,33 @@ class DownstreamReleaseWorkflowTests(unittest.TestCase):
         self.assertIn('actual_arch="$(lipo -archs "${{ matrix.artifact }}")"', self.workflow)
         self.assertNotIn("scripts/macos_arch.py", self.workflow)
 
+    def test_only_manual_ci_completion_admits_an_automatic_release(self) -> None:
+        prepare_guard = re.search(
+            r"(?ms)^  prepare:\n    if: >-\n(?P<guard>.+?)^    runs-on:",
+            self.workflow,
+        )
+        self.assertIsNotNone(prepare_guard)
+        guard = prepare_guard.group("guard")
+        self.assertIn("github.event.workflow_run.event == 'workflow_dispatch'", guard)
+        self.assertNotIn("github.event.workflow_run.event == 'push'", guard)
+
+    def test_existing_tag_recovery_separates_payload_and_tooling_pins(self) -> None:
+        self.assertIn(
+            "release_sha: ${{ steps.publish.outputs.release_sha || steps.retry.outputs.release_sha }}",
+            self.workflow,
+        )
+        self.assertIn("tooling_sha: ${{ steps.tooling.outputs.tooling_sha }}", self.workflow)
+        self.assertIn(
+            "TOOLING_SHA: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.workflow_run.head_sha }}",
+            self.workflow,
+        )
+        self.assertIn("ref: ${{ needs.prepare.outputs.release_sha }}", self.workflow)
+        self.assertIn("ref: ${{ needs.prepare.outputs.tooling_sha }}", self.workflow)
+        self.assertIn(
+            'run: test "$(git -C herdr-source rev-parse HEAD)" = "$TOOLING_SHA"',
+            self.workflow,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
