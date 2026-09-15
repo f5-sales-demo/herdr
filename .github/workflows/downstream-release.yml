@@ -354,20 +354,10 @@ jobs:
             echo "error: macOS release artifact is only ad-hoc signed" >&2
             exit 1
           fi
-          # Bare Mach-O tools cannot carry a stapled ticket; wait briefly for
-          # Apple's online Gatekeeper verdict after accepted notarization.
-          gatekeeper_accepted=false
-          for attempt in 1 2 3 4 5 6 7 8; do
-            if spctl --assess --type execute --verbose=4 "${{ matrix.artifact }}"; then
-              gatekeeper_accepted=true
-              break
-            fi
-            [ "$attempt" -eq 8 ] || sleep 15
-          done
-          if [ "$gatekeeper_accepted" != true ]; then
-            echo "error: Gatekeeper did not accept the notarized macOS binary" >&2
-            exit 1
-          fi
+          # A bare Mach-O CLI cannot carry a stapled ticket and `spctl --type
+          # execute` classifies it as "not an app" even after Apple accepts its
+          # notarization. Gatekeeper is enforced below on the signed, stapled
+          # installer package that distributes this exact verified binary.
 
           mkdir -p "$package_root/usr/local/bin"
           cp "${{ matrix.artifact }}" "$package_root/usr/local/bin/herdr"
@@ -630,6 +620,7 @@ jobs:
 
       - name: Install and test the rendered formula
         env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
@@ -644,7 +635,9 @@ jobs:
           formula_binary="$(brew --prefix f5-sales-demo/tap/herdr)/bin/herdr"
           test "$("$formula_binary" --version)" = "herdr $VERSION"
           codesign --verify --strict "$formula_binary"
-          spctl --assess --type execute --verbose=4 "$formula_binary"
+          signing_details="$(codesign -d --verbose=4 "$formula_binary" 2>&1)"
+          grep -F 'Authority=Developer ID Application:' <<< "$signing_details"
+          grep -F "TeamIdentifier=$APPLE_TEAM_ID" <<< "$signing_details"
 
       - name: Publish the tap formula
         if: steps.formula.outputs.changed == 'true'
@@ -681,6 +674,7 @@ jobs:
 
       - name: Install the published prebuilt formula
         env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           VERSION: ${{ needs.prepare.outputs.version }}
           HOMEBREW_NO_AUTO_UPDATE: "1"
         run: |
@@ -695,10 +689,13 @@ jobs:
           binary="$(brew --prefix f5-sales-demo/tap/herdr)/bin/herdr"
           test "$("$binary" --version)" = "herdr $VERSION"
           codesign --verify --strict "$binary"
-          spctl --assess --type execute --verbose=4 "$binary"
+          signing_details="$(codesign -d --verbose=4 "$binary" 2>&1)"
+          grep -F 'Authority=Developer ID Application:' <<< "$signing_details"
+          grep -F "TeamIdentifier=$APPLE_TEAM_ID" <<< "$signing_details"
 
       - name: Install the published managed macOS cask
         env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           VERSION: ${{ needs.prepare.outputs.version }}
           HOMEBREW_NO_AUTO_UPDATE: "1"
         run: |
@@ -711,4 +708,6 @@ jobs:
           test -x "$binary"
           test "$("$binary" --version)" = "herdr $VERSION"
           codesign --verify --strict "$binary"
-          spctl --assess --type execute --verbose=4 "$binary"
+          signing_details="$(codesign -d --verbose=4 "$binary" 2>&1)"
+          grep -F 'Authority=Developer ID Application:' <<< "$signing_details"
+          grep -F "TeamIdentifier=$APPLE_TEAM_ID" <<< "$signing_details"
