@@ -14,17 +14,20 @@ assets:
 | --- | --- | --- |
 | Linux x86_64 | `herdr-linux-x86_64` | static ELF, native `--version` smoke test |
 | Linux aarch64 | `herdr-linux-aarch64` | static ELF with no dynamic interpreter |
-| macOS Intel | `herdr-macos-x86_64` | Developer ID signature and accepted notarization |
-| macOS Apple silicon | `herdr-macos-aarch64` | Developer ID signature and accepted notarization |
+| macOS Intel | `herdr-macos-x86_64`, `herdr-macos-x86_64.pkg` | Developer ID Application signature, accepted notarization, and stapled Developer ID Installer package |
+| macOS Apple silicon | `herdr-macos-aarch64`, `herdr-macos-aarch64.pkg` | Developer ID Application signature, accepted notarization, and stapled Developer ID Installer package |
 
-Each binary has a matching `.sha256` file. New releases also contain one
-`SHA256SUMS` file covering all four binaries. The GitHub Release is made
-immutable before package-manager publication begins.
+Every binary and macOS package has a matching `.sha256` file. New releases
+also contain one `SHA256SUMS` file covering the four binaries and two
+installer packages. The GitHub Release is made immutable before
+package-manager publication begins.
 
-The workflow then renders `f5-sales-demo/homebrew-tap/herdr.rb` from the
-published checksums, installs and tests that formula on macOS, and pushes it to
-the tap. The formula installs the prebuilt release binary on macOS and Linux;
-it never recompiles a different payload from source.
+The workflow then renders `f5-sales-demo/homebrew-tap/herdr.rb` and
+`f5-sales-demo/homebrew-tap/Casks/herdr.rb` from published checksums. It
+tests the prebuilt formula, publishes both tap entries, and installs those
+published entries on a clean macOS runner. The formula installs the prebuilt
+release binary on macOS and Linux; the cask installs the stapled signed macOS
+package. Neither recompiles a different payload from source.
 
 ## Required GitHub Actions secrets
 
@@ -34,6 +37,8 @@ Configure these repository secrets before merging a releasable change:
 | --- | --- |
 | `APPLE_CERTIFICATE_BASE64` | Base64-encoded Developer ID Application certificate and private key |
 | `APPLE_CERTIFICATE_PASSWORD` | Password protecting the PKCS#12 export |
+| `APPLE_INSTALLER_CERTIFICATE_BASE64` | Base64-encoded Developer ID Installer certificate and private key |
+| `APPLE_INSTALLER_CERTIFICATE_PASSWORD` | Password protecting the Installer PKCS#12 export |
 | `APPLE_TEAM_ID` | Team ID in the Developer ID Application identity |
 | `APPLE_ID` | Apple account used by `notarytool` |
 | `APPLE_PASSWORD` | App-specific password used by `notarytool` |
@@ -43,12 +48,14 @@ The credential gate runs before the release commit and tag are created. A
 missing credential therefore cannot leave behind a new tag with incomplete or
 unsigned assets.
 
-The certificate must be a `Developer ID Application` identity. The workflow
-imports it into an ephemeral keychain, selects only the identity matching
-`APPLE_TEAM_ID`, signs with the hardened runtime and a trusted timestamp, and
-deletes the temporary keychain and decoded credentials when the job exits.
-These Apple secret names match the existing `f5-sales-demo/xcsh` signing
-workflow so the two repositories use the same credential contract.
+The exports must contain a `Developer ID Application` identity and a separate
+`Developer ID Installer` identity for the same team. The workflow imports both
+Apple Developer ID intermediate chains into an ephemeral keychain, selects only
+identities matching `APPLE_TEAM_ID`, signs binaries with hardened runtime and a
+trusted timestamp, signs/staples packages with the Installer identity, and
+deletes temporary keychain and decoded credentials when the job exits. These
+Apple secret names match the existing `f5-sales-demo/xcsh` signing workflow so
+the two repositories use the same credential contract.
 
 ## Release flow
 
@@ -56,10 +63,13 @@ workflow so the two repositories use the same credential contract.
    `build-xcsh`.
 2. Wait for `CI` to succeed. The downstream workflow derives the next SemVer,
    commits it, and creates the matching annotated tag.
-3. Wait for both architecture builds on both operating systems.
-4. Confirm the GitHub Release is immutable and contains all binaries and
-   checksums.
-5. Confirm `f5-sales-demo/tap/herdr` reports the same version.
+3. Wait for both architecture builds on both operating systems. macOS binary
+   notarization, package notarization, stapling, and Gatekeeper assessment must
+   all pass.
+4. Confirm the GitHub Release is immutable and contains all binaries,
+   packages, and checksums.
+5. Confirm the published formula and cask install the same version and pass
+   code-signing/Gatekeeper checks.
 
 An existing tag whose release workflow failed can be retried through the
 `Downstream release` workflow's `tag` input. If the immutable GitHub Release
@@ -89,6 +99,15 @@ spctl --assess --type execute --verbose=4 "$(brew --prefix herdr)/bin/herdr"
 
 The signing details must contain `Authority=Developer ID Application:` and the
 expected `TeamIdentifier`; they must not contain `Signature=adhoc`.
+
+For managed macOS installation, use the cask rather than the formula:
+
+```bash
+brew install --cask f5-sales-demo/tap/herdr
+pkgutil --pkg-info com.f5.herdr
+codesign --verify --strict /usr/local/bin/herdr
+spctl --assess --type execute --verbose=4 /usr/local/bin/herdr
+```
 
 On Linux, verify that the installed payload is static:
 
