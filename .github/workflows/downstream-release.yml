@@ -159,9 +159,11 @@ jobs:
           - target: x86_64-apple-darwin
             os: macos-15-intel
             artifact: herdr-macos-x86_64
+            macho_arch: x86_64
           - target: aarch64-apple-darwin
             os: macos-14
             artifact: herdr-macos-aarch64
+            macho_arch: arm64
     runs-on: ${{ matrix.os }}
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ReleaseFast
@@ -400,7 +402,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          expected_arch="$(python3 scripts/macos_arch.py '${{ matrix.target }}')"
+          expected_arch="${{ matrix.macho_arch }}"
           actual_arch="$(lipo -archs "${{ matrix.artifact }}")"
           test "$actual_arch" = "$expected_arch"
 
