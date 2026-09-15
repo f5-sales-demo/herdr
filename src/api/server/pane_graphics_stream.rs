@@ -119,6 +119,9 @@ fn serve_with_timeouts(
         return Ok(());
     }
 
+    let stream_active = Arc::new(AtomicBool::new(true));
+    register_stream(&owner, &stream_active);
+
     if let Err(err) = write_json_line(
         &mut stream,
         &SuccessResponse {
@@ -126,6 +129,7 @@ fn serve_with_timeouts(
             result: ResponseResult::Ok {},
         },
     ) {
+        unregister_stream(&owner);
         clear_layer(&pane_id, &owner, api_tx);
         if is_connection_closed_error(&err) {
             return Ok(());
@@ -133,8 +137,6 @@ fn serve_with_timeouts(
         return Err(err);
     }
 
-    let stream_active = Arc::new(AtomicBool::new(true));
-    register_stream(&owner, &stream_active);
     let result = serve_frames(
         &mut stream,
         &request_id,
@@ -981,6 +983,7 @@ mod tests {
             .unwrap();
         let ack: SuccessResponse = serde_json::from_str(&read_response_line(&mut client)).unwrap();
         assert_eq!(ack.id, "stream-cancel");
+        assert!(stream_registry().lock().unwrap().contains_key(&owner));
 
         cancel_inactive_streams(|registered| registered != owner);
 
