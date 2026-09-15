@@ -29,6 +29,15 @@ class RenderDownstreamHomebrewFormulaTests(unittest.TestCase):
             self.assertIn(f"releases/download/v#{{version}}/herdr-{target}", formula)
             self.assertIn(f'sha256 "{checksum}"', formula)
 
+    def test_formula_makes_raw_binary_executable_before_running_it(self) -> None:
+        formula = render_formula("0.15.6", self.checksums)
+
+        install = 'bin.install Dir["herdr-*"].fetch(0) => "herdr"'
+        chmod = '(bin/"herdr").chmod 0755'
+        completions = 'generate_completions_from_executable(bin/"herdr", "completion")'
+        self.assertLess(formula.index(install), formula.index(chmod))
+        self.assertLess(formula.index(chmod), formula.index(completions))
+
     def test_cask_selects_the_stapled_installer_for_each_mac_architecture(self) -> None:
         cask = render_cask("0.15.6", self.checksums)
 

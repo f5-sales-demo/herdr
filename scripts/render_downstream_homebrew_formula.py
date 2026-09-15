@@ -80,6 +80,7 @@ def render_formula(version: str, checksums: dict[str, str]) -> str:
         "",
         "  def install",
         '    bin.install Dir["herdr-*"].fetch(0) => "herdr"',
+        '    (bin/"herdr").chmod 0755',
         '    generate_completions_from_executable(bin/"herdr", "completion")',
         "  end",
         "",
