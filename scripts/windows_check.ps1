@@ -5,6 +5,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+& (Join-Path $PSScriptRoot "windows_smoke_wait_output.tests.ps1")
+
 function Invoke-Checked {
     param([string]$Command, [string[]]$Arguments)
 

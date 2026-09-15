@@ -2,10 +2,15 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $ExePath,
 
-    [string] $Session = "ci-windows-$([guid]::NewGuid().ToString('N'))"
+    [string] $Session = "ci-windows-$([guid]::NewGuid().ToString('N'))",
+
+    [ValidateRange(1, 300)]
+    [int] $OutputTimeoutSeconds = 45
 )
 
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "windows_smoke_wait_output.ps1")
 
 function Invoke-Checked {
     param([string] $Command, [string[]] $Arguments)
@@ -104,36 +109,17 @@ try {
     }
     $marker = "HERDR_CONPTY_SMOKE_OK"
     Invoke-Checked $exe @("pane", "run", $paneId, "echo $marker")
-
-    $text = ""
-    $deadline = (Get-Date).AddSeconds(15)
-    do {
-        Start-Sleep -Milliseconds 500
-        try {
-            $read = & $exe pane read $paneId --source recent-unwrapped --lines 40 --format text 2>&1
-            $readExitCode = $LASTEXITCODE
-        } catch {
-            $read = @($_.Exception.Message)
-            $readExitCode = 1
-        }
-        $text = $read -join "`n"
-        if ($readExitCode -eq 0 -and (($text -replace "\s", "") -match $marker)) {
-            break
-        }
-    } while ((Get-Date) -lt $deadline)
-
-    if (($text -replace "\s", "") -notmatch $marker) {
-        throw "pane read did not include the smoke marker: $text"
-    }
+    Wait-HerdrSmokeOutput -ExePath $exe -PaneId $paneId -Marker $marker `
+        -TimeoutSeconds $OutputTimeoutSeconds
 } finally {
     if ($null -ne $server) {
         try {
             $stopOutput = & $exe server stop 2>&1
             if ($LASTEXITCODE -ne 0) {
-                Write-Host "server stop during cleanup exited with $LASTEXITCODE`: $($stopOutput -join "`n")"
+                Write-Warning "server stop during cleanup exited with $LASTEXITCODE`: $($stopOutput -join "`n")"
             }
         } catch {
-            Write-Host "server stop during cleanup failed: $($_.Exception.Message)"
+            Write-Warning "server stop during cleanup failed: $($_.Exception.Message)"
         }
         Wait-Process -Id $server.Id -Timeout 10 -ErrorAction SilentlyContinue
         $server.Refresh()
