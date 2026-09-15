@@ -103,11 +103,13 @@ On macOS, verify the installed payload:
 
 ```bash
 codesign --verify --strict --verbose=4 "$(brew --prefix herdr)/bin/herdr"
-spctl --assess --type execute --verbose=4 "$(brew --prefix herdr)/bin/herdr"
 ```
 
 The signing details must contain `Authority=Developer ID Application:` and the
-expected `TeamIdentifier`; they must not contain `Signature=adhoc`.
+expected `TeamIdentifier`; they must not contain `Signature=adhoc`. Do not use
+`spctl --type execute` as a Gatekeeper verdict for the bare CLI: macOS can
+classify a valid, notarized Mach-O command-line tool as `not an app`. The
+signed, stapled installer package is the Gatekeeper assessment boundary.
 
 For managed macOS installation, use the cask rather than the formula:
 
@@ -115,7 +117,15 @@ For managed macOS installation, use the cask rather than the formula:
 brew install --cask f5-sales-demo/tap/herdr
 pkgutil --pkg-info com.f5.herdr
 codesign --verify --strict /usr/local/bin/herdr
-spctl --assess --type execute --verbose=4 /usr/local/bin/herdr
+```
+
+Before installation, the downloaded release package must pass all three
+package-level checks:
+
+```bash
+pkgutil --check-signature herdr-macos-aarch64.pkg
+xcrun stapler validate herdr-macos-aarch64.pkg
+spctl --assess --type install --verbose=4 herdr-macos-aarch64.pkg
 ```
 
 On Linux, verify that the installed payload is static:

@@ -69,6 +69,14 @@ class DownstreamReleaseWorkflowTests(unittest.TestCase):
             self.workflow,
         )
 
+    def test_gatekeeper_assessment_uses_stapled_installer_packages(self) -> None:
+        self.assertNotIn("spctl --assess --type execute", self.workflow)
+        self.assertIn('spctl --assess --type install --verbose=4 "$package"', self.workflow)
+        self.assertIn(
+            "spctl --assess --type install --verbose=4 herdr-macos-aarch64.pkg",
+            self.workflow,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
