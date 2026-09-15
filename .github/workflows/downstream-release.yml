@@ -30,18 +30,29 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
-      (github.event.workflow_run.event == 'push' ||
-      github.event.workflow_run.event == 'workflow_dispatch'))
+      github.event.workflow_run.event == 'workflow_dispatch')
     runs-on: ubuntu-latest
     outputs:
       release: ${{ steps.plan.outputs.release || steps.retry.outputs.release }}
       version: ${{ steps.plan.outputs.version || steps.retry.outputs.version }}
       release_sha: ${{ steps.publish.outputs.release_sha || steps.retry.outputs.release_sha }}
+      tooling_sha: ${{ steps.tooling.outputs.tooling_sha }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ inputs.tag || github.event.workflow_run.head_sha }}
           fetch-depth: 0
+
+      - id: tooling
+        name: Pin release tooling identity
+        shell: bash
+        env:
+          TOOLING_SHA: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          git cat-file -e "${TOOLING_SHA}^{commit}"
+          resolved_tooling_sha="$(git rev-parse "${TOOLING_SHA}^{commit}")"
+          echo "tooling_sha=$resolved_tooling_sha" >> "$GITHUB_OUTPUT"
 
       - id: plan
         if: github.event_name == 'workflow_run'
@@ -572,9 +583,14 @@ jobs:
       - name: Checkout release tooling
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ needs.prepare.outputs.release_sha }}
+          ref: ${{ needs.prepare.outputs.tooling_sha }}
           path: herdr-source
           persist-credentials: false
+
+      - name: Verify pinned release tooling
+        env:
+          TOOLING_SHA: ${{ needs.prepare.outputs.tooling_sha }}
+        run: test "$(git -C herdr-source rev-parse HEAD)" = "$TOOLING_SHA"
 
       - name: Checkout the Homebrew tap
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
