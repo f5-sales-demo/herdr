@@ -255,22 +255,17 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          application_keychain="$RUNNER_TEMP/herdr-application-signing.keychain-db"
-          installer_keychain="$RUNNER_TEMP/herdr-installer-signing.keychain-db"
+          signing_keychain="$RUNNER_TEMP/herdr-signing.keychain-db"
           keychain_password="$(openssl rand -hex 32)"
           application_certificate="$RUNNER_TEMP/developer-id-application.p12"
           installer_certificate="$RUNNER_TEMP/developer-id-installer.p12"
-          developer_id_ca="$RUNNER_TEMP/developer-id-ca.cer"
-          developer_id_g2_ca="$RUNNER_TEMP/developer-id-g2-ca.cer"
           notarization_archive="$RUNNER_TEMP/${{ matrix.artifact }}.zip"
           package_root="$RUNNER_TEMP/herdr-package-root"
           package="${{ matrix.artifact }}.pkg"
           cleanup() {
-            security delete-keychain "$application_keychain" >/dev/null 2>&1 || true
-            security delete-keychain "$installer_keychain" >/dev/null 2>&1 || true
+            security delete-keychain "$signing_keychain" >/dev/null 2>&1 || true
             rm -rf "$package_root"
-            rm -f "$application_certificate" "$installer_certificate" \
-              "$developer_id_ca" "$developer_id_g2_ca" "$notarization_archive"
+            rm -f "$application_certificate" "$installer_certificate" "$notarization_archive"
           }
           trap cleanup EXIT
 
@@ -280,47 +275,45 @@ jobs:
           # security import validates the PKCS#12 bundle and password. Do not
           # preflight with OpenSSL: legacy Developer ID exports can use RC2-40.
 
-          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
-            --output "$developer_id_ca" \
-            https://www.apple.com/certificateauthority/DeveloperIDCA.cer
-          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
-            --output "$developer_id_g2_ca" \
-            https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
-
-          for keychain in "$application_keychain" "$installer_keychain"; do
-            security create-keychain -p "$keychain_password" "$keychain"
-            security set-keychain-settings -lut 21600 "$keychain"
-            security unlock-keychain -p "$keychain_password" "$keychain"
-            security import "$developer_id_ca" -k "$keychain"
-            security import "$developer_id_g2_ca" -k "$keychain"
-          done
-          security import "$application_certificate" -k "$application_keychain" \
-            -f pkcs12 -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security import "$installer_certificate" -k "$installer_keychain" \
-            -f pkcs12 -P "$APPLE_INSTALLER_CERTIFICATE_PASSWORD" -T /usr/bin/pkgbuild
-          for keychain in "$application_keychain" "$installer_keychain"; do
-            security set-key-partition-list -S apple-tool:,apple:,codesign: \
-              -s -k "$keychain_password" "$keychain"
-          done
+          # Match xcsh's proven release path: import both identities into one
+          # default keychain and rely on the certificate chains in the bundles.
+          security create-keychain -p "$keychain_password" "$signing_keychain"
+          security default-keychain -s "$signing_keychain"
+          security set-keychain-settings -lut 21600 "$signing_keychain"
+          security unlock-keychain -p "$keychain_password" "$signing_keychain"
+          security list-keychain -d user -s "$signing_keychain"
+          security import "$application_certificate" -k "$signing_keychain" \
+            -f pkcs12 -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" "$signing_keychain"
+          security import "$installer_certificate" -k "$signing_keychain" \
+            -f pkcs12 -P "$APPLE_INSTALLER_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/pkgbuild -T /usr/bin/productsign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" "$signing_keychain"
 
           application_identity="$(
-            security find-identity -v -p codesigning "$application_keychain" \
+            security find-identity -v -p codesigning "$signing_keychain" \
               | awk -v team="$APPLE_TEAM_ID" \
-                'index($0, "Developer ID Application:") && index($0, "(" team ")") { print $2; exit }'
+                'index($0, "Developer ID Application:") && index($0, "(" team ")") {
+                  match($0, /"[^"]+"/); print substr($0, RSTART + 1, RLENGTH - 2); exit
+                }'
           )"
           installer_identity="$(
-            security find-identity -v "$installer_keychain" \
+            security find-identity -v "$signing_keychain" \
               | awk -v team="$APPLE_TEAM_ID" \
-                'index($0, "Developer ID Installer:") && index($0, "(" team ")") { print $2; exit }'
+                'index($0, "Developer ID Installer:") && index($0, "(" team ")") {
+                  match($0, /"[^"]+"/); print substr($0, RSTART + 1, RLENGTH - 2); exit
+                }'
           )"
           if [ -z "$application_identity" ] || [ -z "$installer_identity" ]; then
             echo "error: imported keychain does not contain the requested Developer ID Application and Installer identities" >&2
-            security find-identity -v "$application_keychain" >&2 || true
-            security find-identity -v "$installer_keychain" >&2 || true
+            security find-identity -v "$signing_keychain" >&2 || true
             exit 1
           fi
 
-          codesign --force --options runtime --timestamp --keychain "$application_keychain" \
+          codesign --force --options runtime --timestamp \
             --sign "$application_identity" "${{ matrix.artifact }}"
           codesign --verify --strict --verbose=4 "${{ matrix.artifact }}"
           ditto -c -k --keepParent "${{ matrix.artifact }}" "$notarization_archive"
@@ -375,7 +368,6 @@ jobs:
             --version "${{ needs.prepare.outputs.version }}" \
             --install-location / \
             --sign "$installer_identity" \
-            --keychain "$installer_keychain" \
             "$package"
 
           package_accepted=false
