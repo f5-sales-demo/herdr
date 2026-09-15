@@ -400,8 +400,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          expected_arch="${{ matrix.target }}"
-          expected_arch="${expected_arch%%-*}"
+          expected_arch="$(python3 scripts/macos_arch.py '${{ matrix.target }}')"
           actual_arch="$(lipo -archs "${{ matrix.artifact }}")"
           test "$actual_arch" = "$expected_arch"
 
