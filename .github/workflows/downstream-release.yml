@@ -97,6 +97,8 @@ jobs:
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_INSTALLER_CERTIFICATE_BASE64: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_BASE64 }}
+          APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -107,6 +109,8 @@ jobs:
           for name in \
             APPLE_CERTIFICATE_BASE64 \
             APPLE_CERTIFICATE_PASSWORD \
+            APPLE_INSTALLER_CERTIFICATE_BASE64 \
+            APPLE_INSTALLER_CERTIFICATE_PASSWORD \
             APPLE_ID \
             APPLE_PASSWORD \
             APPLE_TEAM_ID \
@@ -153,10 +157,10 @@ jobs:
             os: ubuntu-latest
             artifact: herdr-linux-aarch64
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-15-intel
             artifact: herdr-macos-x86_64
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: macos-14
             artifact: herdr-macos-aarch64
     runs-on: ${{ matrix.os }}
     env:
@@ -244,6 +248,8 @@ jobs:
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_INSTALLER_CERTIFICATE_BASE64: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_BASE64 }}
+          APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -251,46 +257,64 @@ jobs:
           set -euo pipefail
           keychain="$RUNNER_TEMP/herdr-signing.keychain-db"
           keychain_password="$(openssl rand -hex 32)"
-          certificate="$RUNNER_TEMP/developer-id.p12"
-          intermediate="$RUNNER_TEMP/developer-id-g2.cer"
+          application_certificate="$RUNNER_TEMP/developer-id-application.p12"
+          installer_certificate="$RUNNER_TEMP/developer-id-installer.p12"
+          developer_id_ca="$RUNNER_TEMP/developer-id-ca.cer"
+          developer_id_g2_ca="$RUNNER_TEMP/developer-id-g2-ca.cer"
           notarization_archive="$RUNNER_TEMP/${{ matrix.artifact }}.zip"
+          package_root="$RUNNER_TEMP/herdr-package-root"
+          package="${{ matrix.artifact }}.pkg"
           cleanup() {
             security delete-keychain "$keychain" >/dev/null 2>&1 || true
-            rm -f "$certificate" "$intermediate" "$notarization_archive"
+            rm -rf "$package_root"
+            rm -f "$application_certificate" "$installer_certificate" \
+              "$developer_id_ca" "$developer_id_g2_ca" "$notarization_archive"
           }
           trap cleanup EXIT
 
-          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$certificate"
-          chmod 600 "$certificate"
-          # `security import` below validates both the bundle password and its
-          # contents. Do not preflight with OpenSSL: Developer ID exports can
-          # use legacy RC2-40 PKCS#12 encryption, which OpenSSL 3 disables by
-          # default on current macOS runners.
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$application_certificate"
+          printf '%s' "$APPLE_INSTALLER_CERTIFICATE_BASE64" | base64 --decode > "$installer_certificate"
+          chmod 600 "$application_certificate" "$installer_certificate"
+          # security import validates the PKCS#12 bundle and password. Do not
+          # preflight with OpenSSL: legacy Developer ID exports can use RC2-40.
 
           security create-keychain -p "$keychain_password" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
           security unlock-keychain -p "$keychain_password" "$keychain"
           curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
-            --output "$intermediate" \
+            --output "$developer_id_ca" \
+            https://www.apple.com/certificateauthority/DeveloperIDCA.cer
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
+            --output "$developer_id_g2_ca" \
             https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
-          security import "$intermediate" -k "$keychain" -T /usr/bin/codesign
-          security import "$certificate" -k "$keychain" \
+          security import "$developer_id_ca" -k "$keychain" -T /usr/bin/codesign
+          security import "$developer_id_g2_ca" -k "$keychain" -T /usr/bin/codesign
+          security import "$application_certificate" -k "$keychain" \
             -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security import "$installer_certificate" -k "$keychain" \
+            -P "$APPLE_INSTALLER_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/pkgbuild -T /usr/bin/productsign
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$keychain_password" "$keychain"
 
-          signing_identity="$(
+          application_identity="$(
             security find-identity -v -p codesigning "$keychain" \
               | awk -v team="$APPLE_TEAM_ID" \
                 'index($0, "Developer ID Application:") && index($0, "(" team ")") { print $2; exit }'
           )"
-          if [ -z "$signing_identity" ]; then
-            echo "error: imported keychain does not contain the requested Developer ID Application identity" >&2
+          installer_identity="$(
+            security find-identity -v "$keychain" \
+              | awk -v team="$APPLE_TEAM_ID" \
+                'index($0, "Developer ID Installer:") && index($0, "(" team ")") { print $2; exit }'
+          )"
+          if [ -z "$application_identity" ] || [ -z "$installer_identity" ]; then
+            echo "error: imported keychain does not contain the requested Developer ID Application and Installer identities" >&2
+            security find-identity -v "$keychain" >&2 || true
             exit 1
           fi
 
           codesign --force --options runtime --timestamp --keychain "$keychain" \
-            --sign "$signing_identity" "${{ matrix.artifact }}"
+            --sign "$application_identity" "${{ matrix.artifact }}"
           codesign --verify --strict --verbose=4 "${{ matrix.artifact }}"
           ditto -c -k --keepParent "${{ matrix.artifact }}" "$notarization_archive"
           notarization_accepted=false
@@ -322,7 +346,55 @@ jobs:
             echo "error: macOS release artifact is only ad-hoc signed" >&2
             exit 1
           fi
-          spctl --assess --type execute --verbose=4 "${{ matrix.artifact }}"
+          # Bare Mach-O tools cannot carry a stapled ticket; wait briefly for
+          # Apple's online Gatekeeper verdict after accepted notarization.
+          gatekeeper_accepted=false
+          for attempt in 1 2 3 4 5 6 7 8; do
+            if spctl --assess --type execute --verbose=4 "${{ matrix.artifact }}"; then
+              gatekeeper_accepted=true
+              break
+            fi
+            [ "$attempt" -eq 8 ] || sleep 15
+          done
+          if [ "$gatekeeper_accepted" != true ]; then
+            echo "error: Gatekeeper did not accept the notarized macOS binary" >&2
+            exit 1
+          fi
+
+          mkdir -p "$package_root/usr/local/bin"
+          cp "${{ matrix.artifact }}" "$package_root/usr/local/bin/herdr"
+          pkgbuild --root "$package_root" \
+            --identifier com.f5.herdr \
+            --version "${{ needs.prepare.outputs.version }}" \
+            --install-location / \
+            --sign "$installer_identity" \
+            "$package"
+
+          package_accepted=false
+          for attempt in 1 2 3; do
+            notary_exit=0
+            notary_output="$(xcrun notarytool submit "$package" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait --verbose 2>&1)" || notary_exit=$?
+            printf '%s\n' "$notary_output"
+            if [ "$notary_exit" -eq 0 ] && grep -q 'status: Accepted' <<< "$notary_output"; then
+              package_accepted=true
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 30))
+            fi
+          done
+          if [ "$package_accepted" != true ]; then
+            echo "error: Apple did not accept the macOS installer package" >&2
+            exit 1
+          fi
+          xcrun stapler staple "$package"
+          xcrun stapler validate "$package"
+          pkgutil --check-signature "$package" | grep -F 'Developer ID Installer'
+          spctl --assess --type install --verbose=4 "$package"
 
       - name: Verify macOS architecture
         if: runner.os == 'macOS'
@@ -340,6 +412,14 @@ jobs:
           set -euo pipefail
           python3 -c "import hashlib, pathlib; path = pathlib.Path('${{ matrix.artifact }}'); print(f'{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}')" > "${{ matrix.artifact }}.sha256"
 
+      - name: Write macOS package checksum
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="${{ matrix.artifact }}.pkg"
+          python3 -c "import hashlib, pathlib; path = pathlib.Path('$package'); print(f'{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}')" > "$package.sha256"
+
       - name: Upload release asset
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -347,6 +427,8 @@ jobs:
           path: |
             ${{ matrix.artifact }}
             ${{ matrix.artifact }}.sha256
+            ${{ matrix.artifact }}.pkg
+            ${{ matrix.artifact }}.pkg.sha256
 
   control-manager-package:
     needs: prepare
@@ -423,6 +505,11 @@ jobs:
             (cd "$artifact" && shasum -a 256 -c "${artifact}.sha256")
             cat "$artifact/${artifact}.sha256" >> SHA256SUMS
           done
+          for package in herdr-macos-x86_64.pkg herdr-macos-aarch64.pkg; do
+            directory="${package%.pkg}"
+            (cd "$directory" && shasum -a 256 -c "${package}.sha256")
+            cat "$directory/${package}.sha256" >> SHA256SUMS
+          done
           sort -k2 -o SHA256SUMS SHA256SUMS
 
       - name: Verify Control Manager asset provenance
@@ -455,8 +542,12 @@ jobs:
             herdr-linux-aarch64/herdr-linux-aarch64.sha256 \
             herdr-macos-x86_64/herdr-macos-x86_64 \
             herdr-macos-x86_64/herdr-macos-x86_64.sha256 \
+            herdr-macos-x86_64/herdr-macos-x86_64.pkg \
+            herdr-macos-x86_64/herdr-macos-x86_64.pkg.sha256 \
             herdr-macos-aarch64/herdr-macos-aarch64 \
             herdr-macos-aarch64/herdr-macos-aarch64.sha256 \
+            herdr-macos-aarch64/herdr-macos-aarch64.pkg \
+            herdr-macos-aarch64/herdr-macos-aarch64.pkg.sha256 \
             SHA256SUMS \
             control-manager-release/control-manager-${{ needs.prepare.outputs.version }}.tar.gz \
             control-manager-release/control-manager-${{ needs.prepare.outputs.version }}.tar.gz.sha256 \
@@ -504,7 +595,7 @@ jobs:
             --pattern 'herdr-*.sha256' --dir checksums
 
       - id: formula
-        name: Render the cross-platform formula
+        name: Render the cross-platform formula and managed macOS cask
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
@@ -512,12 +603,14 @@ jobs:
           python3 herdr-source/scripts/render_downstream_homebrew_formula.py \
             --version "$VERSION" \
             --checksums-dir checksums \
-            --output homebrew-tap/herdr.rb
+            --formula-output homebrew-tap/herdr.rb \
+            --cask-output homebrew-tap/Casks/herdr.rb
           ruby -c homebrew-tap/herdr.rb
+          ruby -c homebrew-tap/Casks/herdr.rb
           git -C homebrew-tap diff --check
           git -C homebrew-tap config user.name "github-actions[bot]"
           git -C homebrew-tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C homebrew-tap add herdr.rb
+          git -C homebrew-tap add herdr.rb Casks/herdr.rb
           if git -C homebrew-tap diff --cached --quiet; then
             echo "Homebrew formula is already at v$VERSION."
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -539,7 +632,10 @@ jobs:
             f5-sales-demo/tap "file://$GITHUB_WORKSPACE/homebrew-tap"
           HOMEBREW_NO_AUTO_UPDATE=1 brew install f5-sales-demo/tap/herdr
           HOMEBREW_NO_AUTO_UPDATE=1 brew test f5-sales-demo/tap/herdr
-          test "$(herdr --version)" = "herdr $VERSION"
+          formula_binary="$(brew --prefix f5-sales-demo/tap/herdr)/bin/herdr"
+          test "$("$formula_binary" --version)" = "herdr $VERSION"
+          codesign --verify --strict "$formula_binary"
+          spctl --assess --type execute --verbose=4 "$formula_binary"
 
       - name: Publish the tap formula
         if: steps.formula.outputs.changed == 'true'
@@ -547,3 +643,63 @@ jobs:
           set -euo pipefail
           git -C homebrew-tap pull --rebase origin main
           git -C homebrew-tap push origin HEAD:main
+
+  verify-homebrew-install:
+    needs: [prepare, publish-homebrew]
+    if: needs.prepare.outputs.release == 'true'
+    runs-on: macos-14
+    permissions:
+      contents: read
+    steps:
+      - name: Verify the immutable installer package before installation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir release-package
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'herdr-macos-aarch64.pkg' \
+            --pattern 'herdr-macos-aarch64.pkg.sha256' \
+            --dir release-package
+          (
+            cd release-package
+            shasum -a 256 -c herdr-macos-aarch64.pkg.sha256
+            pkgutil --check-signature herdr-macos-aarch64.pkg | grep -F 'Developer ID Installer'
+            xcrun stapler validate herdr-macos-aarch64.pkg
+            spctl --assess --type install --verbose=4 herdr-macos-aarch64.pkg
+          )
+
+      - name: Install the published prebuilt formula
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          set -euo pipefail
+          brew uninstall --formula --force f5-sales-demo/tap/herdr 2>/dev/null || true
+          brew untap f5-sales-demo/tap 2>/dev/null || true
+          if brew command trust >/dev/null 2>&1; then
+            brew trust --formula f5-sales-demo/tap/herdr
+          fi
+          brew tap f5-sales-demo/tap
+          brew install f5-sales-demo/tap/herdr
+          binary="$(brew --prefix f5-sales-demo/tap/herdr)/bin/herdr"
+          test "$("$binary" --version)" = "herdr $VERSION"
+          codesign --verify --strict "$binary"
+          spctl --assess --type execute --verbose=4 "$binary"
+
+      - name: Install the published managed macOS cask
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          set -euo pipefail
+          brew uninstall --formula --force f5-sales-demo/tap/herdr 2>/dev/null || true
+          brew uninstall --cask --force f5-sales-demo/tap/herdr 2>/dev/null || true
+          brew install --cask f5-sales-demo/tap/herdr
+          pkgutil --pkg-info com.f5.herdr
+          binary=/usr/local/bin/herdr
+          test -x "$binary"
+          test "$("$binary" --version)" = "herdr $VERSION"
+          codesign --verify --strict "$binary"
+          spctl --assess --type execute --verbose=4 "$binary"

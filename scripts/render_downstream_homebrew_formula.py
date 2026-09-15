@@ -9,12 +9,17 @@ from pathlib import Path
 
 
 REPOSITORY = "f5-sales-demo/herdr"
-TARGETS = (
+BINARY_TARGETS = (
     "linux-x86_64",
     "linux-aarch64",
     "macos-x86_64",
     "macos-aarch64",
 )
+PACKAGE_TARGETS = (
+    "macos-x86_64.pkg",
+    "macos-aarch64.pkg",
+)
+TARGETS = BINARY_TARGETS + PACKAGE_TARGETS
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 VERSION = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 
@@ -94,15 +99,48 @@ def render_formula(version: str, checksums: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
+def render_cask(version: str, checksums: dict[str, str]) -> str:
+    """Render a managed-macOS installer cask from immutable package assets."""
+    if not VERSION.fullmatch(version):
+        raise ValueError(f"expected a stable SemVer version, got {version!r}")
+    if set(checksums) != set(TARGETS):
+        raise ValueError(f"expected checksums for {', '.join(TARGETS)}")
+    if any(not SHA256.fullmatch(value) for value in checksums.values()):
+        raise ValueError("every checksum must be a lowercase SHA-256 digest")
+
+    return "\n".join(
+        [
+            'cask "herdr" do',
+            f'  version "{version}"',
+            '  arch arm: "aarch64", intel: "x86_64"',
+            f'  sha256 arm: "{checksums["macos-aarch64.pkg"]}", intel: "{checksums["macos-x86_64.pkg"]}"',
+            "",
+            f'  url "https://github.com/{REPOSITORY}/releases/download/v#{{version}}/herdr-macos-#{{arch}}.pkg"',
+            '  name "Herdr"',
+            '  desc "Agent multiplexer for your terminal (f5-sales-demo fork)"',
+            f'  homepage "https://github.com/{REPOSITORY}"',
+            "",
+            '  pkg "herdr-macos-#{arch}.pkg"',
+            "",
+            '  uninstall pkgutil: "com.f5.herdr"',
+            "end",
+            "",
+        ]
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True)
     parser.add_argument("--checksums-dir", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--formula-output", type=Path, required=True)
+    parser.add_argument("--cask-output", type=Path, required=True)
     args = parser.parse_args()
 
-    formula = render_formula(args.version, load_checksums(args.checksums_dir))
-    args.output.write_text(formula, encoding="utf-8")
+    checksums = load_checksums(args.checksums_dir)
+    args.formula_output.write_text(render_formula(args.version, checksums), encoding="utf-8")
+    args.cask_output.parent.mkdir(parents=True, exist_ok=True)
+    args.cask_output.write_text(render_cask(args.version, checksums), encoding="utf-8")
     return 0
 
 
