@@ -3535,9 +3535,9 @@ mod tests {
         state.handle_app_event(AppEvent::StateChanged {
             pane_id,
             agent: Some(Agent::Pi),
-            state: AgentState::Working,
+            state: AgentState::Unknown,
             visible_blocker: false,
-            visible_working: true,
+            visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });

@@ -793,6 +793,12 @@ fn spawn_basic_detection_task(
             let pid = child_pid.load(Ordering::Acquire);
             let mut agent_changed = false;
             let mut agent = agent_presence.current_agent();
+            if agent.is_none() {
+                if let Some(releasing_agent) = suppressed_agent {
+                    agent_presence = AgentDetectionPresence::from_agent(Some(releasing_agent));
+                    agent = Some(releasing_agent);
+                }
+            }
             let lifecycle_authority_active =
                 full_lifecycle_authority_active.load(Ordering::Acquire);
             let foreground_pgid = (pid > 0)
@@ -2586,6 +2592,13 @@ impl PaneRuntime {
                     release_was_active = suppressed_agent.is_some();
                     let pid = child_pid.load(Ordering::Acquire);
                     let mut agent = agent_presence.current_agent();
+                    if agent.is_none() {
+                        if let Some(releasing_agent) = suppressed_agent {
+                            agent_presence =
+                                AgentDetectionPresence::from_agent(Some(releasing_agent));
+                            agent = Some(releasing_agent);
+                        }
+                    }
                     let lifecycle_authority_active =
                         full_lifecycle_authority_active_for_task.load(Ordering::Acquire);
                     let process_probe_input = ProcessProbeInput {

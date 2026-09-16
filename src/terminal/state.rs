@@ -1806,6 +1806,13 @@ impl TerminalState {
         let previous_state = self.state;
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_session = self.current_session_identity_for_persistence();
+        if process_owns_agent {
+            if let Some(authority) = self.hook_authority.as_ref() {
+                self.fallback_state = authority.state;
+                self.fallback_visible_blocker = authority.state == AgentState::Blocked;
+                self.fallback_observed_at = Some(now);
+            }
+        }
         self.suppress_full_lifecycle_hook_report(
             source,
             agent_label,
@@ -1819,6 +1826,7 @@ impl TerminalState {
             self.clear_agent_name();
         }
         self.hook_authority = None;
+        self.reporter_liveness = None;
         if !preserve_foreign_persisted_session {
             self.persisted_agent_session = None;
         }
