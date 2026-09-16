@@ -2921,7 +2921,10 @@ impl PaneRuntime {
                 until: std::time::Instant::now() + RELEASE_REACQUIRE_SUPPRESSION,
             });
         }
-        self.detect_reset_notify.notify_one();
+        // Do not reset detection here. The detector may be the only owner of
+        // the process-backed identity after the reporter releases authority;
+        // clearing it would leave no agent to attach the confirmed exit to.
+        // The normal identified-agent cadence observes the pending release.
     }
 
     pub fn terminate_child(&self) -> std::io::Result<()> {
@@ -5256,7 +5259,9 @@ mod tests {
     #[tokio::test]
     async fn graceful_release_relinquishes_lifecycle_authority_for_process_confirmation() {
         let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+        let reset_notify = runtime.agent_detection_reset_notify_for_test();
         runtime.set_full_lifecycle_authority_active(true);
+        reset_notify.notified().await;
 
         runtime.begin_graceful_release(Agent::Pi);
 
@@ -5267,6 +5272,12 @@ mod tests {
             active_pending_release(&runtime.pending_release, std::time::Instant::now()),
             Some(Agent::Pi)
         );
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            reset_notify.notified(),
+        )
+        .await
+        .is_err());
     }
 
     #[cfg(unix)]
