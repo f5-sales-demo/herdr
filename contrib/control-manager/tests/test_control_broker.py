@@ -1741,7 +1741,12 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         event_path.chmod(0o600)
 
         await self.broker._drain_command_events()
-        await asyncio.sleep(0.08)
+
+        deadline = asyncio.get_running_loop().time() + 1
+        while self.broker.db.task(task["id"])["session_state"] != "closed":
+            if asyncio.get_running_loop().time() >= deadline:
+                self.fail("spooled command exit cleanup did not settle within one second")
+            await asyncio.sleep(0.01)
 
         row = self.broker.db.task(task["id"])
         self.assertEqual(row["state"], "failed")
