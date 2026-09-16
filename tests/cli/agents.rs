@@ -430,6 +430,8 @@ fn agent_start_command_works() {
     assert_eq!(stale_idle.status.code(), Some(1));
     let stale_idle: serde_json::Value = serde_json::from_slice(&stale_idle.stderr).unwrap();
     assert_eq!(stale_idle["error"]["code"], "timeout");
+    assert!(report_agent("working"));
+    assert!(report_agent("idle"));
 
     let stalled = prompt_wait("do not transition", "6000");
     assert_eq!(stalled.status.code(), Some(1));
@@ -438,6 +440,8 @@ fn agent_start_command_works() {
     assert!(stalled["error"]["message"]
         .as_str()
         .is_some_and(|message| message.contains("no observed working or blocked state")));
+    assert!(report_agent("working"));
+    assert!(report_agent("idle"));
 
     for prompt in ["done churn", "session churn"] {
         assert!(report_agent("idle"));
@@ -456,6 +460,8 @@ fn agent_start_command_works() {
         );
         let settled_only: serde_json::Value = serde_json::from_slice(&settled_only.stderr).unwrap();
         assert_eq!(settled_only["error"]["code"], "timeout");
+        assert!(report_agent("working"));
+        assert!(report_agent("idle"));
     }
 
     let blocked_after_submit = prompt_wait("block after submit", "2000");
