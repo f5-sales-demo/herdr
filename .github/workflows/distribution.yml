@@ -69,7 +69,8 @@ jobs:
         run: |
           python3 scripts/agent_detection_manifest_check.py --require-published
           python3 scripts/config_reference_check.py
-          python3 scripts/docs_translation_parity.py --docs-root docs/next/website/src/content/docs
+          # Fork documentation is authored in English. Translation synchronization
+          # is handled by the separate localization process.
           node scripts/docs/versions.mjs check
           node scripts/docs/preview.mjs check
 

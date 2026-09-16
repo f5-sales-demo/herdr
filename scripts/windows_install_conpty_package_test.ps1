@@ -119,9 +119,9 @@ $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopba
 $listener.Start()
 $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
 $listener.Stop()
-$previewManifest = @{
-    channel = "preview"
-    base_version = "0.0.0"
+$candidateManifest = @{
+    channel = "stable"
+    version = "0.0.0"
     build_id = "installer-test"
     assets = @{
         "windows-x86_64" = @{
@@ -144,14 +144,10 @@ $stableManifest = @{
         "windows-x86_64" = $hash
     }
 } | ConvertTo-Json -Depth 5
-$previewManifestPath = Join-Path $webRoot "preview.json"
+$candidateManifestPath = Join-Path $webRoot "candidate.json"
 $stableManifestPath = Join-Path $webRoot "latest.json"
-$customPreviewManifestPath = Join-Path $webRoot "candidate.json"
-$customPreviewManifest = $previewManifest | ConvertFrom-Json
-$customPreviewManifest.PSObject.Properties.Remove("channel")
-$previewManifest | Out-File -LiteralPath $previewManifestPath -Encoding utf8
+$candidateManifest | Out-File -LiteralPath $candidateManifestPath -Encoding utf8
 $legacyStableManifest | Out-File -LiteralPath $stableManifestPath -Encoding utf8
-$customPreviewManifest | ConvertTo-Json -Depth 5 | Out-File -LiteralPath $customPreviewManifestPath -Encoding utf8
 
 $server = $null
 $oldHerdrHome = $env:HERDR_HOME
@@ -177,7 +173,7 @@ $realUserEnvironmentKey.Dispose()
 try {
     $server = Start-Process python -ArgumentList @("-m", "http.server", "$port", "--bind", "127.0.0.1", "--directory", $webRoot) -PassThru -WindowStyle Hidden
     $env:HERDR_HOME = Join-Path $root "unused\..\home"
-    $previewManifestUrl = "http://127.0.0.1:$port/preview.json"
+    $candidateManifestUrl = "http://127.0.0.1:$port/candidate.json"
     $stableManifestUrl = "http://127.0.0.1:$port/latest.json"
     for ($attempt = 0; $attempt -lt 20; $attempt++) {
         try {
@@ -209,16 +205,26 @@ try {
         throw "fresh installer did not default to the stable Windows package"
     }
 
-    $legacyStableManifest | Out-File -LiteralPath $stableManifestPath -Encoding utf8
     $env:HERDR_HOME = Join-Path $root "unused\..\home"
     $env:Path = $oldProcessPath
     & $installerPath `
-        -ManifestUrl $stableManifestUrl `
+        -Channel stable `
+        -ManifestUrl $candidateManifestUrl `
         -InstallDir $installDir `
         -ExpectedBuildId "installer-test"
 
-    # Keep the existing positional web-installer contract, including Retain in slot five.
-    & $installerPath "preview" $previewManifestUrl $installDir "installer-test" 3
+    $previewRejected = $false
+    try {
+        & $installerPath -Channel preview -ManifestUrl $candidateManifestUrl -InstallDir $installDir
+    } catch {
+        if ($_.Exception.Message -notlike "Invalid Herdr channel 'preview'. This maintained fork currently supports only stable.*") {
+            throw
+        }
+        $previewRejected = $true
+    }
+    if (-not $previewRejected) {
+        throw "installer accepted the disabled preview channel"
+    }
 
     $localInstallDir = Join-Path $root "local-bin"
     $env:HERDR_HOME = Join-Path $root "local-home"
@@ -240,11 +246,11 @@ try {
     $badLocalChecksumRejected = $false
     try {
         & $installerPath `
-            -ManifestUrl "$previewManifestUrl/unused" `
+            -ManifestUrl "$candidateManifestUrl/unused" `
             -InstallDir $localInstallDir `
             -LocalPackagePath $archive `
             -LocalPackageFormat "zip" `
-            -LocalPackageIdentity "0.0.0-preview.local-package" `
+            -LocalPackageIdentity "0.0.0-local-package" `
             -LocalPackageSha256 ("0" * 64)
     } catch {
         if ($_.Exception.Message -notlike "Downloaded Herdr checksum did not match.*") {
@@ -257,11 +263,11 @@ try {
     }
 
     & $installerPath `
-        -ManifestUrl "$previewManifestUrl/unused" `
+        -ManifestUrl "$candidateManifestUrl/unused" `
         -InstallDir $localInstallDir `
         -LocalPackagePath $archive `
         -LocalPackageFormat "zip" `
-        -LocalPackageIdentity "0.0.0-preview.local-package" `
+        -LocalPackageIdentity "0.0.0-local-package" `
         -LocalPackageSha256 $hash
     if (-not (Test-Path -LiteralPath (Join-Path $localInstallDir "herdr.exe") -PathType Leaf)) {
         throw "installer did not activate the verified local package"
@@ -304,12 +310,20 @@ try {
     }
     $oldConfigPath = $env:HERDR_CONFIG_PATH
     try {
-        $env:HERDR_CONFIG_PATH = Join-Path $root "preview-config.toml"
+        $env:HERDR_CONFIG_PATH = Join-Path $root "disabled-preview-config.toml"
         "[update]`nchannel = `"preview`"" | Out-File -LiteralPath $env:HERDR_CONFIG_PATH -Encoding ascii
-        & $installerPath `
-            -ManifestUrl "http://127.0.0.1:$port/candidate.json" `
-            -InstallDir $installDir `
-            -ExpectedBuildId "installer-test"
+        $configPreviewRejected = $false
+        try {
+            & $installerPath -ManifestUrl $candidateManifestUrl -InstallDir $installDir
+        } catch {
+            if ($_.Exception.Message -notlike "Preview installation is unavailable until the maintained fork has a fork-owned preview channel.*") {
+                throw
+            }
+            $configPreviewRejected = $true
+        }
+        if (-not $configPreviewRejected) {
+            throw "installer accepted a preview channel discovered from existing configuration"
+        }
     } finally {
         if ($null -eq $oldConfigPath) {
             Remove-Item Env:HERDR_CONFIG_PATH -ErrorAction SilentlyContinue
@@ -317,22 +331,16 @@ try {
             $env:HERDR_CONFIG_PATH = $oldConfigPath
         }
     }
-    if ($null -eq (Get-ChildItem -LiteralPath $releasesDir -Directory |
-        Where-Object { $_.Name.StartsWith("0.0.0-preview.installer-test-") } |
-        Select-Object -First 1)) {
-        throw "installer did not discover the preview channel through the current junction"
-    }
-
     Remove-Item -LiteralPath (Join-Path $releaseDir.FullName "conpty\conpty.dll") -Force
 
-    $badManifest = $previewManifest | ConvertFrom-Json
+    $badManifest = $candidateManifest | ConvertFrom-Json
     $badManifest.assets."windows-x86_64".url = "http://127.0.0.1:$port/missing.zip"
-    $badManifest | ConvertTo-Json -Depth 5 | Out-File -LiteralPath $previewManifestPath -Encoding utf8
+    $badManifest | ConvertTo-Json -Depth 5 | Out-File -LiteralPath $candidateManifestPath -Encoding utf8
     $downloadFailed = $false
     try {
         & "$PSScriptRoot\..\distribution\install.ps1" `
-            -Channel preview `
-            -ManifestUrl $previewManifestUrl `
+            -Channel stable `
+            -ManifestUrl $candidateManifestUrl `
             -InstallDir $installDir `
             -ExpectedBuildId "installer-test"
     } catch {
@@ -348,7 +356,7 @@ try {
         throw "failed repair removed the existing release"
     }
 
-    $previewManifest | Out-File -LiteralPath $previewManifestPath -Encoding utf8
+    $candidateManifest | Out-File -LiteralPath $candidateManifestPath -Encoding utf8
     $stagedConpty = Join-Path $releasesDir ".staging.$($releaseDir.Name).$PID\conpty\conpty.dll"
 
     $transientLockState = @{ Handle = $null; Acquired = $false; Released = $false }
@@ -384,8 +392,8 @@ try {
     $transientLockBreakpoint = Set-PSBreakpoint -Script $installerPath -Variable "backupDir" -Mode Write -Action $lockStagedFileTransiently
     try {
         & $installerPath `
-            -Channel preview `
-            -ManifestUrl $previewManifestUrl `
+            -Channel stable `
+            -ManifestUrl $candidateManifestUrl `
             -InstallDir $installDir `
             -ExpectedBuildId "installer-test"
         if (-not $transientLockState.Acquired) {
@@ -425,8 +433,8 @@ try {
         $swapFailed = $false
         try {
             & $installerPath `
-                -Channel preview `
-                -ManifestUrl $previewManifestUrl `
+                -Channel stable `
+                -ManifestUrl $candidateManifestUrl `
                 -InstallDir $installDir `
                 -ExpectedBuildId "installer-test"
         } catch {
@@ -457,8 +465,8 @@ try {
     }
 
     & "$PSScriptRoot\..\distribution\install.ps1" `
-        -Channel preview `
-        -ManifestUrl $previewManifestUrl `
+        -Channel stable `
+        -ManifestUrl $candidateManifestUrl `
         -InstallDir $installDir `
         -ExpectedBuildId "installer-test"
     if (-not (Test-Path -LiteralPath (Join-Path $installDir "conpty\conpty.dll") -PathType Leaf)) {
@@ -470,8 +478,8 @@ try {
     Move-Item -LiteralPath $x64HostDir -Destination $junctionTarget
     New-Item -ItemType Junction -Path $x64HostDir -Target $junctionTarget | Out-Null
     & "$PSScriptRoot\..\distribution\install.ps1" `
-        -Channel preview `
-        -ManifestUrl $previewManifestUrl `
+        -Channel stable `
+        -ManifestUrl $candidateManifestUrl `
         -InstallDir $installDir `
         -ExpectedBuildId "installer-test"
     $repairedHostDir = Get-Item -LiteralPath (Join-Path $installDir "conpty\x64") -Force
@@ -482,12 +490,12 @@ try {
     $rejected = $false
     try {
         & "$PSScriptRoot\..\distribution\install.ps1" `
-            -Channel preview `
-            -ManifestUrl $previewManifestUrl `
+            -Channel stable `
+            -ManifestUrl $candidateManifestUrl `
             -InstallDir $installDir `
             -ExpectedBuildId "different-build"
     } catch {
-        if ($_.Exception.Message -notlike "Preview manifest changed while updating.*") {
+        if ($_.Exception.Message -notlike "Release manifest changed while updating.*") {
             throw
         }
         $rejected = $true
@@ -525,7 +533,7 @@ try {
         throw "installer did not install the stable Windows package"
     }
     if (Test-Path -LiteralPath $releaseDir.FullName) {
-        throw "installer did not prune the old concrete preview release"
+        throw "installer did not prune the old concrete candidate release"
     }
     $expectedPath = "$($stableReleaseDir.FullName);$unrelatedPathOne;$nestedReleasePath;$similarReleasePath;$unrelatedPathTwo"
     $realUserEnvironmentKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment")

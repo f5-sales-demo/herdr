@@ -797,7 +797,7 @@ if ($useLocalPackage) {
     }
     $asset = Get-ManifestAsset -Manifest $manifest -Target $target
     if (-not [string]::IsNullOrWhiteSpace($ExpectedBuildId) -and [string]$manifest.build_id -ne $ExpectedBuildId) {
-        throw "Preview manifest changed while updating. Expected build $ExpectedBuildId but found $($manifest.build_id). Run herdr update again."
+        throw "Release manifest changed while updating. Expected build $ExpectedBuildId but found $($manifest.build_id). Run herdr update again."
     }
     $versionIdentity = Resolve-HerdrVersion -Manifest $manifest -SelectedChannel $Channel
 }

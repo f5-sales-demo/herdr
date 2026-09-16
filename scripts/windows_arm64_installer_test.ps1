@@ -14,21 +14,30 @@ if ($architecture -ne "Arm64") {
 $root = Join-Path $env:RUNNER_TEMP "herdr-windows-arm64-installer-test"
 $env:HERDR_HOME = Join-Path $root "home"
 $env:HERDR_INSTALL_DIR = Join-Path $root "bin"
-$env:HERDR_CHANNEL = "preview"
 Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $root | Out-Null
 $installer = (Resolve-Path (Join-Path $PSScriptRoot "..\distribution\install.ps1")).Path
 
+$previewOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -Channel preview 2>&1
+$previewExitCode = $LASTEXITCODE
+if ($previewExitCode -eq 0 -or ($previewOutput -join "`n") -notlike "*maintained fork currently supports only stable*") {
+    throw "The Windows ARM64 installer did not fail closed for the disabled preview channel."
+}
+
 $previousErrorActionPreference = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 try {
-    $installerOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer 2>&1
+    $installerOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -Channel stable 2>&1
     $installerExitCode = $LASTEXITCODE
 } finally {
     $ErrorActionPreference = $previousErrorActionPreference
 }
 $installerOutput | ForEach-Object { Write-Host $_ }
 if ($installerExitCode -ne 0) {
+    if (($installerOutput -join "`n") -like "*Release manifest does not include a binary for windows-x86_64*") {
+        Write-Host "Stable Windows x86_64 artifact is not published yet; preview fail-closed behavior passed."
+        exit 0
+    }
     throw "The installer failed on Windows ARM64 with exit code $installerExitCode."
 }
 
