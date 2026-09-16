@@ -37,4 +37,6 @@ jobs:
 
       - name: Test stable x86_64 fallback installation
         shell: powershell
+        env:
+          HERDR_MANIFEST_URL: https://raw.githubusercontent.com/f5-sales-demo/herdr/${{ github.event.pull_request.head.sha || github.sha }}/distribution/latest.json
         run: .\scripts\windows_arm64_installer_test.ps1

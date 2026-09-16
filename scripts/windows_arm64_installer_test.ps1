@@ -42,7 +42,8 @@ try {
 }
 $installerOutput | ForEach-Object { Write-Host $_ }
 if ($installerExitCode -ne 0) {
-    if (($installerOutput -join "`n") -like "*Release manifest does not include a binary for windows-x86_64*") {
+    $installerText = $installerOutput | Out-String
+    if ($installerText -match "Release manifest does not include a binary for windows-x86_64") {
         Write-Host "Stable Windows x86_64 artifact is not published yet; preview fail-closed behavior passed."
         exit 0
     }
