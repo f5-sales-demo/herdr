@@ -26,7 +26,8 @@ concurrency:
 jobs:
   control-manager-package:
     name: Control Manager package
-    runs-on: ubuntu-latest
+    # Fork-origin pull requests stay on GitHub-hosted runners; trusted work uses ARC.
+    runs-on: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || 'managed-socketless' }}"
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -53,7 +54,8 @@ jobs:
 
   conventional-commits:
     if: github.event_name != 'push' || github.ref_name == 'build-xcsh'
-    runs-on: ubuntu-latest
+    # This checks repository code, so untrusted pull requests cannot enter ARC.
+    runs-on: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || 'managed-socketless' }}"
     timeout-minutes: 5
     steps:
       - name: Checkout
