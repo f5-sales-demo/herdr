@@ -27,8 +27,9 @@ try {
     $ErrorActionPreference = $previousErrorActionPreference
 }
 $previewText = $previewOutput | Out-String
+$previewExitCode | ForEach-Object { Write-Host "Preview exit code: $_" }
 $previewOutput | ForEach-Object { Write-Host $_ }
-if ($previewExitCode -eq 0 -or $previewText -notmatch "maintained fork\s+currently supports\s+only stable") {
+if ($previewExitCode -eq 0 -or $previewText -notmatch "Invalid Herdr channel 'preview'") {
     throw "The Windows ARM64 installer did not fail closed for the disabled preview channel."
 }
 
