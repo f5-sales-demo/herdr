@@ -661,7 +661,15 @@ impl HeadlessServer {
             }
 
             match event {
-                LoopEvent::Timer => {}
+                LoopEvent::Timer => {
+                    // Native cancel deadlines are server-owned lifecycle facts;
+                    // reconcile them even when no producer polls the action API.
+                    let _ = self
+                        .app
+                        .runtime_state
+                        .executions
+                        .reconcile_native_action_deadlines();
+                }
                 LoopEvent::Internal(ev) => {
                     if self.handle_internal_event_with_forwarding(ev) {
                         needs_render = true;
