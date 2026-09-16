@@ -36,6 +36,7 @@ impl AgentTurnManager {
         Self::load_at_with_restart_policy(path, true)
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn load_at_for_handoff(path: PathBuf) -> Self {
         Self::load_at_with_restart_policy(path, false)
     }

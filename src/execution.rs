@@ -71,6 +71,7 @@ impl ExecutionManager {
         Self::load_at_with_restart_policy(path, true)
     }
 
+    #[cfg(any(unix, test))]
     fn load_at_for_handoff(path: PathBuf) -> Self {
         Self::load_at_with_restart_policy(path, false)
     }
@@ -414,6 +415,7 @@ impl ExecutionManager {
         self.get(id).ok_or_else(|| "execution_not_found".into())
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn rebind_handoff_panes(
         &self,
         panes: impl IntoIterator<Item = (u32, String)>,
