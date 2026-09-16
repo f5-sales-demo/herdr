@@ -71,7 +71,9 @@ jobs:
           python3 scripts/config_reference_check.py
           # Fork documentation is authored in English. Translation synchronization
           # is handled by the separate localization process.
-          node scripts/docs/versions.mjs check
+          # The fork's tagged release job publishes the new English snapshot and
+          # advances the stable manifest atomically after the release is immutable.
+          node scripts/docs/versions.mjs check --allow-latest-mismatch
           node scripts/docs/preview.mjs check
 
       - name: Test contract tooling

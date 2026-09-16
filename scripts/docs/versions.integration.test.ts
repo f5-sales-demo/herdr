@@ -42,7 +42,7 @@ describe('documentation release publishing', () => {
     runScript(root, ['publish', 'v1.0.0']);
 
     expect(await read(root, 'README.md')).toBe('next readme\n');
-    expect(await read(root, 'README.zh-CN.md')).toBe('next readme zh-cn\n');
+    expect(await read(root, 'README.zh-CN.md')).toBe('stable readme zh-cn\n');
     expect(await read(root, 'docs/versions/1.0.0/website/src/content/docs/index.mdx')).toBe(
       nextDocs,
     );
@@ -59,6 +59,11 @@ describe('documentation release publishing', () => {
 
     await write(root, 'distribution/latest.json', '{"version":"1.0.0"}\n');
     runScript(root, ['check']);
+
+    await write(root, 'distribution/latest.json', '{"version":"1.0.1"}\n');
+    expect(() => runScript(root, ['check'])).toThrow();
+    runScript(root, ['check', '--allow-latest-mismatch']);
+    await write(root, 'distribution/latest.json', '{"version":"1.0.0"}\n');
 
     const correctedDocs = '---\ntitle: Documentation\n---\n\ncorrected docs\n';
     await write(root, 'docs/versions/1.0.0/website/src/content/docs/index.mdx', correctedDocs);

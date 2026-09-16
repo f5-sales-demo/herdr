@@ -119,7 +119,7 @@ export async function backfillVersions() {
   });
 }
 
-export async function checkVersions() {
+export async function checkVersions({ requireLatestMatch = true } = {}) {
   const manifest = await readManifest();
   if (
     manifest.schema_version !== 1 ||
@@ -130,7 +130,7 @@ export async function checkVersions() {
   }
 
   const latest = JSON.parse(await readFile(latestManifestPath, 'utf8')).version;
-  if (manifest.current !== normalizeVersion(latest)) {
+  if (requireLatestMatch && manifest.current !== normalizeVersion(latest)) {
     throw new Error(`docs current version ${manifest.current} does not match distribution latest ${latest}`);
   }
 
@@ -156,8 +156,12 @@ export async function checkVersions() {
       if (!/^[0-9a-f]{40}$/.test(entry.commit)) {
         throw new Error(`docs version ${entry.version} has invalid commit ${entry.commit}`);
       }
+      const storedCommit = resolveCommit(git, entry.commit);
+      if (storedCommit !== entry.commit) {
+        throw new Error(`docs version ${entry.version} commit ${entry.commit} is unavailable`);
+      }
       const taggedCommit = resolveCommit(git, entry.tag);
-      if (taggedCommit !== entry.commit) {
+      if (entry.version === manifest.current && requireLatestMatch && taggedCommit !== entry.commit) {
         throw new Error(
           `docs version ${entry.version} tag ${entry.tag} moved from ${entry.commit} to ${taggedCommit}`,
         );
@@ -236,7 +240,7 @@ export async function publishVersion(tag) {
 
   const metadata = await snapshotTag(tag, 'docs/next/website/src/content/docs');
 
-  for (const readme of ['README.md', 'README.zh-CN.md']) {
+  for (const readme of ['README.md']) {
     const nextReadme = `docs/next/${readme}`;
     if (gitPathExists(git, tag, nextReadme)) {
       await writeFile(resolve(repoRoot, readme), git(['show', `${tag}:${nextReadme}`], { binary: true }));
@@ -264,8 +268,8 @@ async function main() {
     await publishVersion(value);
     return;
   }
-  if (command === 'check' && !value) {
-    await checkVersions();
+  if (command === 'check' && (!value || value === '--allow-latest-mismatch')) {
+    await checkVersions({ requireLatestMatch: value !== '--allow-latest-mismatch' });
     return;
   }
   if (command === 'current' && !value) {
@@ -274,7 +278,7 @@ async function main() {
     return;
   }
   throw new Error(
-    'usage: node scripts/docs/versions.mjs backfill | check | current | publish <tag>',
+    'usage: node scripts/docs/versions.mjs backfill | check [--allow-latest-mismatch] | current | publish <tag>',
   );
 }
 

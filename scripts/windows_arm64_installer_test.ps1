@@ -18,13 +18,18 @@ Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $root | Out-Null
 $installer = (Resolve-Path (Join-Path $PSScriptRoot "..\distribution\install.ps1")).Path
 
-$previewOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -Channel preview 2>&1
-$previewExitCode = $LASTEXITCODE
+$previousErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    $previewOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -Channel preview 2>&1
+    $previewExitCode = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+}
 if ($previewExitCode -eq 0 -or ($previewOutput -join "`n") -notlike "*maintained fork currently supports only stable*") {
     throw "The Windows ARM64 installer did not fail closed for the disabled preview channel."
 }
 
-$previousErrorActionPreference = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 try {
     $installerOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -Channel stable 2>&1
