@@ -307,11 +307,19 @@ impl App {
 
         let released_agent = if let AppEvent::HookAgentReleased {
             pane_id,
+            source,
+            agent_label,
             known_agent,
             ..
         } = &ev
         {
-            known_agent.map(|agent| (*pane_id, agent))
+            known_agent.map(|agent| {
+                (
+                    *pane_id,
+                    agent,
+                    crate::agent_resume::is_official_agent_source(source, agent_label),
+                )
+            })
         } else {
             None
         };
@@ -353,9 +361,16 @@ impl App {
         if let Some(agents) = manifest_update_agents {
             self.reset_agent_detection_for_agents(&agents);
         }
-        if let Some((pane_id, agent)) = released_agent {
-            if pane_updates.iter().any(|update| update.pane_id == pane_id) {
-                if let Some((ws_idx, _)) = self.find_pane(pane_id) {
+        if let Some((pane_id, agent, official_source)) = released_agent {
+            if let Some((ws_idx, _)) = self.find_pane(pane_id) {
+                let official_release_matches = official_source
+                    && self.state.workspaces[ws_idx]
+                        .pane_state(pane_id)
+                        .and_then(|pane| self.state.terminals.get(&pane.attached_terminal_id))
+                        .is_some_and(|terminal| terminal.effective_known_agent() == Some(agent));
+                if pane_updates.iter().any(|update| update.pane_id == pane_id)
+                    || official_release_matches
+                {
                     if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
                         &self.terminal_runtimes,
                         ws_idx,
