@@ -531,7 +531,12 @@ jobs:
         run: |
           $path = Resolve-Path artifacts\herdr-windows-x86_64.zip
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
-          "$hash  herdr-windows-x86_64.zip" | Out-File -LiteralPath artifacts\herdr-windows-x86_64.zip.sha256 -Encoding ascii
+          $checksumPath = Join-Path $PWD "artifacts\herdr-windows-x86_64.zip.sha256"
+          [System.IO.File]::WriteAllText(
+            $checksumPath,
+            "$hash  herdr-windows-x86_64.zip`n",
+            [System.Text.Encoding]::ASCII
+          )
 
       - name: Upload Windows release asset
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

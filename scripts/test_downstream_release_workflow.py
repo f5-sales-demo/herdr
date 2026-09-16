@@ -100,6 +100,19 @@ class DownstreamReleaseWorkflowTests(unittest.TestCase):
             self.workflow,
         )
 
+    def test_windows_checksum_uses_a_portable_lf_terminator(self) -> None:
+        checksum_step = re.search(
+            r"(?ms)^      - name: Write Windows package checksum\n"
+            r"(?P<step>.+?)^      - name:",
+            self.workflow,
+        )
+        self.assertIsNotNone(checksum_step)
+        step = checksum_step.group("step")
+        self.assertIn("[System.IO.File]::WriteAllText(", step)
+        self.assertIn('"$hash  herdr-windows-x86_64.zip`n"', step)
+        self.assertIn("[System.Text.Encoding]::ASCII", step)
+        self.assertNotIn("Out-File", step)
+
     def test_release_builds_with_zig_0_16_0(self) -> None:
         self.assertNotIn("0.15.2", self.workflow)
         self.assertIn("version: 0.16.0", self.workflow)
