@@ -1806,10 +1806,31 @@ impl App {
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
             return invalid_agent(id);
         };
+        let known_agent = crate::detect::parse_agent_label(&agent_label);
+        if let Some(agent) = known_agent {
+            if crate::agent_resume::is_official_agent_source(&params.source, &agent_label) {
+                if let Some((ws_idx, pane)) = self.find_pane(pane_id) {
+                    let release_matches = self
+                        .state
+                        .terminals
+                        .get(&pane.attached_terminal_id)
+                        .is_some_and(|terminal| terminal.effective_known_agent() == Some(agent));
+                    if release_matches {
+                        if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
+                            &self.terminal_runtimes,
+                            ws_idx,
+                            pane_id,
+                        ) {
+                            runtime.begin_graceful_release(agent);
+                        }
+                    }
+                }
+            }
+        }
         self.handle_internal_event(crate::events::AppEvent::HookAgentReleased {
             pane_id,
             source: params.source,
-            known_agent: crate::detect::parse_agent_label(&agent_label),
+            known_agent,
             agent_label,
             seq: params.seq,
         });
