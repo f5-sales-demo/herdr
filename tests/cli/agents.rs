@@ -223,7 +223,7 @@ fn agent_start_command_works() {
     fs::write(
         &fake_pi,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{0}'\nexport HERDR_AGENT=pi\n'{1}' pane report-agent \"$HERDR_PANE_ID\" --source herdr:pi --agent pi --state idle >/dev/null\nwhile IFS= read -r prompt; do\n  case \"$prompt\" in\n    \"do not transition\") continue ;;\n    \"done churn\")\n      '{1}' pane report-agent \"$HERDR_PANE_ID\" --source herdr:pi --agent pi --state done >/dev/null\n      '{1}' pane report-agent \"$HERDR_PANE_ID\" --source herdr:pi --agent pi --state idle >/dev/null\n      continue\n      ;;\n    \"session churn\")\n      '{1}' pane report-agent-session \"$HERDR_PANE_ID\" --source herdr:pi --agent pi --agent-session-id replacement >/dev/null\n      continue\n      ;;\n    \"block after submit\")\n      '{1}' pane report-agent \"$HERDR_PANE_ID\" --source herdr:pi --agent pi --state blocked >/dev/null\n      continue\n      ;;\n  esac\n  '{1}' pane report-agent \"$HERDR_PANE_ID\" --source herdr:pi --agent pi --state working >/dev/null\n  '{1}' pane report-agent \"$HERDR_PANE_ID\" --source herdr:pi --agent pi --state idle >/dev/null\n  printf '%s\\n' \"$prompt\" >> '{2}'\ndone\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{0}'\nexport HERDR_AGENT=pi\n'{1}' pane report-agent \"$HERDR_PANE_ID\" --source custom:fake-pi --agent pi --state idle >/dev/null\nwhile IFS= read -r prompt; do\n  case \"$prompt\" in\n    \"do not transition\") continue ;;\n    \"done churn\")\n      '{1}' pane report-agent \"$HERDR_PANE_ID\" --source custom:fake-pi --agent pi --state done >/dev/null\n      '{1}' pane report-agent \"$HERDR_PANE_ID\" --source custom:fake-pi --agent pi --state idle >/dev/null\n      continue\n      ;;\n    \"session churn\")\n      '{1}' pane report-agent-session \"$HERDR_PANE_ID\" --source custom:fake-pi --agent pi --agent-session-id replacement >/dev/null\n      continue\n      ;;\n    \"block after submit\")\n      '{1}' pane report-agent \"$HERDR_PANE_ID\" --source custom:fake-pi --agent pi --state blocked >/dev/null\n      continue\n      ;;\n  esac\n  '{1}' pane report-agent \"$HERDR_PANE_ID\" --source custom:fake-pi --agent pi --state working >/dev/null\n  '{1}' pane report-agent \"$HERDR_PANE_ID\" --source custom:fake-pi --agent pi --state idle >/dev/null\n  printf '%s\\n' \"$prompt\" >> '{2}'\ndone\n",
             captured_args.display(),
             env!("CARGO_BIN_EXE_herdr"),
             captured_prompts.display(),
@@ -400,7 +400,7 @@ fn agent_start_command_works() {
                 "report-agent",
                 &pane_id,
                 "--source",
-                "herdr:pi",
+                "custom:fake-pi",
                 "--agent",
                 "pi",
                 "--state",
@@ -440,8 +440,20 @@ fn agent_start_command_works() {
         .is_some_and(|message| message.contains("no observed working or blocked state")));
 
     for prompt in ["done churn", "session churn"] {
+        assert!(report_agent("idle"));
+        assert_eq!(
+            run_cli_json(&socket_path, &["agent", "get", "main"])["result"]["agent"]
+                ["agent_status"],
+            "idle"
+        );
         let settled_only = prompt_wait(prompt, "500");
-        assert_eq!(settled_only.status.code(), Some(1));
+        assert_eq!(
+            settled_only.status.code(),
+            Some(1),
+            "{prompt}: stdout={} stderr={}",
+            String::from_utf8_lossy(&settled_only.stdout),
+            String::from_utf8_lossy(&settled_only.stderr)
+        );
         let settled_only: serde_json::Value = serde_json::from_slice(&settled_only.stderr).unwrap();
         assert_eq!(settled_only["error"]["code"], "timeout");
     }

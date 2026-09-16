@@ -491,7 +491,9 @@ fn wait_for_resolved_agent(
                 matched.agent_status = status;
                 return Ok(Some(AgentWaitOutcome::Matched(Box::new(matched))));
             }
-            if agent_wait_matches(&current, &wait.until, wait.after_state_change_seq) {
+            if !wait.accept_transient_status
+                && agent_wait_matches(&current, &wait.until, wait.after_state_change_seq)
+            {
                 return Ok(Some(AgentWaitOutcome::Matched(Box::new(current))));
             }
         }
@@ -515,7 +517,9 @@ fn wait_for_resolved_agent(
                     .map(AgentWaitOutcome::Response)
                     .map(Some);
             }
-            if agent_wait_matches(&current, &wait.until, wait.after_state_change_seq) {
+            if !wait.accept_transient_status
+                && agent_wait_matches(&current, &wait.until, wait.after_state_change_seq)
+            {
                 return Ok(Some(AgentWaitOutcome::Matched(Box::new(current))));
             }
             return agent_wait_timeout(request_id, wait.timeout_kind, &current)
