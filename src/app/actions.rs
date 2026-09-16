@@ -3569,7 +3569,7 @@ mod tests {
             source: "herdr:pi".into(),
             agent_label: "pi".into(),
             known_agent: Some(Agent::Pi),
-            seq: Some(2),
+            seq: None,
         });
 
         assert!(updates.is_empty());

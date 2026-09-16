@@ -1785,7 +1785,10 @@ impl TerminalState {
         if !matches_current_agent && !matches_persisted_session {
             return None;
         }
-        if !self.accept_hook_report(source, seq) {
+        // Release is a terminal control frame. Older reporters do not attach a
+        // sequence to it, so accept an unsequenced release from the current
+        // owner rather than letting an earlier state frame strand authority.
+        if seq.is_some_and(|seq| !self.accept_hook_report(source, Some(seq))) {
             return None;
         }
         let preserve_foreign_persisted_session = self
