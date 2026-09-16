@@ -229,7 +229,7 @@ struct ManifestReleaseMetadata {
     announcement: Option<serde_json::Value>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Deserialize)]
 struct PreviewManifest {
     channel: String,
@@ -245,7 +245,7 @@ struct PreviewManifest {
     builds: BTreeMap<String, PreviewBuildMetadata>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Deserialize)]
 struct PreviewBuildMetadata {
     base_version: String,
@@ -256,13 +256,13 @@ struct PreviewBuildMetadata {
     assets: BTreeMap<String, AssetRef>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Deserialize)]
 struct HomebrewFormula {
     versions: HomebrewFormulaVersions,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Deserialize)]
 struct HomebrewFormulaVersions {
     stable: String,
@@ -438,7 +438,7 @@ fn stable_channel_should_install(
     installed_is_preview || latest > current
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn preview_display_version(base_version: &str, build_id: &str) -> String {
     format!(
         "{}-preview.{}",
@@ -447,7 +447,7 @@ fn preview_display_version(base_version: &str, build_id: &str) -> String {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn release_info_from_preview_manifest(
     manifest: &PreviewManifest,
 ) -> Result<Option<ReleaseInfo>, String> {
@@ -554,7 +554,7 @@ fn check_latest() -> Result<Option<ReleaseInfo>, String> {
     Ok(release)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn parse_homebrew_formula_stable_version(input: &[u8]) -> Result<Version, String> {
     let formula: HomebrewFormula = serde_json::from_slice(input)
         .map_err(|e| format!("failed to parse Homebrew formula JSON: {e}"))?;
@@ -566,7 +566,7 @@ fn parse_homebrew_formula_stable_version(input: &[u8]) -> Result<Version, String
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn homebrew_update_from_formula_json(
     input: &[u8],
     current: &Version,
