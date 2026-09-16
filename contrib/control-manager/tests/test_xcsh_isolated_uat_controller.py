@@ -93,7 +93,7 @@ class ControllerTests(unittest.TestCase):
   raw_binary=os.environ.get('HERDR_XCSH_BINARY')
   expected=os.environ.get('HERDR_XCSH_SHA256')
   if not raw_binary or not expected:
-   self.skipTest('set HERDR_XCSH_BINARY and HERDR_XCSH_SHA256 for the measured XCSH source smoke')
+   self.skipTest('set HERDR_XCSH_BINARY and HERDR_XCSH_SHA256 for the measured xcsh source smoke')
   binary=Path(raw_binary)
   with tempfile.TemporaryDirectory(prefix='xcsh-v3-session-') as raw:
    root=Path(raw)

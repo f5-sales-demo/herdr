@@ -4,7 +4,9 @@ mod config_tests;
 mod discovery;
 mod status;
 #[cfg(test)]
-mod test_support;
+pub(super) mod test_support;
+
+pub(crate) use self::discovery::automatic_workspace_label;
 
 pub use self::{
     discovery::{
@@ -16,6 +18,3 @@ pub use self::{
         git_status_snapshot_for_cwd_with_demand, GitStatusCacheEntry, GitStatusRefreshDemand,
     },
 };
-
-#[cfg(test)]
-pub(super) use self::status::git_ahead_behind;

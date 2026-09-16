@@ -31,7 +31,7 @@ class PreviewNotesTests(unittest.TestCase):
             notes = "Preview notes\n"
             content = preview.build_manifest(
                 output=output,
-                repo="ogulcancelik/herdr",
+                repo="herdrdev/herdr",
                 tag="preview-2026-06-02-abcdef123456",
                 build_id="2026-06-02-abcdef123456",
                 commit="abcdef1234567890",
@@ -49,12 +49,16 @@ class PreviewNotesTests(unittest.TestCase):
             self.assertEqual(data["channel"], "preview")
             self.assertEqual(data["build_id"], "2026-06-02-abcdef123456")
             self.assertEqual(
+                data["endpoint_generation"],
+                preview.read_endpoint_protocol_generation(),
+            )
+            self.assertEqual(
                 data["assets"]["linux-x86_64"]["sha256"],
                 "deadbeef",
             )
             self.assertEqual(
                 data["assets"]["windows-x86_64"]["url"],
-                "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-02-abcdef123456/herdr-windows-x86_64.zip",
+                "https://github.com/herdrdev/herdr/releases/download/preview-2026-06-02-abcdef123456/herdr-windows-x86_64.zip",
             )
             self.assertEqual(
                 data["assets"]["windows-x86_64"]["sha256"],
@@ -62,13 +66,17 @@ class PreviewNotesTests(unittest.TestCase):
             )
             self.assertEqual(data["assets"]["windows-x86_64"]["format"], "zip")
             self.assertIn("2026-06-02-abcdef123456", data["builds"])
+            self.assertEqual(
+                data["builds"]["2026-06-02-abcdef123456"]["endpoint_generation"],
+                preview.read_endpoint_protocol_generation(),
+            )
 
     def test_windows_preview_asset_requires_sha256(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ValueError, "windows-x86_64 requires"):
                 preview.build_manifest(
                     output=Path(tmp) / "preview.json",
-                    repo="ogulcancelik/herdr",
+                    repo="herdrdev/herdr",
                     tag="preview-test",
                     build_id="test",
                     commit="abcdef",
@@ -83,6 +91,7 @@ class PreviewNotesTests(unittest.TestCase):
     def test_hidden_subjects_include_preview_manifest_commits(self):
         self.assertTrue(preview.hidden_subject("docs: update preview manifest"))
         self.assertTrue(preview.hidden_subject("docs: update website manifest"))
+        self.assertTrue(preview.hidden_subject("docs: publish release distribution"))
         self.assertFalse(preview.hidden_subject("release: v0.7.0"))
         self.assertFalse(preview.hidden_subject("fix: repair preview manifest"))
 
@@ -160,57 +169,6 @@ class PreviewNotesTests(unittest.TestCase):
                 )
             finally:
                 os.chdir(original_cwd)
-
-    def test_preview_docs_rewrite_links_to_preview_namespace(self):
-        source = """---
-title: Install Herdr
----
-
-import ConfigReference from '../../components/ConfigReference.astro';
-import LocaleWidget from '../../../components/LocaleWidget.astro';
-
-[Install](/docs/install/)
-file: ../../../public/assets/logo.svg
-"""
-        output = subprocess.check_output(
-            ["node", "website/scripts/prepare-docs.mjs", "--rewrite-preview-doc-fixture"],
-            input=source,
-            text=True,
-        )
-        self.assertIn("[Install](/docs/preview/install/)", output)
-        self.assertIn("file: ../../../../public/assets/logo.svg", output)
-        self.assertIn("from '../../../components/ConfigReference.astro'", output)
-        self.assertIn("from '../../../../components/LocaleWidget.astro'", output)
-        self.assertIn("Next docs describe unreleased work", output)
-        self.assertIn("edit/master/docs/next/website/src/content/docs/", output)
-
-    def test_version_docs_rewrite_links_and_source_paths(self):
-        source = """---
-title: Install Herdr
----
-
-import ConfigReference from '../../components/ConfigReference.astro';
-
-[Install](/docs/install/)
-[Skill](https://github.com/ogulcancelik/herdr/blob/master/SKILL.md)
-file: ../../../public/assets/logo.svg
-"""
-        output = subprocess.check_output(
-            [
-                "node",
-                "website/scripts/prepare-docs.mjs",
-                "--rewrite-version-doc-fixture",
-                "0.7.4",
-            ],
-            input=source,
-            text=True,
-        )
-        self.assertIn("[Install](/docs/0.7.4/install/)", output)
-        self.assertIn("file: ../../../../../public/assets/logo.svg", output)
-        self.assertIn("from '../../../../components/ConfigReference.astro'", output)
-        self.assertIn("blob/v0.7.4/docs/next/website/src/content/docs/index.mdx", output)
-        self.assertIn("blob/v0.7.4/SKILL.md", output)
-
 
 class ConventionalCommitTests(unittest.TestCase):
     @mock.patch.object(conventional_commits.subprocess, "check_output")

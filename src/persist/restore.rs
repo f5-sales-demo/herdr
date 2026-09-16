@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use ratatui::layout::Direction;
@@ -11,6 +10,7 @@ use crate::detect::AgentState;
 use crate::events::AppEvent;
 use crate::layout::{Node, PaneId, TileLayout};
 use crate::pane::{PaneLaunchEnv, PaneState};
+use crate::render_signal::RenderSignal;
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalState};
 use crate::workspace::Workspace;
 
@@ -35,14 +35,63 @@ struct PaneRestoreStartup<'a> {
     reserved_agent_session: Option<String>,
 }
 
+pub struct RestoreOptions<'a> {
+    pub rows: u16,
+    pub cols: u16,
+    scrollback_limit_bytes: usize,
+    pub shell_config: crate::pane::PaneShellConfig<'a>,
+    pub resume_agents_on_restore: bool,
+    pub resume_agent_args: BTreeMap<String, Vec<String>>,
+}
+
+impl<'a> RestoreOptions<'a> {
+    pub fn new(
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        shell_config: crate::pane::PaneShellConfig<'a>,
+        resume_agents_on_restore: bool,
+        resume_agent_args: &BTreeMap<String, Vec<String>>,
+    ) -> Self {
+        Self {
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            shell_config,
+            resume_agents_on_restore,
+            resume_agent_args: resume_agent_args.clone(),
+        }
+    }
+}
+
+pub struct RestoreRuntime {
+    events: mpsc::Sender<AppEvent>,
+    render_notify: Arc<Notify>,
+    render_dirty: Arc<RenderSignal>,
+}
+
+impl RestoreRuntime {
+    pub fn new(
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<RenderSignal>,
+    ) -> Self {
+        Self {
+            events,
+            render_notify,
+            render_dirty,
+        }
+    }
+}
+
 struct RestoreRuntimeContext<'a> {
     scrollback_limit_bytes: usize,
     shell_config: crate::pane::PaneShellConfig<'a>,
     resume_agents_on_restore: bool,
-    resume_agent_args: BTreeMap<String, Vec<String>>,
+    resume_agent_args: &'a BTreeMap<String, Vec<String>>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
-    render_dirty: Arc<AtomicBool>,
+    render_dirty: Arc<RenderSignal>,
 }
 
 type RestoredSession = (
@@ -64,68 +113,24 @@ type RestoredTab = (
 type RestoreFailures<T> = (T, usize);
 
 /// Restore workspaces from a snapshot. Each pane gets a fresh shell in its saved cwd.
-// resume_agent_args is a new per-agent arg map; allowing extra args avoids a larger
-// refactor into a builder/options struct at this call depth.
-#[allow(clippy::too_many_arguments)]
 pub fn restore(
     snapshot: &SessionSnapshot,
     history: Option<&SessionHistorySnapshot>,
-    rows: u16,
-    cols: u16,
-    scrollback_limit_bytes: usize,
-    default_shell: &str,
-    shell_mode: crate::config::ShellModeConfig,
-    resume_agents_on_restore: bool,
-    resume_agent_args: &BTreeMap<String, Vec<String>>,
-    events: mpsc::Sender<AppEvent>,
-    render_notify: Arc<Notify>,
-    render_dirty: Arc<AtomicBool>,
+    options: &RestoreOptions<'_>,
+    runtime: RestoreRuntime,
 ) -> RestoredSession {
     let mut imported_panes = HashMap::new();
-    restore_with_imports(
-        snapshot,
-        history,
-        rows,
-        cols,
-        scrollback_limit_bytes,
-        crate::pane::PaneShellConfig::new(default_shell, shell_mode),
-        resume_agents_on_restore,
-        resume_agent_args,
-        &mut imported_panes,
-        events,
-        render_notify,
-        render_dirty,
-    )
+    restore_with_imports(snapshot, history, options, &mut imported_panes, runtime)
 }
 
 #[cfg(unix)]
 pub fn restore_handoff(
     snapshot: &SessionSnapshot,
-    scrollback_limit_bytes: usize,
-    default_shell: &str,
-    shell_mode: crate::config::ShellModeConfig,
+    options: &RestoreOptions<'_>,
     imports: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
-    events: mpsc::Sender<AppEvent>,
-    render_notify: Arc<Notify>,
-    render_dirty: Arc<AtomicBool>,
+    runtime: RestoreRuntime,
 ) -> std::io::Result<RestoredSession> {
-    // Handoff imports use default resume behavior; per-agent resume args apply
-    // to normal session restore only.
-    let resume_agent_args = BTreeMap::new();
-    restore_with_imports_strict(
-        snapshot,
-        None,
-        24,
-        80,
-        scrollback_limit_bytes,
-        crate::pane::PaneShellConfig::new(default_shell, shell_mode),
-        true,
-        &resume_agent_args,
-        imports,
-        events,
-        render_notify,
-        render_dirty,
-    )
+    restore_with_imports_strict(snapshot, None, options, imports, runtime)
 }
 
 #[cfg(unix)]
@@ -195,38 +200,16 @@ fn collect_layout_snapshot_pane_ids(node: &LayoutSnapshot, ids: &mut Vec<u32>) {
     }
 }
 
-// resume_agent_args added one argument past the clippy limit; a refactor into an
-// options struct is deferred until the broader restore API is stabilised.
-#[allow(clippy::too_many_arguments)]
 #[cfg(unix)]
 fn restore_with_imports_strict(
     snapshot: &SessionSnapshot,
     history: Option<&SessionHistorySnapshot>,
-    rows: u16,
-    cols: u16,
-    scrollback_limit_bytes: usize,
-    shell_config: crate::pane::PaneShellConfig<'_>,
-    resume_agents_on_restore: bool,
-    resume_agent_args: &BTreeMap<String, Vec<String>>,
+    options: &RestoreOptions<'_>,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
-    events: mpsc::Sender<AppEvent>,
-    render_notify: Arc<Notify>,
-    render_dirty: Arc<AtomicBool>,
+    runtime: RestoreRuntime,
 ) -> std::io::Result<RestoredSession> {
-    let (restored, failed_imports) = restore_with_imports_and_failures(
-        snapshot,
-        history,
-        rows,
-        cols,
-        scrollback_limit_bytes,
-        shell_config,
-        resume_agents_on_restore,
-        resume_agent_args,
-        imported_panes,
-        events,
-        render_notify,
-        render_dirty,
-    );
+    let (restored, failed_imports) =
+        restore_with_imports_and_failures(snapshot, history, options, imported_panes, runtime);
     if failed_imports > 0 {
         return Err(std::io::Error::other(format!(
             "handoff failed to restore {failed_imports} imported pane runtime(s)"
@@ -241,54 +224,22 @@ fn restore_with_imports_strict(
     Ok(restored)
 }
 
-// See allow note on restore_with_imports_strict above.
-#[allow(clippy::too_many_arguments)]
 fn restore_with_imports(
     snapshot: &SessionSnapshot,
     history: Option<&SessionHistorySnapshot>,
-    rows: u16,
-    cols: u16,
-    scrollback_limit_bytes: usize,
-    shell_config: crate::pane::PaneShellConfig<'_>,
-    resume_agents_on_restore: bool,
-    resume_agent_args: &BTreeMap<String, Vec<String>>,
+    options: &RestoreOptions<'_>,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
-    events: mpsc::Sender<AppEvent>,
-    render_notify: Arc<Notify>,
-    render_dirty: Arc<AtomicBool>,
+    runtime: RestoreRuntime,
 ) -> RestoredSession {
-    restore_with_imports_and_failures(
-        snapshot,
-        history,
-        rows,
-        cols,
-        scrollback_limit_bytes,
-        shell_config,
-        resume_agents_on_restore,
-        resume_agent_args,
-        imported_panes,
-        events,
-        render_notify,
-        render_dirty,
-    )
-    .0
+    restore_with_imports_and_failures(snapshot, history, options, imported_panes, runtime).0
 }
 
-// See allow note on restore_with_imports_strict above.
-#[allow(clippy::too_many_arguments)]
 fn restore_with_imports_and_failures(
     snapshot: &SessionSnapshot,
     history: Option<&SessionHistorySnapshot>,
-    rows: u16,
-    cols: u16,
-    scrollback_limit_bytes: usize,
-    shell_config: crate::pane::PaneShellConfig<'_>,
-    resume_agents_on_restore: bool,
-    resume_agent_args: &BTreeMap<String, Vec<String>>,
+    options: &RestoreOptions<'_>,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
-    events: mpsc::Sender<AppEvent>,
-    render_notify: Arc<Notify>,
-    render_dirty: Arc<AtomicBool>,
+    runtime: RestoreRuntime,
 ) -> RestoreFailures<RestoredSession> {
     let mut workspaces = Vec::new();
     let mut terminals = HashMap::new();
@@ -297,19 +248,19 @@ fn restore_with_imports_and_failures(
     let mut failed_imports = 0;
     for (idx, ws_snap) in snapshot.workspaces.iter().enumerate() {
         let runtime_context = RestoreRuntimeContext {
-            scrollback_limit_bytes,
-            shell_config,
-            resume_agents_on_restore,
-            resume_agent_args: resume_agent_args.clone(),
-            events: events.clone(),
-            render_notify: render_notify.clone(),
-            render_dirty: render_dirty.clone(),
+            scrollback_limit_bytes: options.scrollback_limit_bytes,
+            shell_config: options.shell_config,
+            resume_agents_on_restore: options.resume_agents_on_restore,
+            resume_agent_args: &options.resume_agent_args,
+            events: runtime.events.clone(),
+            render_notify: runtime.render_notify.clone(),
+            render_dirty: runtime.render_dirty.clone(),
         };
         let (restored, workspace_failed_imports) = restore_workspace(
             ws_snap,
             history.and_then(|history| history.workspaces.get(idx)),
-            rows,
-            cols,
+            options.rows,
+            options.cols,
             &runtime_context,
             &mut resumed_agent_sessions,
             imported_panes,
@@ -526,7 +477,7 @@ fn restore_tab(
         let startup = {
             let mut agent_restore = AgentRestoreState {
                 enabled: runtime_context.resume_agents_on_restore,
-                resume_agent_args: &runtime_context.resume_agent_args,
+                resume_agent_args: runtime_context.resume_agent_args,
                 resumed_sessions: resumed_agent_sessions,
             };
             pane_restore_startup(saved_agent_session, saved_history, &mut agent_restore)
@@ -607,6 +558,7 @@ fn restore_tab(
                     },
                     runtime_context.scrollback_limit_bytes,
                     crate::terminal_theme::TerminalTheme::default(),
+                    None,
                     runtime_context.events.clone(),
                     runtime_context.render_notify.clone(),
                     runtime_context.render_dirty.clone(),
@@ -619,6 +571,7 @@ fn restore_tab(
                     cwd.clone(),
                     runtime_context.scrollback_limit_bytes,
                     crate::terminal_theme::TerminalTheme::default(),
+                    None,
                     runtime_context.shell_config,
                     &launch_env,
                     startup.initial_history_ansi,
@@ -637,6 +590,7 @@ fn restore_tab(
                     cwd.clone(),
                     runtime_context.scrollback_limit_bytes,
                     crate::terminal_theme::TerminalTheme::default(),
+                    None,
                     runtime_context.shell_config,
                     &launch_env,
                     startup.initial_history_ansi,
@@ -967,6 +921,25 @@ mod tests {
     #[cfg(not(windows))]
     fn test_restore_shell() -> &'static str {
         "/bin/sh"
+    }
+
+    fn test_restore_options(
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        resume_agents_on_restore: bool,
+    ) -> RestoreOptions<'static> {
+        RestoreOptions::new(
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            crate::pane::PaneShellConfig::new(
+                test_restore_shell(),
+                crate::config::ShellModeConfig::NonLogin,
+            ),
+            resume_agents_on_restore,
+            &BTreeMap::new(),
+        )
     }
 
     #[test]
@@ -1320,20 +1293,13 @@ mod tests {
         };
         let (events, _event_rx) = mpsc::channel(4);
 
-        let (_workspaces, terminals, _runtimes) = restore(
-            &snapshot,
-            None,
-            24,
-            80,
-            0,
-            test_restore_shell(),
-            crate::config::ShellModeConfig::NonLogin,
-            false,
-            &BTreeMap::new(),
+        let options = test_restore_options(24, 80, 0, false);
+        let runtime = RestoreRuntime::new(
             events,
             Arc::new(Notify::new()),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(RenderSignal::new()),
         );
+        let (_workspaces, terminals, _runtimes) = restore(&snapshot, None, &options, runtime);
 
         let terminal = terminals
             .values()
@@ -1414,20 +1380,13 @@ mod tests {
         };
         let (events, _event_rx) = mpsc::channel(4);
 
-        let (workspaces, _terminals, _runtimes) = restore(
-            &snapshot,
-            None,
-            24,
-            80,
-            0,
-            test_restore_shell(),
-            crate::config::ShellModeConfig::NonLogin,
-            false,
-            &BTreeMap::new(),
+        let options = test_restore_options(24, 80, 0, false);
+        let runtime = RestoreRuntime::new(
             events,
             Arc::new(Notify::new()),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(RenderSignal::new()),
         );
+        let (workspaces, _terminals, _runtimes) = restore(&snapshot, None, &options, runtime);
 
         let workspace = workspaces.first().expect("workspace should restore");
         let mut public_numbers: Vec<_> = workspace.public_pane_numbers.values().copied().collect();
@@ -1522,20 +1481,13 @@ mod tests {
         };
         let (events, _event_rx) = mpsc::channel(4);
 
-        let (workspaces, terminals, _runtimes) = restore(
-            &snapshot,
-            None,
-            24,
-            80,
-            0,
-            test_restore_shell(),
-            crate::config::ShellModeConfig::NonLogin,
-            false,
-            &BTreeMap::new(),
+        let options = test_restore_options(24, 80, 0, false);
+        let runtime = RestoreRuntime::new(
             events,
             Arc::new(Notify::new()),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(RenderSignal::new()),
         );
+        let (workspaces, terminals, _runtimes) = restore(&snapshot, None, &options, runtime);
 
         let workspace = workspaces.first().expect("workspace should restore");
         assert_eq!(workspace.active_tab, 3);
@@ -1634,20 +1586,13 @@ mod tests {
         };
         let (events, _event_rx) = mpsc::channel(4);
 
-        let (_workspaces, terminals, runtimes) = restore(
-            &snapshot,
-            None,
-            24,
-            80,
-            0,
-            test_restore_shell(),
-            crate::config::ShellModeConfig::NonLogin,
-            true,
-            &BTreeMap::new(),
+        let options = test_restore_options(24, 80, 0, true);
+        let runtime = RestoreRuntime::new(
             events,
             Arc::new(Notify::new()),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(RenderSignal::new()),
         );
+        let (_workspaces, terminals, runtimes) = restore(&snapshot, None, &options, runtime);
 
         let terminal = terminals
             .values()
@@ -1666,17 +1611,15 @@ mod tests {
             "native agent restore should not spawn a fallback-size runtime during snapshot restore"
         );
         let mut imports = HashMap::new();
-        let (_handoff_workspaces, handoff_terminals, handoff_runtimes) = restore_handoff(
-            &snapshot,
-            0,
-            test_restore_shell(),
-            crate::config::ShellModeConfig::NonLogin,
-            &mut imports,
+        let handoff_options = test_restore_options(24, 80, 0, true);
+        let handoff_runtime = RestoreRuntime::new(
             mpsc::channel(4).0,
             Arc::new(Notify::new()),
-            Arc::new(AtomicBool::new(false)),
-        )
-        .expect("handoff restore should preserve pending native agent resume");
+            Arc::new(RenderSignal::new()),
+        );
+        let (_handoff_workspaces, handoff_terminals, handoff_runtimes) =
+            restore_handoff(&snapshot, &handoff_options, &mut imports, handoff_runtime)
+                .expect("handoff restore should preserve pending native agent resume");
         let handoff_terminal = handoff_terminals
             .values()
             .next()
@@ -1696,22 +1639,12 @@ mod tests {
         let (snapshot, history) = snapshot_with_saved_pane_history();
         let (events, _events_rx) = mpsc::channel(8);
         let render_notify = Arc::new(Notify::new());
-        let render_dirty = Arc::new(AtomicBool::new(false));
+        let render_dirty = Arc::new(RenderSignal::new());
 
-        let (_workspaces, _terminals, runtimes) = restore(
-            &snapshot,
-            Some(&history),
-            5,
-            40,
-            4096,
-            test_restore_shell(),
-            crate::config::ShellModeConfig::NonLogin,
-            false,
-            &BTreeMap::new(),
-            events,
-            render_notify,
-            render_dirty,
-        );
+        let options = test_restore_options(5, 40, 4096, false);
+        let runtime = RestoreRuntime::new(events, render_notify, render_dirty);
+        let (_workspaces, _terminals, runtimes) =
+            restore(&snapshot, Some(&history), &options, runtime);
         let runtime = runtimes
             .values()
             .next()
@@ -1735,22 +1668,11 @@ mod tests {
         let (snapshot, _history) = snapshot_with_saved_pane_history();
         let (events, _events_rx) = mpsc::channel(8);
         let render_notify = Arc::new(Notify::new());
-        let render_dirty = Arc::new(AtomicBool::new(false));
+        let render_dirty = Arc::new(RenderSignal::new());
 
-        let (_workspaces, _terminals, runtimes) = restore(
-            &snapshot,
-            None,
-            5,
-            40,
-            4096,
-            test_restore_shell(),
-            crate::config::ShellModeConfig::NonLogin,
-            false,
-            &BTreeMap::new(),
-            events,
-            render_notify,
-            render_dirty,
-        );
+        let options = test_restore_options(5, 40, 4096, false);
+        let runtime = RestoreRuntime::new(events, render_notify, render_dirty);
+        let (_workspaces, _terminals, runtimes) = restore(&snapshot, None, &options, runtime);
         let runtime = runtimes
             .values()
             .next()

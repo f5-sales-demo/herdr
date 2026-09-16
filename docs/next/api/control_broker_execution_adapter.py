@@ -49,7 +49,7 @@ async def changes_after(herdr: HerdrRPC, revision: int) -> list[dict[str, Any]]:
 
 
 def process_outcome(execution: dict[str, Any]) -> tuple[str, str]:
-    """Map only process truth; never infer Codex/XCSH semantic task success."""
+    """Map only process truth; never infer Codex/xcsh semantic task success."""
     state = execution["state"]
     if state in {"starting", "running"}:
         return "working", "native PTY process is running"
@@ -72,7 +72,7 @@ def process_outcome(execution: dict[str, Any]) -> tuple[str, str]:
 #    with one execution.start call and store its returned tab_id/pane_id/revision.
 # 3. Reconcile at startup and after disconnect with execution.list; optionally
 #    long-poll execution.wait.  Apply only revisions newer than the task row.
-# 4. Route interactive XCSH input through the returned pane_id.  Track XCSH's
+# 4. Route interactive xcsh input through the returned pane_id.  Track xcsh's
 #    semantic job/result separately from this process outcome.
 # 5. Delete command_event handling, wrapper spool recovery, and terminal marker
 #    scraping only after isolated broker UAT proves duplicate/replay/cancel.

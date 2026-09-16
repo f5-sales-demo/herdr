@@ -1,4 +1,3 @@
-use crate::api::client::ApiClient;
 use crate::api::schema::{
     ExecutionCommand, ExecutionListParams, ExecutionResumeParams, ExecutionStartParams,
     ExecutionTarget, ExecutionWaitParams, Method, NativeDiscoveryPolicy, NativeLaunchV3,
@@ -41,12 +40,13 @@ pub(super) fn run(args: &[String]) -> std::io::Result<i32> {
         "help" | "--help" | "-h" => return usage_ok(),
         _ => return usage(),
     };
-    let response = ApiClient::local()
+    let response = super::target::api_client()?
         .request_value(&Request {
             id: format!("cli:execution:{action}"),
             method,
         })
-        .map_err(std::io::Error::other)?;
+        .map_err(std::io::Error::other)
+        .map_err(super::target::remote_error)?;
     println!(
         "{}",
         serde_json::to_string_pretty(&response).map_err(std::io::Error::other)?

@@ -1,4 +1,4 @@
-# XCSH native semantic-turn acceptance matrix
+# xcsh native semantic-turn acceptance matrix
 
 This is the durable acceptance record for feature `xcsh-native-lifecycle-20260908`. It separates evidence classes deliberately: a completed source child, a synthetic fixture, an installed artifact, and a live semantic turn are not interchangeable.
 
@@ -17,10 +17,10 @@ unit/session/workspace/pane, validates unit provenance before every action,
 and persists idempotent receipts for reconnect/replay observation, a created
 and closed owned cleanup tab, restart/reconnect, and broker-backed generation
 supersession. It has been exercised only against the named disposable Herdr
-v0.10.1 binary; it is not an installed XCSH/manager artifact or a live prompt
+v0.10.1 binary; it is not an installed xcsh/manager artifact or a live prompt
 receipt.
 Source package v22 adds the PR44 protocol-21 executable-binding contract: the
-controller returns the canonical measured XCSH path/hash with its real session
+controller returns the canonical measured xcsh path/hash with its real session
 receipt, the manager durably carries that identity through every generation,
 and resume/reconciliation reject any changed path, digest, backend binding, or
 `argv[0]`. This remains source evidence, not installed-UAT acceptance.
@@ -56,12 +56,12 @@ producer-owned adapter supplies that actual causal evidence.
 
 | Requirement | Required authoritative evidence | Current evidence | Status |
 | --- | --- | --- | --- |
-| Linked issue and source delivery | Linked XCSH/Herdr issue/PR identities and merged commits | XCSH PR3769 merged at `ae39a166`; Herdr PR21 merged as `f1815b818cbfbd4b13343a823bfcdc05c3e11efe`; Herdr issue #5 closed | Complete source/merge evidence; not release evidence |
-| Independent review | Review evidence covering XCSH reporter, Herdr journal, and manager consumer | Combined retained review evidence recorded | Complete gate evidence; does not prove installation |
-| CI and post-merge workflows | Exact-head CI plus post-merge workflow evidence for both projects | XCSH exact merge CI was green; Herdr PR21 CI was green before merge | Open: post-merge workflow evidence remains required |
-| Conventional version/release | Immutable release/version and artifact identity for XCSH, Herdr, and portable manager package | No release artifacts | Open |
-| Exact artifact installation | Download receipt, checksum/version, installed XCSH/Herdr capability and installed manager package identity | No installed artifact evidence | Open |
-| Protocol-22 native launch / consumer | Installed Herdr protocol >=22 for `execution.resume` v3 native-launch binding, plus `agent_turn_journal`, consumer enabled, and persisted cursor/result-digest receipt | Manager boundary code plus synthetic fixture only | Blocked pending installed capability |
+| Linked issue and source delivery | Linked xcsh/Herdr issue/PR identities and merged commits | xcsh PR3769 merged at `ae39a166`; Herdr PR21 merged as `f1815b818cbfbd4b13343a823bfcdc05c3e11efe`; Herdr issue #5 closed | Complete source/merge evidence; not release evidence |
+| Independent review | Review evidence covering xcsh reporter, Herdr journal, and manager consumer | Combined retained review evidence recorded | Complete gate evidence; does not prove installation |
+| CI and post-merge workflows | Exact-head CI plus post-merge workflow evidence for both projects | xcsh exact merge CI was green; Herdr PR21 CI was green before merge | Open: post-merge workflow evidence remains required |
+| Conventional version/release | Immutable release/version and artifact identity for xcsh, Herdr, and portable manager package | No release artifacts | Open |
+| Exact artifact installation | Download receipt, checksum/version, installed xcsh/Herdr capability and installed manager package identity | No installed artifact evidence | Open |
+| Protocol-24 native launch / consumer | Installed Herdr protocol >=24 for `execution.resume` v3 native-launch binding, plus `agent_turn_journal`, consumer enabled, and persisted cursor/result-digest receipt | Manager boundary code plus synthetic fixture only | Blocked pending installed capability |
 | Semantic success/failure/input/cancel/continuation/replay/supersession/cleanup/loss | Installed-artifact isolated UAT receipt showing the specified semantic transitions | No installed receipt in this source package | Open; source does not satisfy live UAT |
 | Accepted | Every required lifecycle stage complete with matching gate evidence | Merge/release/install/native consumer/live UAT remain incomplete | Fail closed |
 
@@ -69,13 +69,13 @@ producer-owned adapter supplies that actual causal evidence.
 
 `xcsh_installed_uat.py` and `xcsh-installed-uat/scenarios-v1.json` are the
 separate real-runtime driver and safe synthesized prompt catalog. They bind
-immutable XCSH, Herdr, and manager artifact versions/checksums; require a
-dedicated disposable runtime; query real protocol-22 native-launch and journal records; and
+immutable xcsh, Herdr, and manager artifact versions/checksums; require a
+dedicated disposable runtime; query real protocol-24 native-launch and journal records; and
 validate exact state traces, revision monotonicity, task/pane/session
 provenance, completed-result digests, and manager-consumed evidence. They do
 not infer success from a sentinel substring and never call `agent.turn.report`.
 
-For XCSH, the published artifact is an archive, not the launched executable.
+For xcsh, the published artifact is an archive, not the launched executable.
 The manifest therefore retains the published archive version/URI/SHA-256 in
 `artifacts.xcsh`, and separately binds a local verified archive path, the exact
 regular member name `xcsh`, and that member's SHA-256. Probe validation hashes
@@ -87,7 +87,7 @@ digest for the published archive identity.
 The manager source now provides `native_xcsh_admit`: it atomically creates an
 admitted `work_kind=xcsh` task with durable idempotency/runtime identity, then
 starts its matching Herdr execution. First semantic starting/working report
-binds the XCSH session/turn only from the owned execution pane; completion is
+binds the xcsh session/turn only from the owned execution pane; completion is
 still only a journal/result-digest fact. Calling Herdr `execution.start`
 directly remains forbidden because it would lose broker correlation. The
 currently installed manager must advertise this adapter after the matching
@@ -120,10 +120,10 @@ this source child.
 
 ## Required later release/install actions
 
-The durable feature's later actions must bind all three deliverables, not XCSH alone:
+The durable feature's later actions must bind all three deliverables, not xcsh alone:
 
-- XCSH: immutable release artifact/version corresponding to merged PR3769 commit `ae39a166`.
+- xcsh: immutable release artifact/version corresponding to merged PR3769 commit `ae39a166`.
 - Herdr: merged PR21 commit `f1815b818cbfbd4b13343a823bfcdc05c3e11efe` (from exact reviewed head `5e9dea`), then immutable release artifact/version exposing protocol 20 and `agent_turn_journal`.
 - Control Manager: the versioned portable package artifact containing the matching consumer and UAT catalog; its local install must be identified separately from machine-local sockets, credentials, runtime processes, and state.
 
-Install must use an approved isolated target and record exact artifact identities/checksums, XCSH version, Herdr protocol/capability handshake, portable-package version, and consumer receipt. Only then may `native_consumer` be evidenced and the installed-artifact live-UAT action run. No source checkout, child completion, synthetic fixture, mocked process, or historical CI result is installation or semantic end-to-end success.
+Install must use an approved isolated target and record exact artifact identities/checksums, xcsh version, Herdr protocol/capability handshake, portable-package version, and consumer receipt. Only then may `native_consumer` be evidenced and the installed-artifact live-UAT action run. No source checkout, child completion, synthetic fixture, mocked process, or historical CI result is installation or semantic end-to-end success.

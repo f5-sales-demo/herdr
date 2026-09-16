@@ -77,6 +77,47 @@ class DownstreamReleaseWorkflowTests(unittest.TestCase):
             self.workflow,
         )
 
+    def test_release_publishes_windows_conpty_zip_and_exactly_eighteen_assets(self) -> None:
+        create = re.search(
+            r'(?ms)^          gh release create "\$TAG" \\\n(?P<assets>.+?)^            --title',
+            self.workflow,
+        )
+        self.assertIsNotNone(create)
+        asset_lines = [
+            line.strip().removesuffix(" \\")
+            for line in create.group("assets").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(len(asset_lines), 18)
+        self.assertIn(
+            "herdr-windows-x86_64/herdr-windows-x86_64.zip", asset_lines
+        )
+        self.assertIn(
+            "herdr-windows-x86_64/herdr-windows-x86_64.zip.sha256", asset_lines
+        )
+        self.assertIn(
+            'cat herdr-windows-x86_64/herdr-windows-x86_64.zip.sha256 >> SHA256SUMS',
+            self.workflow,
+        )
+
+    def test_release_builds_with_zig_0_16_0(self) -> None:
+        self.assertNotIn("0.15.2", self.workflow)
+        self.assertIn("version: 0.16.0", self.workflow)
+
+    def test_release_publishes_fork_manifest_after_immutable_latest_release(self) -> None:
+        self.assertIn('--title "$TAG" --generate-notes --latest', self.workflow)
+        self.assertIn(
+            'test "$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)" = "$TAG"',
+            self.workflow,
+        )
+        self.assertRegex(
+            self.workflow,
+            r"(?ms)^  publish-manifest:\n    needs: \[prepare, publish\].+?"
+            r"python3 scripts/changelog.py sync-latest-json.+?"
+            r"--repo \"\$GITHUB_REPOSITORY\".+?"
+            r"git push origin HEAD:build-xcsh",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

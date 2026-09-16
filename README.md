@@ -6,29 +6,32 @@
 </p>
 
 <p align="center">
-  <a href="https://herdr.dev">herdr.dev</a> · <a href="#install">install</a> · <a href="https://herdr.dev/docs/quick-start/">quick start</a> · <a href="https://herdr.dev/docs/">docs</a> · <a href="#sponsors">sponsors</a>
+  <a href="https://github.com/f5-sales-demo/herdr">maintained fork</a> · <a href="#install">install</a> · <a href="docs/next/website/src/content/docs/quick-start.mdx">quick start</a> · <a href="docs/next/website/src/content/docs/">docs</a>
+</p>
+
+<p align="center">
+  English · <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-666666?labelColor=333333" alt="Apache 2.0 license" /></a>
-  <a href="https://github.com/ogulcancelik/herdr/releases"><img src="https://img.shields.io/github/downloads/ogulcancelik/herdr/total?labelColor=333333&color=666666" alt="total GitHub release downloads" /></a>
-  <a href="https://github.com/ogulcancelik/herdr/stargazers"><img src="https://img.shields.io/github/stars/ogulcancelik/herdr?labelColor=333333&color=666666&logo=github" alt="GitHub stars" /></a>
-  <a href="https://github.com/ogulcancelik/herdr/releases/latest"><img src="https://img.shields.io/github/v/release/ogulcancelik/herdr?label=release&labelColor=333333&color=666666" alt="latest stable release" /></a>
-  <a href="https://formulae.brew.sh/formula/herdr"><img src="https://img.shields.io/homebrew/v/herdr?label=homebrew&labelColor=333333&color=666666" alt="Homebrew version" /></a>
-  <a href="https://x.com/herdrdev"><img src="https://img.shields.io/badge/follow-%40herdrdev-000000?logo=x&logoColor=white" alt="follow @herdrdev on X" /></a>
+  <a href="https://github.com/f5-sales-demo/herdr/releases"><img src="https://img.shields.io/github/downloads/f5-sales-demo/herdr/total?labelColor=333333&color=666666" alt="total GitHub release downloads" /></a>
+  <a href="https://github.com/f5-sales-demo/herdr/releases/latest"><img src="https://img.shields.io/github/v/release/f5-sales-demo/herdr?label=release&labelColor=333333&color=666666" alt="latest stable release" /></a>
 </p>
 
 ---
 
 https://github.com/user-attachments/assets/043ec09f-4bdd-41d5-aee0-8fda6b83e267
 
-**agent multiplexer that lives in your terminal.**
+**the runtime your coding agents live on.**
 
-- **every agent at a glance** — blocked, working, done. real terminal views, not a wrapped interpretation.
-- **detach, agents keep running** — reattach from any terminal, or over ssh. sessions survive restarts.
-- **agents can use herdr too** — a pure socket api: agents spawn panes, read output, wait on each other. [agent skill →](https://herdr.dev/docs/agent-skill/)
+- **detach without stopping work** — herdr keeps terminals running in a background server when you close the client or lose your SSH connection. after a server or machine restart, herdr restores the saved layout and can resume supported agent sessions; the original processes do not survive. [session state →](docs/next/website/src/content/docs/session-state.mdx)
+- **several machines, one window** — keep local work and saved ssh machines together, with a combined agent list and independent reconnects. [remote machines →](docs/next/website/src/content/docs/connecting-machines.mdx)
+- **never hunt for the stuck one** — every pane is marked working, blocked, or idle. when an agent stops and needs an answer, herdr says so.
+- **agent-native** — agents drive herdr through the cli and socket api: they can spawn panes, prompt each other, and wait until another agent is genuinely blocked. [agent skill →](docs/next/website/src/content/docs/agent-skill.mdx)
+- **runs what you already run** — claude code, codex, cursor, opencode, grok and the rest. herdr doesn't wrap or replace them; it owns their terminals.
 - **keyboard and mouse, both first-class** — tmux-style prefix keys *and* click, drag, split. pick per moment, not per tool.
-- **plugins** — extend panes and workflows. [browse the marketplace →](https://herdr.dev/plugins/)
+- **plugins** — extend panes and workflows. [plugin documentation →](docs/next/website/src/content/docs/plugins.mdx)
 - **one rust binary, no electron** — runs in whatever terminal you already use.
 
 ---
@@ -36,10 +39,10 @@ https://github.com/user-attachments/assets/043ec09f-4bdd-41d5-aee0-8fda6b83e267
 ## install
 
 ```bash
-curl -fsSL https://herdr.dev/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/f5-sales-demo/herdr/build-xcsh/distribution/install.sh | sh
 ```
 
-or `brew install herdr` · `mise use -g herdr` · windows beta: `powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"` · [binaries](https://github.com/ogulcancelik/herdr/releases)
+or `brew install f5-sales-demo/tap/herdr` · windows: `powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/f5-sales-demo/herdr/build-xcsh/distribution/install.ps1 | iex"` · [endpoint-protected Windows](docs/next/website/src/content/docs/windows-beta.mdx) · [binaries](https://github.com/f5-sales-demo/herdr/releases)
 
 then start it where the work lives:
 
@@ -47,21 +50,15 @@ then start it where the work lives:
 herdr
 ```
 
-run your agents, split panes, walk away. `ctrl+b q` detaches, `herdr` reattaches. [quick start →](https://herdr.dev/docs/quick-start/)
+run your agents, split panes, walk away. `ctrl+b q` detaches, `herdr` reattaches. [quick start →](docs/next/website/src/content/docs/quick-start.mdx)
 
 ## docs
 
-everything lives at [herdr.dev/docs](https://herdr.dev/docs/): [quick start](https://herdr.dev/docs/quick-start/) · [concepts](https://herdr.dev/docs/concepts/) · [supported agents](https://herdr.dev/docs/agents/) · [keyboard](https://herdr.dev/docs/keyboard/) · [configuration](https://herdr.dev/docs/configuration/) · [session state](https://herdr.dev/docs/session-state/) · [remote](https://herdr.dev/docs/persistence-remote/) · [integrations](https://herdr.dev/docs/integrations/) · [plugins](https://herdr.dev/docs/plugins/) · [socket api](https://herdr.dev/docs/socket-api/)
+The maintained documentation is staged under [`docs/next`](docs/next/website/src/content/docs/).
 
-## sponsors
+## thanks
 
-herdr is built full-time, in the open. sponsoring directly funds development, stability, and the path to a real agent runtime.
-
-### gold
-
-<a href="https://terminaltrove.com/"><img src="assets/sponsors/terminal-trove.png" alt="Terminal Trove" width="200" /></a>
-
-[**→ become a sponsor**](https://github.com/sponsors/ogulcancelik) · enterprise / partnership: hey@herdr.dev · see [SPONSORS.md](./SPONSORS.md) for tiers. thank you 🐑
+every past sponsor and backer is listed in [SPONSORS.md](./SPONSORS.md) — thank you 🐑
 
 ## agent instructions
 
@@ -70,7 +67,7 @@ if you are an ai agent helping with this repository, read [`AGENTS.md`](./AGENTS
 ## development
 
 ```bash
-git clone https://github.com/ogulcancelik/herdr
+git clone --branch build-xcsh https://github.com/f5-sales-demo/herdr
 cd herdr
 cargo build --release
 

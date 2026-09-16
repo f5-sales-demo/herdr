@@ -89,7 +89,7 @@ class FakeHerdr:
                 execution.update(state="cancelled", signal_name="Interrupt", output_complete=True)
             return {"execution": execution, "admitted": False}
         if method == "ping":
-            return {"protocol": 23, "capabilities": {"tracked_executions": True, "agent_turn_journal": True}}
+            return {"protocol": 24, "capabilities": {"tracked_executions": True, "agent_turn_journal": True}}
         if method == "agent.turn.list":
             since = params.get("since_revision", 0)
             # Synthetic component model of PR49's cross-ledger settlement:
@@ -659,7 +659,7 @@ class StateTests(unittest.TestCase):
             receipt = {"execution_id": "backend-1", "backend_execution_id": "backend-1", "semantic_execution_id": task["id"], "generation": 0, "native_producer": "xcsh", "producer_session_id": launch["session_header"]["id"], "workspace_id": "w1", "cwd": raw, "native_launch": launch, "command": {"mode": "argv", "argv": argv}, "native_executable": {"canonical_path": executable, "sha256": executable_sha256}, "injected_env": {"HERDR_EXECUTION_ID": task["id"], "HERDR_EXECUTION_GENERATION": "0"}, "tab_id": "tab-1", "pane_id": "pane-1"}
             # Released protocol 22 omitted workspace_id even though the
             # manager had already claimed it. Keep that precise receipt shape
-            # rejected; protocol 23 must carry the field rather than weaken
+            # rejected; protocol 24 must carry the field rather than weaken
             # the immutable workspace comparison.
             released_receipt = receipt.copy()
             del released_receipt["workspace_id"]
@@ -1108,7 +1108,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(row["work_kind"] == "xcsh" for row in self.broker.db.list_tasks()))
 
     async def test_native_launch_v3_sends_only_typed_request_and_exact_backend_argv(self):
-        """Synthetic component fixture for protocol-23 request/receipt equivalence."""
+        """Synthetic component fixture for protocol-24 request/receipt equivalence."""
         workspace = await self.configure_control_workspace()
         task = await self.admit_native_xcsh({
             "target": "xcsh-v3-argv", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
@@ -1167,7 +1167,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
                           if tab["workspace_id"] == foreign_id}, foreign_tabs_before)
 
     async def test_native_launch_model_matches_backend_utf8_and_control_boundary_preclaim(self):
-        """Synthetic component fixture for the protocol-23 model contract."""
+        """Synthetic component fixture for the protocol-24 model contract."""
         workspace = await self.configure_control_workspace()
         base = {"target": "xcsh-model", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
                 "text": "safe", "session_id": self.native_launch["session_header"]["id"],
@@ -1204,18 +1204,18 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
                     await admit("test/model", f"runtime-{name}-{suffix}", runtime_model=model)
         self.assertEqual(len([row for row in self.broker.db.list_tasks() if row["work_kind"] == "xcsh"]), 2)
 
-    async def test_native_xcsh_rejects_protocol20_before_durable_generation_claim(self):
+    async def test_native_xcsh_rejects_protocol23_before_durable_generation_claim(self):
         workspace = await self.configure_control_workspace()
         original = self.broker.herdr.request
 
-        async def protocol20(method, params=None, timeout=65):
+        async def protocol23(method, params=None, timeout=65):
             if method == "ping":
-                return {"protocol": 20, "capabilities": {"tracked_executions": True, "agent_turn_journal": True}}
+                return {"protocol": 23, "capabilities": {"tracked_executions": True, "agent_turn_journal": True}}
             return await original(method, params, timeout)
 
-        self.broker.herdr.request = protocol20
+        self.broker.herdr.request = protocol23
         try:
-            with self.assertRaisesRegex(ValueError, "protocol-23 workspace-bound"):
+            with self.assertRaisesRegex(ValueError, "protocol-24 workspace-bound"):
                 await self.admit_native_xcsh({
                     "target": "xcsh-protocol", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
                     "text": "safe", "session_id": "session-protocol", "workspace_id": workspace["workspace"]["workspace_id"],
@@ -1227,7 +1227,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(row["work_kind"] == "xcsh" for row in self.broker.db.list_tasks()))
 
     async def test_native_xcsh_rejects_wrong_returned_executable_binding(self):
-        """A protocol-23 receipt may not substitute an executable after claim."""
+        """A protocol-24 receipt may not substitute an executable after claim."""
         workspace = await self.configure_control_workspace()
         original = self.broker.herdr.request
 
@@ -1503,7 +1503,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.broker.db.task(task["id"])["state"], "cancelled")
 
     async def test_xcsh_cancel_receipt_requires_exact_cooperative_generation_binding(self):
-        """Synthetic component fixture for protocol-23 cancel receipt validation."""
+        """Synthetic component fixture for protocol-24 cancel receipt validation."""
         workspace = await self.configure_control_workspace()
         task = await self.admit_native_xcsh({
             "target": "xcsh-cancel-binding", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
@@ -1741,7 +1741,12 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         event_path.chmod(0o600)
 
         await self.broker._drain_command_events()
-        await asyncio.sleep(0.08)
+
+        deadline = asyncio.get_running_loop().time() + 1
+        while self.broker.db.task(task["id"])["session_state"] != "closed":
+            if asyncio.get_running_loop().time() >= deadline:
+                self.fail("spooled command exit cleanup did not settle within one second")
+            await asyncio.sleep(0.01)
 
         row = self.broker.db.task(task["id"])
         self.assertEqual(row["state"], "failed")

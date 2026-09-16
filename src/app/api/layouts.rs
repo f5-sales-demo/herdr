@@ -93,6 +93,7 @@ impl App {
         let default_shell = self.state.default_shell.clone();
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
+        let host_terminal_appearance = self.state.host_terminal_appearance;
         let extra_env = match super::env::normalize_launch_env(root_leaf.env.clone()) {
             Ok(env) => env,
             Err((code, message)) => return encode_error(id, &code, message),
@@ -115,6 +116,8 @@ impl App {
                     extra_env,
                     scrollback_limit_bytes,
                     host_terminal_theme,
+                    host_terminal_appearance,
+                    None,
                 )
             } else {
                 ws.create_tab(
@@ -123,6 +126,7 @@ impl App {
                     first_cwd,
                     scrollback_limit_bytes,
                     host_terminal_theme,
+                    host_terminal_appearance,
                     crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
                     extra_env,
                 )
@@ -397,6 +401,7 @@ impl App {
         let default_shell = self.state.default_shell.clone();
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
+        let host_terminal_appearance = self.state.host_terminal_appearance;
         let cwd = pane
             .cwd
             .as_ref()
@@ -425,6 +430,7 @@ impl App {
                     extra_env,
                     scrollback_limit_bytes,
                     host_terminal_theme,
+                    host_terminal_appearance,
                     false,
                 )
             } else {
@@ -437,6 +443,7 @@ impl App {
                     cwd,
                     scrollback_limit_bytes,
                     host_terminal_theme,
+                    host_terminal_appearance,
                     crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
                     extra_env,
                     false,
@@ -602,7 +609,7 @@ mod tests {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &Config::default(),
-            true,
+            crate::app::AppPolicy::TEST,
             None,
             api_rx,
             crate::api::EventHub::default(),
@@ -741,7 +748,7 @@ mod tests {
                     second: Box::new(LayoutNode::Pane {
                         pane: LayoutPane {
                             label: Some("tests".into()),
-                            command: Some(vec!["sh".into(), "-c".into(), "true".into()]),
+                            command: Some(vec![exiting_test_command().into()]),
                             env: std::collections::HashMap::from([(
                                 "HERDR_ROLE".into(),
                                 "tests".into(),
@@ -783,7 +790,7 @@ mod tests {
         assert_eq!(second_pane.label.as_deref(), Some("tests"));
         assert_eq!(
             second_pane.command,
-            Some(vec!["sh".into(), "-c".into(), "true".into()])
+            Some(vec![exiting_test_command().into()])
         );
         assert!(matches!(
             &app.event_hub.events_after(0).last().expect("layout event").1.data,

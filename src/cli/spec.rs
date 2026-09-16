@@ -2,14 +2,17 @@ use std::io::Write;
 
 use clap::{Arg, ArgAction, ArgGroup, Command, ValueHint};
 
+mod completion;
+mod machine;
+
 pub(super) fn command() -> Command {
     let command = Command::new("herdr")
         .about("terminal workspace manager for AI coding agents")
         .disable_help_flag(true)
         .disable_version_flag(true)
         .arg(help_flag())
-        .arg(flag("no-session").help("Run monolithically without server/client session mode"))
         .arg(option("session", "NAME").help("Use or create a named persistent session"))
+        .arg(option("machine", "LABEL-OR-ID").help("Run an API command on a saved SSH machine"))
         .arg(option("remote", "TARGET").help("Attach through SSH to a remote Herdr server"))
         .arg(
             option("remote-keybindings", "MODE")
@@ -26,11 +29,12 @@ pub(super) fn command() -> Command {
                 .action(ArgAction::SetTrue)
                 .help("Print version and exit"),
         )
-        .subcommand(completion_command())
+        .subcommand(completion::command())
         .subcommand(update_command())
         .subcommand(status_command())
         .subcommand(config_command())
         .subcommand(channel_command())
+        .subcommand(machine::command())
         .subcommand(server_command())
         .subcommand(api_command())
         .subcommand(workspace_command())
@@ -42,28 +46,36 @@ pub(super) fn command() -> Command {
         .subcommand(terminal_command())
         .subcommand(session_command())
         .subcommand(integration_command())
-        .subcommand(Command::new("execution").about("Run and inspect durable tracked commands"))
         .subcommand(plugin_command());
-    configure_help(command, true)
+    configure_help(command, 0)
 }
 
-fn configure_help(command: Command, root: bool) -> Command {
-    let command = if root {
+fn configure_help(command: Command, depth: usize) -> Command {
+    let command = if depth == 0 {
         command
     } else {
         command.disable_help_flag(false)
     };
+    let command = if depth == 1 && command.has_subcommands() {
+        command.after_help(super::AGENT_HELP_FOOTER)
+    } else {
+        command
+    };
     command
         .disable_help_subcommand(true)
-        .mut_subcommands(|subcommand| configure_help(subcommand, false))
+        .mut_subcommands(|subcommand| configure_help(subcommand, depth + 1))
 }
 
 pub(super) fn print_requested_help(args: &[String]) -> std::io::Result<bool> {
     let mut stdout = std::io::stdout().lock();
-    write_requested_help(args, &mut stdout)
+    write_requested_help(args, &mut stdout, crate::platform::begin_cli_output)
 }
 
-fn write_requested_help(args: &[String], output: &mut impl Write) -> std::io::Result<bool> {
+fn write_requested_help(
+    args: &[String],
+    output: &mut impl Write,
+    before_write: impl FnOnce(),
+) -> std::io::Result<bool> {
     let Some(help_index) = args
         .iter()
         .position(|arg| matches!(arg.as_str(), "--help" | "-h"))
@@ -95,22 +107,10 @@ fn write_requested_help(args: &[String], output: &mut impl Write) -> std::io::Re
     }
 
     selected.set_bin_name(path.join(" "));
+    before_write();
     selected.write_long_help(&mut *output)?;
     writeln!(output)?;
     Ok(true)
-}
-
-fn completion_command() -> Command {
-    Command::new("completion")
-        .visible_alias("completions")
-        .about("Generate shell completion scripts")
-        .arg(
-            Arg::new("shell")
-                .value_name("SHELL")
-                .required(true)
-                .value_parser(super::completion::SUPPORTED_SHELLS)
-                .help("Shell to generate completions for"),
-        )
 }
 
 fn update_command() -> Command {
@@ -231,7 +231,7 @@ fn worktree_command() -> Command {
                 .about("List worktree workspaces")
                 .arg(option("workspace", "ID"))
                 .arg(path_option("cwd", "PATH"))
-                .arg(json_flag()),
+                .arg(flag("trust-repository")),
         )
         .subcommand(
             Command::new("create")
@@ -244,7 +244,7 @@ fn worktree_command() -> Command {
                 .arg(option("label", "TEXT"))
                 .arg(flag("focus"))
                 .arg(flag("no-focus"))
-                .arg(json_flag()),
+                .arg(flag("trust-repository")),
         )
         .subcommand(
             Command::new("open")
@@ -256,14 +256,14 @@ fn worktree_command() -> Command {
                 .arg(option("label", "TEXT"))
                 .arg(flag("focus"))
                 .arg(flag("no-focus"))
-                .arg(json_flag()),
+                .arg(flag("trust-repository")),
         )
         .subcommand(
             Command::new("remove")
                 .about("Remove a worktree checkout")
                 .arg(option("workspace", "ID"))
                 .arg(flag("force"))
-                .arg(json_flag()),
+                .arg(flag("trust-repository")),
         )
 }
 
@@ -359,7 +359,7 @@ fn agent_command() -> Command {
                         .help("Fail after this many milliseconds"),
                 )
                 .after_help(
-                    "When submission starts from a non-working state, --wait first waits up to 5000ms for an observed lifecycle change. If none arrives, successful terminal delivery returns accepted=true and observed=false; a shorter --timeout returns timeout instead. It then matches idle, done, or blocked by default, or any exact --until state. It does not track turns: if the agent is already working, that active turn's completion may match. Without --timeout, the settled-state wait is indefinite.",
+                    "If the agent is already blocked, submission is rejected with agent_blocked before any input is sent. When an accepted submission starts from another non-working state, --wait requires an observed working or blocked state within 5000ms; otherwise it returns agent_prompt_stalled. A caller timeout that expires first returns timeout. It then matches idle, done, or blocked by default, or any exact --until state. It does not track turns: if the agent is already working, that active turn's completion may match.",
                 ),
         )
         .subcommand(
@@ -530,6 +530,17 @@ fn pane_command() -> Command {
                 .arg(flag("clear")),
         )
         .subcommand(
+            Command::new("input")
+                .about("Set pane input routing")
+                .arg(Arg::new("pane_id").value_name("PANE_ID"))
+                .args(current_pane_args())
+                .arg(
+                    option("right-click", "TARGET")
+                        .value_parser(["herdr", "pane"])
+                        .required(true),
+                ),
+        )
+        .subcommand(
             Command::new("split")
                 .about("Split a pane")
                 .arg(Arg::new("pane_id").value_name("PANE_ID"))
@@ -538,6 +549,7 @@ fn pane_command() -> Command {
                 .arg(option("ratio", "FLOAT"))
                 .arg(path_option("cwd", "PATH"))
                 .arg(env_option())
+                .arg(option("right-click", "TARGET").value_parser(["herdr", "pane"]))
                 .arg(flag("focus"))
                 .arg(flag("no-focus")),
         )
@@ -883,10 +895,12 @@ fn integration_target_arg() -> Arg {
 }
 
 fn integration_target_values() -> Vec<&'static str> {
-    crate::api::schema::IntegrationTarget::ALL
+    let mut values: Vec<&'static str> = crate::api::schema::IntegrationTarget::ALL
         .into_iter()
         .map(crate::integration::integration_target_label)
-        .collect()
+        .collect();
+    values.extend_from_slice(crate::integration::EXPERIMENTAL_INTEGRATION_TARGET_LABELS);
+    values
 }
 
 fn id_command(name: &'static str, id: &'static str, about: &'static str) -> Command {
@@ -1071,7 +1085,7 @@ mod tests {
                 args.push(flag.to_string());
                 let mut output = Vec::new();
                 assert!(
-                    super::write_requested_help(&args, &mut output).unwrap(),
+                    super::write_requested_help(&args, &mut output, || {}).unwrap(),
                     "help was not handled for herdr {} {flag}",
                     path.join(" ")
                 );
@@ -1109,6 +1123,15 @@ mod tests {
     fn spec_matches_all_integration_targets() {
         let cmd = super::command();
         let install = command_path(&cmd, &["integration", "install"]);
+        let mut expected: Vec<String> = crate::api::schema::IntegrationTarget::ALL
+            .map(crate::integration::integration_target_label)
+            .map(str::to_string)
+            .to_vec();
+        expected.extend(
+            crate::integration::EXPERIMENTAL_INTEGRATION_TARGET_LABELS
+                .iter()
+                .map(|label| (*label).to_string()),
+        );
         assert_eq!(
             argument(install, "target")
                 .get_value_parser()
@@ -1116,9 +1139,7 @@ mod tests {
                 .unwrap()
                 .map(|value| value.get_name().to_string())
                 .collect::<Vec<_>>(),
-            crate::api::schema::IntegrationTarget::ALL
-                .map(crate::integration::integration_target_label)
-                .map(str::to_string)
+            expected
         );
     }
 
@@ -1185,11 +1206,24 @@ mod tests {
                 "--help".to_string(),
             ],
             &mut help,
+            || {},
         )
         .unwrap();
         assert!(String::from_utf8(help)
             .unwrap()
             .contains("Usage: herdr agent rename <TARGET> <NAME>|--clear"));
+    }
+
+    #[test]
+    fn worktree_json_compatibility_flag_stays_out_of_public_spec() {
+        let cmd = super::command();
+        for subcommand in ["list", "create", "open", "remove"] {
+            let worktree_command = command_path(&cmd, &["worktree", subcommand]);
+            assert!(
+                !has_option(worktree_command, "json"),
+                "herdr worktree {subcommand} should not advertise --json"
+            );
+        }
     }
 
     #[test]
@@ -1280,11 +1314,28 @@ mod tests {
         args.push("--help".to_string());
         let mut output = Vec::new();
         assert!(
-            super::write_requested_help(&args, &mut output).unwrap(),
+            super::write_requested_help(&args, &mut output, || {}).unwrap(),
             "help was not handled for herdr {}",
             path.join(" ")
         );
         String::from_utf8(output).unwrap()
+    }
+
+    #[test]
+    fn agent_resources_appear_on_command_groups_but_not_leaf_commands() {
+        for group in ["agent", "pane", "workspace", "terminal"] {
+            let help = long_help(&[group]);
+            assert!(
+                help.contains(super::super::AGENT_HELP_FOOTER),
+                "herdr {group} is missing agent resources: {help}"
+            );
+        }
+
+        let leaf = long_help(&["agent", "wait"]);
+        assert!(
+            !leaf.contains(super::super::AGENT_HELP_FOOTER),
+            "leaf help should stay focused: {leaf}"
+        );
     }
 
     #[test]

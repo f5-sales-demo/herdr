@@ -11,21 +11,28 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-DEFAULT_LIVE_MANIFEST_URL = "https://herdr.dev/latest.json"
+DEFAULT_LIVE_MANIFEST_URL = (
+    "https://raw.githubusercontent.com/f5-sales-demo/herdr/build-xcsh/distribution/latest.json"
+)
 
 SECTION_RE = re.compile(r"^##\s+(?:\[(?P<bracketed>[^\]]+)\]|(?P<plain>.+?))\s*$", re.MULTILINE)
 VERSION_WITH_DATE_RE = re.compile(r"^(?P<version>.+?)\s+-\s+\d{4}-\d{2}-\d{2}$")
-DEFAULT_RELEASE_REPO = "ogulcancelik/herdr"
-DEFAULT_LATEST_JSON_PATH = Path("website/latest.json")
+DEFAULT_RELEASE_REPO = "f5-sales-demo/herdr"
+DEFAULT_LATEST_JSON_PATH = Path("distribution/latest.json")
 DEFAULT_PRODUCT_ANNOUNCEMENT_PATH = Path("docs/next/product-announcement.json")
 PROTOCOL_SOURCE_PATH = Path("src/protocol/wire.rs")
-ASSET_TARGETS = (
+ENDPOINT_PROTOCOL_SOURCE_PATH = Path("src/protocol/endpoint.rs")
+CORE_ASSET_TARGETS = (
     "linux-x86_64",
     "linux-aarch64",
     "macos-x86_64",
     "macos-aarch64",
 )
-EXPECTED_ASSET_NAMES = {target: f"herdr-{target}" for target in ASSET_TARGETS}
+ASSET_TARGETS = (*CORE_ASSET_TARGETS, "windows-x86_64")
+EXPECTED_ASSET_NAMES = {
+    **{target: f"herdr-{target}" for target in CORE_ASSET_TARGETS},
+    "windows-x86_64": "herdr-windows-x86_64.zip",
+}
 
 
 @dataclass(frozen=True)
@@ -134,6 +141,18 @@ def read_protocol_version(source_path: Path = PROTOCOL_SOURCE_PATH) -> int:
     return int(match.group(1))
 
 
+def read_endpoint_protocol_generation(
+    source_path: Path = ENDPOINT_PROTOCOL_SOURCE_PATH,
+) -> int:
+    content = source_path.read_text(encoding="utf-8")
+    match = re.search(r"pub const ENDPOINT_PROTOCOL_GENERATION: u32 = (\d+);", content)
+    if not match:
+        raise ChangelogError(
+            f"could not read ENDPOINT_PROTOCOL_GENERATION from {source_path}"
+        )
+    return int(match.group(1))
+
+
 def normalize_announcement(value: Any, label: str) -> dict[str, str] | None:
     if value is None:
         return None
@@ -169,16 +188,22 @@ def infer_protocol_from_notes(notes: str) -> int | None:
     return int(match.group(1))
 
 
-def normalize_assets(value: Any, label: str) -> dict[str, str]:
+def normalize_assets(
+    value: Any,
+    label: str,
+    required_targets: tuple[str, ...] = ASSET_TARGETS,
+) -> dict[str, str]:
     if not isinstance(value, dict):
         raise ChangelogError(f"{label} must be an object")
 
-    missing_targets = [target for target in ASSET_TARGETS if target not in value]
+    missing_targets = [target for target in required_targets if target not in value]
     if missing_targets:
         raise ChangelogError(f"{label} is missing asset URL for {', '.join(missing_targets)}")
 
     normalized_assets: dict[str, str] = {}
     for target in ASSET_TARGETS:
+        if target not in value:
+            continue
         url = value.get(target)
         if not isinstance(url, str) or not url.strip():
             raise ChangelogError(f"{label} is missing asset URL for {target}")
@@ -186,11 +211,43 @@ def normalize_assets(value: Any, label: str) -> dict[str, str]:
     return normalized_assets
 
 
+def normalize_sha256(
+    value: Any,
+    label: str,
+    required_targets: tuple[str, ...] = ASSET_TARGETS,
+) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise ChangelogError(f"{label} must be an object")
+
+    missing_targets = [target for target in required_targets if target not in value]
+    if missing_targets:
+        raise ChangelogError(f"{label} has invalid SHA-256 for {missing_targets[0]}")
+
+    checksums: dict[str, str] = {}
+    for target in ASSET_TARGETS:
+        if target not in value:
+            continue
+        checksum = value.get(target)
+        if not isinstance(checksum, str) or re.fullmatch(
+            r"[0-9a-fA-F]{64}", checksum.strip()
+        ) is None:
+            raise ChangelogError(f"{label} has invalid SHA-256 for {target}")
+        checksums[target] = checksum.strip().lower()
+    return checksums
+
+
 def normalize_release_metadata(value: Any, label: str, version: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ChangelogError(f"{label} must be an object")
 
-    allowed_keys = {"notes", "announcement", "assets", "protocol"}
+    allowed_keys = {
+        "notes",
+        "announcement",
+        "assets",
+        "sha256",
+        "protocol",
+        "endpoint_generation",
+    }
     extra_keys = sorted(set(value) - allowed_keys)
     if extra_keys:
         raise ChangelogError(f"{label} has unsupported field(s): {', '.join(extra_keys)}")
@@ -209,10 +266,25 @@ def normalize_release_metadata(value: Any, label: str, version: str) -> dict[str
         inferred_protocol = infer_protocol_from_notes(notes)
         if inferred_protocol is not None:
             metadata["protocol"] = inferred_protocol
+    endpoint_generation = value.get("endpoint_generation")
+    if endpoint_generation is not None:
+        if not isinstance(endpoint_generation, int):
+            raise ChangelogError(f"{label}.endpoint_generation must be an integer")
+        metadata["endpoint_generation"] = endpoint_generation
     if "assets" in value:
-        metadata["assets"] = normalize_assets(value.get("assets"), f"{label}.assets")
+        metadata["assets"] = normalize_assets(
+            value.get("assets"),
+            f"{label}.assets",
+            required_targets=CORE_ASSET_TARGETS,
+        )
     else:
         metadata["assets"] = default_release_assets(version)
+    if "sha256" in value:
+        metadata["sha256"] = normalize_sha256(
+            value.get("sha256"),
+            f"{label}.sha256",
+            required_targets=CORE_ASSET_TARGETS,
+        )
     announcement = normalize_announcement(value.get("announcement"), label)
     if announcement is not None:
         metadata["announcement"] = announcement
@@ -243,6 +315,7 @@ def build_latest_json(
     version: str,
     notes: str,
     assets: dict[str, str],
+    sha256: dict[str, str],
     protocol: int | None = None,
     announcement: dict[str, str] | None = None,
     releases: dict[str, Any] | None = None,
@@ -256,13 +329,17 @@ def build_latest_json(
         protocol = read_protocol_version()
 
     ordered_assets = normalize_assets(assets, "assets")
+    ordered_sha256 = normalize_sha256(sha256, "sha256")
     normalized_announcement = normalize_announcement(announcement, "root")
     archived_releases = normalize_releases(releases)
+    endpoint_generation = read_endpoint_protocol_generation()
     current_metadata: dict[str, Any] = {
         "notes": normalized_notes,
         "protocol": protocol,
+        "endpoint_generation": endpoint_generation,
         "assets": ordered_assets,
     }
+    current_metadata["sha256"] = ordered_sha256
     if normalized_announcement is not None:
         current_metadata["announcement"] = normalized_announcement
     archived_releases[normalized_version] = current_metadata
@@ -274,9 +351,11 @@ def build_latest_json(
     manifest: dict[str, Any] = {
         "version": normalized_version,
         "protocol": protocol,
+        "endpoint_generation": endpoint_generation,
         "notes": normalized_notes,
         "assets": ordered_assets,
     }
+    manifest["sha256"] = ordered_sha256
     if normalized_announcement is not None:
         manifest["announcement"] = normalized_announcement
     manifest["releases"] = archived_releases
@@ -285,16 +364,27 @@ def build_latest_json(
 
 
 def default_release_assets(version: str, repo: str = DEFAULT_RELEASE_REPO) -> dict[str, str]:
+    """Return legacy release URLs for versions published before Windows stable assets."""
     normalized_version = normalize_version(version)
     tag = f"v{normalized_version}"
     return {
         target: f"https://github.com/{repo}/releases/download/{tag}/{EXPECTED_ASSET_NAMES[target]}"
-        for target in ASSET_TARGETS
+        for target in CORE_ASSET_TARGETS
+    }
+
+
+def latest_release_assets(repo: str = DEFAULT_RELEASE_REPO) -> dict[str, str]:
+    return {
+        target: f"https://github.com/{repo}/releases/latest/download/{asset_name}"
+        for target, asset_name in EXPECTED_ASSET_NAMES.items()
     }
 
 
 def manifest_from_release_payload(
-    payload: dict[str, Any], version: str, protocol: int | None = None
+    payload: dict[str, Any],
+    version: str,
+    protocol: int | None = None,
+    repo: str = DEFAULT_RELEASE_REPO,
 ) -> dict[str, Any]:
     normalized_version = normalize_version(version)
     tag_name = str(payload.get("tagName") or "")
@@ -322,21 +412,35 @@ def manifest_from_release_payload(
             if isinstance(name, str) and name not in release_assets:
                 release_assets[name] = asset
 
+    missing_assets = [name for name in EXPECTED_ASSET_NAMES.values() if name not in release_assets]
+    if missing_assets:
+        raise ChangelogError(
+            f"GitHub release v{normalized_version} is missing asset {missing_assets[0]}"
+        )
+
     manifest_assets: dict[str, str] = {}
+    manifest_sha256: dict[str, str] = {}
     for target, asset_name in EXPECTED_ASSET_NAMES.items():
         asset = release_assets.get(asset_name)
         if not isinstance(asset, dict):
             raise ChangelogError(f"GitHub release v{normalized_version} is missing asset {asset_name}")
-        url = str(asset.get("url") or "").strip()
-        if not url:
+        published_url = str(asset.get("url") or "").strip()
+        if not published_url:
             raise ChangelogError(f"GitHub release asset {asset_name} is missing a download URL")
-        manifest_assets[target] = url
+        digest = str(asset.get("digest") or "").strip()
+        digest_match = re.fullmatch(r"sha256:([0-9a-fA-F]{64})", digest)
+        if digest_match is None:
+            raise ChangelogError(f"GitHub release asset {asset_name} is missing a SHA-256 digest")
+        manifest_assets[target] = latest_release_assets(repo)[target]
+        manifest_sha256[target] = digest_match.group(1).lower()
 
     return {
         "version": normalized_version,
         "protocol": protocol if protocol is not None else read_protocol_version(),
+        "endpoint_generation": read_endpoint_protocol_generation(),
         "notes": notes,
         "assets": manifest_assets,
+        "sha256": manifest_sha256,
     }
 
 
@@ -352,19 +456,27 @@ def canonicalize_manifest(manifest: dict[str, Any], label: str) -> dict[str, Any
     protocol = manifest.get("protocol")
     if not isinstance(protocol, int):
         raise ChangelogError(f"{label} is missing an integer protocol")
+    endpoint_generation = manifest.get("endpoint_generation")
+    if endpoint_generation is not None and not isinstance(endpoint_generation, int):
+        raise ChangelogError(f"{label} endpoint_generation must be an integer")
 
     assets = manifest.get("assets")
     if not isinstance(assets, dict):
         raise ChangelogError(f"{label} is missing an assets object")
 
     normalized_assets = normalize_assets(assets, f"{label} assets")
+    normalized_sha256 = normalize_sha256(manifest.get("sha256"), f"{label} sha256")
 
-    return {
+    canonical = {
         "version": normalize_version(version),
         "protocol": protocol,
         "notes": notes.strip(),
         "assets": normalized_assets,
+        "sha256": normalized_sha256,
     }
+    if endpoint_generation is not None:
+        canonical["endpoint_generation"] = endpoint_generation
+    return canonical
 
 
 def ensure_manifest_matches_expected(
@@ -390,6 +502,10 @@ def ensure_current_release_assets_are_mirrored(manifest: dict[str, Any], label: 
     if metadata.get("assets") != canonical["assets"]:
         raise ChangelogError(
             f"{label} releases.{canonical['version']}.assets must match top-level assets"
+        )
+    if metadata.get("sha256") != canonical["sha256"]:
+        raise ChangelogError(
+            f"{label} releases.{canonical['version']}.sha256 must match top-level sha256"
         )
 
 
@@ -426,11 +542,25 @@ def archived_releases_from_current_manifest(manifest: dict[str, Any]) -> dict[st
         protocol = manifest.get("protocol")
         if isinstance(protocol, int):
             metadata["protocol"] = protocol
+        endpoint_generation = manifest.get("endpoint_generation")
+        if isinstance(endpoint_generation, int):
+            metadata["endpoint_generation"] = endpoint_generation
         assets = manifest.get("assets")
         if isinstance(assets, dict):
-            metadata["assets"] = normalize_assets(assets, "current root assets")
+            metadata["assets"] = normalize_assets(
+                assets,
+                "current root assets",
+                required_targets=CORE_ASSET_TARGETS,
+            )
         else:
             metadata["assets"] = default_release_assets(normalized_version)
+        sha256 = manifest.get("sha256")
+        if isinstance(sha256, dict):
+            metadata["sha256"] = normalize_sha256(
+                sha256,
+                "current root sha256",
+                required_targets=CORE_ASSET_TARGETS,
+            )
         announcement = normalize_announcement(manifest.get("announcement"), "current root")
         if announcement is not None:
             metadata["announcement"] = announcement
@@ -539,11 +669,11 @@ def verify_asset_urls_resolve(assets: dict[str, str], label: str) -> None:
 def ensure_manifest_is_outdated(current_manifest: dict[str, Any], version: str) -> None:
     current_version = current_manifest.get("version")
     if not isinstance(current_version, str):
-        raise ChangelogError("website/latest.json is missing a string version")
+        raise ChangelogError("distribution/latest.json is missing a string version")
 
     if parse_version(current_version) >= parse_version(version):
         raise ChangelogError(
-            f"website/latest.json is already at v{normalize_version(current_version)}; expected something older than v{normalize_version(version)}"
+            f"distribution/latest.json is already at v{normalize_version(current_version)}; expected something older than v{normalize_version(version)}"
         )
 
 
@@ -585,13 +715,16 @@ def cmd_sync_latest_json(args: argparse.Namespace) -> int:
     ensure_manifest_is_outdated(current_manifest, version)
 
     release_payload = fetch_release_payload(version, args.repo)
-    new_manifest = manifest_from_release_payload(release_payload, version, args.protocol)
+    new_manifest = manifest_from_release_payload(
+        release_payload, version, args.protocol, repo=args.repo
+    )
     announcement_path = Path(args.announcement)
     announcement = load_product_announcement(announcement_path)
     output = build_latest_json(
         version,
         str(new_manifest["notes"]),
         dict(new_manifest["assets"]),
+        sha256=dict(new_manifest["sha256"]),
         protocol=int(new_manifest["protocol"]),
         announcement=announcement,
         releases=archived_releases_from_current_manifest(current_manifest),
@@ -615,7 +748,7 @@ def cmd_sync_latest_json(args: argparse.Namespace) -> int:
     print("next:")
     print(f"  git diff -- {manifest_path}")
     print(f"  git add {manifest_path}")
-    print(f"  git commit -m \"docs: update website manifest for v{version}\"")
+    print(f"  git commit -m \"docs: publish release distribution for v{version}\"")
     print("  git push")
     return 0
 
@@ -682,7 +815,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sync_latest_json = subparsers.add_parser(
         "sync-latest-json",
-        help="Update website/latest.json from a published GitHub release",
+        help="Update distribution/latest.json from a published GitHub release",
     )
     sync_latest_json.add_argument("--version", required=True)
     sync_latest_json.add_argument("--repo", default=DEFAULT_RELEASE_REPO)

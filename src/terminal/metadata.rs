@@ -54,14 +54,6 @@ impl EffectivePresentation {
 }
 
 impl TerminalState {
-    pub(super) fn clear_state_labels_from_source(&mut self, source: &str) {
-        let Some(metadata) = self.agent_metadata.get_mut(source) else {
-            return;
-        };
-        metadata.state_labels.clear();
-        metadata.state_label_reported_at.clear();
-    }
-
     pub(crate) fn metadata_report_sequence_is_fresh(&self, source: &str, seq: Option<u64>) -> bool {
         crate::metadata_tokens::sequence_is_fresh(&self.metadata_report_sequences, source, seq)
     }
@@ -298,7 +290,6 @@ impl TerminalState {
             effective_state_change,
             session_ref_changed: false,
             agent_released: false,
-            ..Default::default()
         })
     }
     pub fn effective_title(&self) -> Option<String> {
@@ -382,7 +373,6 @@ impl TerminalState {
             ),
             session_ref_changed: false,
             agent_released: false,
-            ..Default::default()
         })
     }
 
@@ -871,7 +861,9 @@ mod tests {
             clear_title: false,
             clear_display_agent: false,
             clear_state_labels: false,
-            ttl: Some(Duration::from_millis(1)),
+            // Expiry is forced with the captured deadline below; keep the
+            // no-extension assertion independent of wall-clock scheduling.
+            ttl: Some(Duration::from_secs(60)),
             seq: None,
         });
         let old_deadline = terminal.next_agent_metadata_expiry().unwrap();
@@ -891,11 +883,12 @@ mod tests {
         });
 
         assert_eq!(terminal.next_agent_metadata_expiry(), Some(old_deadline));
-        assert_eq!(
-            terminal.effective_presentation().title.as_deref(),
-            Some("Prompt title")
+        let presentation = terminal.effective_presentation_for_state_at(
+            terminal.state,
+            old_deadline - Duration::from_millis(1),
         );
-        assert_eq!(terminal.effective_presentation().display_agent, None);
+        assert_eq!(presentation.title.as_deref(), Some("Prompt title"));
+        assert_eq!(presentation.display_agent, None);
 
         let mutation = terminal
             .expire_agent_metadata_at(old_deadline, old_deadline)

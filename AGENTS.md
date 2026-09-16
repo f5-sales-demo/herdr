@@ -126,8 +126,8 @@ Before validating a fix on Windows, sync or apply the Linux worktree changes
 into `C:\work\repo`, then run the needed Windows build or test commands there.
 Reuse the shared Rust caches under `C:\Users\herdr\.cargo` and
 `C:\Users\herdr\.rustup`. Do not use WSL on the VM. The VM may have a newer
-Zig on `PATH`; Herdr currently requires Zig 0.15.2, so set
-`$env:ZIG = "C:\Users\herdr\zig-0.15.2\zig.exe"` before running Cargo commands
+Zig on `PATH`; Herdr currently requires Zig 0.16.0, so set
+`$env:ZIG = "C:\Users\herdr\zig-0.16.0\zig.exe"` before running Cargo commands
 that build the vendored libghostty-vt.
 
 After validation, leave `C:\work\repo` clean. Remove temporary files and delete
@@ -188,7 +188,7 @@ Do not use GitHub closing keywords like `fixes #<issue-number>`, `closes #<issue
 - Rust: no `unwrap()` in production code. Use `tracing` for logging. Use `#[allow]` only with a comment explaining why.
 - Rust platform-specific code must be compile-gated. Put OS APIs and substantial OS behavior in `src/platform/`; when platform checks are needed elsewhere, use `#[cfg(windows)]`, `#[cfg(unix)]`, or target-specific `#[cfg(...)]` on imports, fields, functions, impls, and match arms so Windows-only code does not compile into Unix builds and Unix-only code does not compile into Windows builds. Use `cfg!(...)` only for pure cross-platform policy constants whose branches both compile on every target.
 - Don't add dependencies without a reason. Check whether existing dependencies cover the need first.
-- Integration asset versions (`HERDR_INTEGRATION_VERSION` markers and matching `*_INTEGRATION_VERSION` constants) are migration versions relative to the latest released tag, not per-commit counters on `master`. If an integration asset changes multiple times between releases, bump it once from the version in the latest release.
+- Integration asset versions (`HERDR_INTEGRATION_VERSION` markers and matching `*_INTEGRATION_VERSION` constants) are migration versions relative to the latest released tag, not per-commit counters on `build-xcsh`. If an integration asset changes multiple times between releases, bump it once from the version in the latest release.
 - When changing the server/client wire protocol, compare `src/protocol/wire.rs::PROTOCOL_VERSION` against the latest released tag. Bump it only if the current source protocol is not already greater than the latest released protocol. Update hardcoded protocol expectations and manual protocol fixtures in tests.
 
 ## Release Channels
@@ -197,25 +197,9 @@ This section is for verified `f5-sales-demo/herdr` fork maintainers. Release
 commands, tags, assets, and channels may be managed through the approved
 Ubuntu jumpbox after the required checks and credential gates pass.
 
-Herdr has one main branch and two update channels. Stable and preview both build from `master`; there is no long-lived preview branch.
+The maintained fork releases stable builds from `build-xcsh`. Preview self-update is disabled until fork-owned preview infrastructure exists.
 
-Normal users default to stable. Stable docs are `/docs/`, stable updates use `website/latest.json`, and Homebrew/Nix stay stable-only.
-
-Preview is opt-in for direct Herdr installs:
-
-```bash
-herdr channel set preview
-herdr update
-```
-
-Switch back with:
-
-```bash
-herdr channel set stable
-herdr update
-```
-
-Preview releases are GitHub prereleases produced by `.github/workflows/preview.yml` on manual dispatch and the Wednesday/Friday schedule. The workflow updates `website/preview.json`, which the website build publishes as `/preview.json`. Do not hand-edit `website/preview.json`; fix the workflow or `scripts/preview.py` and rerun Preview.
+Normal users use stable. Stable updates must resolve only through fork-owned manifests and immutable assets under `f5-sales-demo/herdr`; updater and installer code must never fall back to `herdr.dev` or the upstream release namespace.
 
 Stable releases use:
 

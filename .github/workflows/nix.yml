@@ -12,9 +12,10 @@ on:
       - "flake.lock"
       - "flake.nix"
       - "nix/**"
+      - "skills/**"
       - "vendor/**"
   push:
-    branches: [master]
+    branches: [build-xcsh]
     paths:
       - ".github/workflows/nix.yml"
       - "assets/**"
@@ -24,6 +25,7 @@ on:
       - "flake.lock"
       - "flake.nix"
       - "nix/**"
+      - "skills/**"
       - "vendor/**"
 
 permissions:
