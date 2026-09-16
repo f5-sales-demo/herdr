@@ -1708,6 +1708,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stalled_observer_timeout_releases_writer_and_reader() {
+        use std::os::fd::AsRawFd as _;
+
         let (mut client, server, _path) = local_stream_pair("stalled-observer");
         let writer_stream = server.try_clone().expect("clone writer stream");
         let (writer, queue) = test_queue_writer();
@@ -1763,6 +1765,20 @@ mod tests {
         writer_stream
             .set_send_timeout(Some(Duration::from_millis(200)))
             .unwrap();
+        let LocalStream::UdSocket(socket) = &writer_stream;
+        let send_buffer_bytes: libc::c_int = 16 * 1024;
+        // SAFETY: the descriptor is live for this call and the option value
+        // points to a correctly sized `c_int`.
+        let configured = unsafe {
+            libc::setsockopt(
+                socket.inner().as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                std::ptr::from_ref(&send_buffer_bytes).cast(),
+                std::mem::size_of_val(&send_buffer_bytes) as libc::socklen_t,
+            )
+        };
+        assert_eq!(configured, 0, "set bounded observer send buffer");
         let (writer_done_tx, writer_done) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             client_writer_loop(writer_stream, 14, queue, events);
