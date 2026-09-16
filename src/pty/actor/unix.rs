@@ -1156,24 +1156,56 @@ mod tests {
     }
 
     #[test]
-    fn actor_delays_enter_from_completed_prompt_write() {
+    fn submission_delay_starts_when_prompt_write_completes() {
+        let (mut runner, _peer) = actor_runner_for_unit_test();
+        let (reply, _completion) = std_mpsc::channel();
+        let delay = Duration::from_millis(200);
+        runner.active_submission = Some(ActiveSubmission {
+            enter: Bytes::from_static(b"\r"),
+            delay,
+            phase: SubmissionPhase::WritingText,
+            reply,
+        });
+        runner.enqueue_submission_write(Bytes::from_static(b"prompt"), SubmissionBoundary::Text);
+
+        let before_completion = Instant::now();
+        let boundary = runner
+            .flush_pending_writes_once()
+            .expect("prompt write succeeds")
+            .expect("prompt boundary completes");
+        runner.complete_submission_boundary(boundary);
+        let after_completion = Instant::now();
+
+        let Some(ActiveSubmission {
+            phase: SubmissionPhase::WaitingUntil(deadline),
+            ..
+        }) = runner.active_submission.as_ref()
+        else {
+            panic!("submission waits after prompt completion");
+        };
+        assert!(*deadline >= before_completion + delay);
+        assert!(*deadline <= after_completion + delay);
+        runner.schedule_submission_enter();
+        assert!(runner.pending_writes.is_empty());
+    }
+
+    #[test]
+    fn actor_serializes_submission_before_queued_user_input() {
         let (handle, mut peer, _read_rx) = actor_with_socket_pair(false);
         let text = Bytes::from(vec![b'x'; 4 * 1024 * 1024]);
         let text_len = text.len();
-        let delay = Duration::from_millis(200);
+        let delay = Duration::from_millis(20);
         let reader = std::thread::spawn(move || {
             std::thread::sleep(delay);
             let mut received = vec![0; text_len];
             peer.read_exact(&mut received)
                 .expect("peer receives prompt");
-            let prompt_completed = Instant::now();
             let mut enter = [0; 1];
             peer.read_exact(&mut enter).expect("peer receives enter");
-            let enter_received = Instant::now();
             let mut user = [0; 4];
             peer.read_exact(&mut user)
                 .expect("peer receives queued input");
-            (prompt_completed, enter_received, enter, user)
+            (enter, user)
         });
 
         let completion = handle
@@ -1186,11 +1218,10 @@ mod tests {
             .recv()
             .expect("actor reports submission")
             .expect("submission completes");
-        let (prompt_completed, enter_received, enter, user) = reader.join().expect("reader joins");
+        let (enter, user) = reader.join().expect("reader joins");
 
         assert_eq!(enter, *b"\r");
         assert_eq!(user, *b"user");
-        assert!(enter_received.duration_since(prompt_completed) >= delay / 2);
 
         let err = match handle.queue_user_input_submission(
             Bytes::from_static(b"prompt"),
