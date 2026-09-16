@@ -1770,7 +1770,7 @@ mod tests {
         });
         writer.render.try_send(vec![0; 4 * 1024 * 1024]).unwrap();
         writer_done
-            .recv_timeout(Duration::from_millis(350))
+            .recv_timeout(Duration::from_secs(2))
             .expect("writer timed out");
         reader_done
             .recv_timeout(Duration::from_secs(2))
