@@ -1,20 +1,42 @@
 {
-  "version": "0.15.7",
-  "protocol": 23,
-  "notes": "### Fixed\n- Preserved legacy Developer ID PKCS#12 compatibility for signed macOS releases.\n- Added signed and notarized macOS installer packages.\n- Made the Windows ConPTY smoke test event-aware.",
+  "version": "0.16.0",
+  "protocol": 24,
+  "endpoint_generation": 1,
+  "notes": "## What's Changed\n* fix(release): isolate macOS signing keychains by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/71\n* test: make live handoff fixture process-owned by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/73\n* fix(release): align macOS signing keychain with xcsh by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/74\n* fix(release): isolate Installer signing keychain by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/75\n* fix(ci): align macos certificate import with xcsh by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/76\n* fix(ci): validate gatekeeper on macos packages by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/77\n* fix(ci): harden macos release validation by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/79\n* fix(release): keep architecture metadata after checkout by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/83\n* fix(homebrew): restore executable mode for raw assets by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/85\n* fix(release): revert unintended v0.15.9 bump by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/87\n* fix(release): separate recovery source and tooling by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/89\n* feat: merge current upstream Herdr by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/91\n* fix(ci): use workflow token for release issue updates by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/93\n\n\n**Full Changelog**: https://github.com/f5-sales-demo/herdr/compare/v0.15.7...v0.16.0",
   "assets": {
     "linux-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-x86_64",
     "linux-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-aarch64",
     "macos-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-macos-x86_64",
-    "macos-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-macos-aarch64"
+    "macos-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-macos-aarch64",
+    "windows-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-windows-x86_64.zip"
   },
   "sha256": {
-    "linux-x86_64": "f327d536f922e1b074f89577ee3946e6032619d839547fab02237ca39d802687",
-    "linux-aarch64": "c777cdfe03db3a9914d3706fcf7d3b42548aaddc0746bb04f93d316c5350b433",
-    "macos-x86_64": "900ac4bac1c66d252372449cae79b834b32f7cf7fcc173b2373b51434a3b3419",
-    "macos-aarch64": "89ce889fa1d6bf043e876c9979086a3cd98d470c83f7a33584dc84c70df0a744"
+    "linux-x86_64": "927dbff4c1aa1995f1ed43955ad12b454ea08f64860e47b2fe0319d1512ab3ad",
+    "linux-aarch64": "13c45a3b404e96cb05cf839cac63208191efc134a3e339490d88b3efa78fc443",
+    "macos-x86_64": "e46d3e92f730f59fd4a46050cf64e961f90f5e6b30d6b62deb2b030ba866ea87",
+    "macos-aarch64": "f21919e2f6456b8b1c1ed42add0f042559ac293405c07412615955db6ce42232",
+    "windows-x86_64": "28df459ce932a6596127f147ee47972dfecaaff4d518b688f72a1b87a728fc05"
   },
   "releases": {
+    "0.16.0": {
+      "notes": "## What's Changed\n* fix(release): isolate macOS signing keychains by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/71\n* test: make live handoff fixture process-owned by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/73\n* fix(release): align macOS signing keychain with xcsh by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/74\n* fix(release): isolate Installer signing keychain by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/75\n* fix(ci): align macos certificate import with xcsh by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/76\n* fix(ci): validate gatekeeper on macos packages by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/77\n* fix(ci): harden macos release validation by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/79\n* fix(release): keep architecture metadata after checkout by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/83\n* fix(homebrew): restore executable mode for raw assets by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/85\n* fix(release): revert unintended v0.15.9 bump by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/87\n* fix(release): separate recovery source and tooling by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/89\n* feat: merge current upstream Herdr by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/91\n* fix(ci): use workflow token for release issue updates by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/93\n\n\n**Full Changelog**: https://github.com/f5-sales-demo/herdr/compare/v0.15.7...v0.16.0",
+      "protocol": 24,
+      "endpoint_generation": 1,
+      "assets": {
+        "linux-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-x86_64",
+        "linux-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-aarch64",
+        "macos-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-macos-x86_64",
+        "macos-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-macos-aarch64",
+        "windows-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-windows-x86_64.zip"
+      },
+      "sha256": {
+        "linux-x86_64": "927dbff4c1aa1995f1ed43955ad12b454ea08f64860e47b2fe0319d1512ab3ad",
+        "linux-aarch64": "13c45a3b404e96cb05cf839cac63208191efc134a3e339490d88b3efa78fc443",
+        "macos-x86_64": "e46d3e92f730f59fd4a46050cf64e961f90f5e6b30d6b62deb2b030ba866ea87",
+        "macos-aarch64": "f21919e2f6456b8b1c1ed42add0f042559ac293405c07412615955db6ce42232",
+        "windows-x86_64": "28df459ce932a6596127f147ee47972dfecaaff4d518b688f72a1b87a728fc05"
+      }
+    },
     "0.15.7": {
       "notes": "### Fixed\n- Preserved legacy Developer ID PKCS#12 compatibility for signed macOS releases.\n- Added signed and notarized macOS installer packages.\n- Made the Windows ConPTY smoke test event-aware.",
       "protocol": 23,
