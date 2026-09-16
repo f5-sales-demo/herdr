@@ -1683,23 +1683,27 @@ mod tests {
     fn observer_write_timeout_resets_when_sending_makes_progress() {
         use std::io::Read as _;
 
+        const PAYLOAD_BYTES: usize = 1024 * 1024;
+        const PROGRESS_TIMEOUT: Duration = Duration::from_secs(1);
+
         let (mut client, mut server, _path) = local_stream_pair("slow-observer");
-        server
-            .set_send_timeout(Some(Duration::from_millis(100)))
-            .unwrap();
+        server.set_send_timeout(Some(PROGRESS_TIMEOUT)).unwrap();
         server.set_nonblocking(true).unwrap();
         let worker = std::thread::spawn(move || {
-            assert!(write_framed_bytes(&mut server, &vec![b'x'; 1024 * 1024]));
+            assert!(write_framed_bytes(&mut server, &vec![b'x'; PAYLOAD_BYTES]));
         });
         client
-            .set_recv_timeout(Some(Duration::from_secs(3)))
+            .set_recv_timeout(Some(Duration::from_secs(10)))
             .unwrap();
         let mut received = 0;
-        let mut buffer = [0; 16 * 1024];
-        while received < 1024 * 1024 {
+        let mut buffer = [0; 4 * 1024];
+        while received < PAYLOAD_BYTES {
             let count = client.read(&mut buffer).unwrap();
             assert_ne!(count, 0, "observer disconnected while making progress");
             received += count;
+            // At most 4 KiB is consumed per iteration, so this transfer takes
+            // well over PROGRESS_TIMEOUT while every progress interval has
+            // enough scheduling slack for a loaded hosted runner.
             std::thread::sleep(Duration::from_millis(5));
         }
         worker.join().unwrap();
