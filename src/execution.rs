@@ -1549,13 +1549,16 @@ fn redact(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn test_cwd() -> String {
+        std::env::temp_dir().to_string_lossy().into_owned()
+    }
     fn temp(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("herdr-execution-{name}-{}", std::process::id()))
     }
     fn params(id: &str) -> ExecutionStartParams {
         ExecutionStartParams {
             execution_id: id.into(),
-            cwd: "/tmp".into(),
+            cwd: test_cwd(),
             workspace_id: None,
             label: None,
             command: ExecutionCommand::Argv {
@@ -1587,7 +1590,7 @@ mod tests {
                 lifecycle_mode: crate::api::schema::NativeLifecycleMode::ManagedTurnV1,
             },
             text: "continue the task".into(),
-            cwd: "/tmp".into(),
+            cwd: test_cwd(),
             workspace_id: None,
             label: None,
         }

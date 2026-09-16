@@ -554,7 +554,7 @@ mod tests {
                 generation: 1,
                 native_launch: launch,
                 text: "continue".into(),
-                cwd: "/tmp".into(),
+                cwd: root.to_string_lossy().into_owned(),
                 workspace_id: None,
                 label: None,
             })
