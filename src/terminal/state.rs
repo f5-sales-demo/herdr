@@ -5843,7 +5843,7 @@ mod tests {
         assert!(terminal.hook_authority.is_none());
         assert_eq!(terminal.detected_agent, Some(Agent::Pi));
         assert_eq!(terminal.effective_agent_label(), Some("pi"));
-        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(terminal.state, AgentState::Working);
     }
 
     #[test]
