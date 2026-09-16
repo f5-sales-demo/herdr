@@ -12,7 +12,7 @@ impl App {
         id: String,
         params: ExecutionResumeParams,
     ) -> String {
-        let manager = crate::execution::ExecutionManager::global();
+        let manager = self.runtime_state.executions.clone();
         let (claimed, admitted, previous) = match manager.admit_xcsh_resume(&params) {
             Ok(result) => result,
             Err(error) => {
@@ -38,7 +38,7 @@ impl App {
                 id,
                 &claimed.execution_id,
                 "execution_binding_missing",
-                "native execution is missing its durable XCSH executable binding",
+                "native execution is missing its durable xcsh executable binding",
             );
         };
         match crate::execution::verify_xcsh_executable_binding(expected_executable) {
@@ -48,7 +48,7 @@ impl App {
                     id,
                     &claimed.execution_id,
                     "execution_binding_changed",
-                    "XCSH executable changed after native execution admission",
+                    "xcsh executable changed after native execution admission",
                 )
             }
             Err(error) => {
@@ -65,7 +65,7 @@ impl App {
                 id,
                 &claimed.execution_id,
                 "execution_binding_missing",
-                "native execution is missing its durable XCSH launch binding",
+                "native execution is missing its durable xcsh launch binding",
             );
         };
         if let Err(error) = crate::execution::measure_xcsh_session_header(native_launch) {
@@ -138,6 +138,8 @@ impl App {
                     env,
                     self.state.pane_scrollback_limit_bytes,
                     self.state.host_terminal_theme,
+                    self.state.host_terminal_appearance,
+                    Some(manager.clone()),
                 )
             });
         let (tab_idx, terminal, runtime) = match result {
@@ -196,7 +198,7 @@ impl App {
         id: String,
         params: ExecutionStartParams,
     ) -> String {
-        let manager = crate::execution::ExecutionManager::global();
+        let manager = self.runtime_state.executions.clone();
         let (existing, admitted) = match manager.admit_visible(&params) {
             Ok(result) => result,
             Err(error) => {
@@ -265,6 +267,8 @@ impl App {
                     vec![("HERDR_EXECUTION_ID".into(), params.execution_id.clone())],
                     self.state.pane_scrollback_limit_bytes,
                     self.state.host_terminal_theme,
+                    self.state.host_terminal_appearance,
+                    Some(manager.clone()),
                 )
             });
         let (tab_idx, terminal, runtime) = match result {
@@ -320,12 +324,14 @@ impl App {
         code: &str,
         message: &str,
     ) -> String {
-        crate::execution::ExecutionManager::global().mark_start_failed(execution_id, message);
+        self.runtime_state
+            .executions
+            .mark_start_failed(execution_id, message);
         encode_error(id, code, message)
     }
 
     pub(super) fn handle_execution_cancel(&mut self, id: String, execution_id: String) -> String {
-        let manager = crate::execution::ExecutionManager::global();
+        let manager = self.runtime_state.executions.clone();
         let native = manager
             .get(&execution_id)
             .is_some_and(|record| record.native_launch.is_some());

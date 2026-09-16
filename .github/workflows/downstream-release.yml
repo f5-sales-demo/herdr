@@ -192,26 +192,9 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install Zig
-        if: runner.os != 'macOS'
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2
         with:
-          version: 0.15.2
-
-      - name: Restore Homebrew Zig cache
-        if: runner.os == 'macOS'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ~/Library/Caches/Homebrew/downloads
-          key: homebrew-zig-0.15-${{ runner.os }}-${{ runner.arch }}
-          restore-keys: |
-            homebrew-zig-0.15-${{ runner.os }}-
-
-      - name: Install patched Zig on macOS
-        if: runner.os == 'macOS'
-        run: |
-          HOMEBREW_NO_AUTO_UPDATE=1 brew install zig@0.15
-          echo "$(brew --prefix zig@0.15)/bin" >> "$GITHUB_PATH"
-          "$(brew --prefix zig@0.15)/bin/zig" version
+          version: 0.16.0
 
       - name: Install Linux build tools
         if: runner.os == 'Linux'
@@ -488,8 +471,76 @@ jobs:
           name: control-manager-release
           path: control-manager-release/
 
+  windows-package:
+    needs: prepare
+    if: needs.prepare.outputs.release == 'true'
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install Zig
+        uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2
+        with:
+          version: 0.16.0
+
+      - name: Build and verify official ConPTY package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo build --release --locked --target x86_64-pc-windows-msvc
+          $package = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY.nupkg"
+          $stage = Join-Path $env:RUNNER_TEMP "herdr-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          .\scripts\package_windows_conpty.ps1 `
+            -HerdrExe target\x86_64-pc-windows-msvc\release\herdr.exe `
+            -PackagePath $package `
+            -StageDir $stage `
+            -OutputPath artifacts\herdr-windows-x86_64.zip
+          "HERDR_CONPTY_PACKAGE_DIR=$stage" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Probe bundled ConPTY and installed-artifact recovery
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = Join-Path $env:HERDR_CONPTY_PACKAGE_DIR "herdr.exe"
+          $consoleHost = Join-Path $env:HERDR_CONPTY_PACKAGE_DIR "conpty\x64\OpenConsole.exe"
+          .\scripts\windows_conpty_enhanced_input_probe.ps1 `
+            -ExePath $exe `
+            -Session "release-conpty-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" `
+            -ExpectedConsoleHostPath $consoleHost
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            .\scripts\windows_install_conpty_package_test.ps1 `
+            -ArchivePath artifacts\herdr-windows-x86_64.zip
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows PowerShell installer test failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Write Windows package checksum
+        shell: pwsh
+        run: |
+          $path = Resolve-Path artifacts\herdr-windows-x86_64.zip
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+          "$hash  herdr-windows-x86_64.zip" | Out-File -LiteralPath artifacts\herdr-windows-x86_64.zip.sha256 -Encoding ascii
+
+      - name: Upload Windows release asset
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: herdr-windows-x86_64
+          path: artifacts/
+
   publish:
-    needs: [prepare, build, control-manager-package]
+    needs: [prepare, build, control-manager-package, windows-package]
     if: needs.prepare.outputs.release == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -521,6 +572,8 @@ jobs:
             (cd "$directory" && shasum -a 256 -c "${package}.sha256")
             cat "$directory/${package}.sha256" >> SHA256SUMS
           done
+          (cd herdr-windows-x86_64 && shasum -a 256 -c herdr-windows-x86_64.zip.sha256)
+          cat herdr-windows-x86_64/herdr-windows-x86_64.zip.sha256 >> SHA256SUMS
           sort -k2 -o SHA256SUMS SHA256SUMS
 
       - name: Verify Control Manager asset provenance
@@ -559,11 +612,13 @@ jobs:
             herdr-macos-aarch64/herdr-macos-aarch64.sha256 \
             herdr-macos-aarch64/herdr-macos-aarch64.pkg \
             herdr-macos-aarch64/herdr-macos-aarch64.pkg.sha256 \
+            herdr-windows-x86_64/herdr-windows-x86_64.zip \
+            herdr-windows-x86_64/herdr-windows-x86_64.zip.sha256 \
             SHA256SUMS \
             control-manager-release/control-manager-${{ needs.prepare.outputs.version }}.tar.gz \
             control-manager-release/control-manager-${{ needs.prepare.outputs.version }}.tar.gz.sha256 \
             control-manager-release/control-manager-${{ needs.prepare.outputs.version }}.provenance.json \
-            --title "$TAG" --generate-notes
+            --title "$TAG" --generate-notes --latest
 
       - name: Verify published release is immutable
         env:
@@ -572,6 +627,60 @@ jobs:
         run: |
           set -euo pipefail
           test "$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq .immutable)" = true
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)" = "$TAG"
+
+  publish-manifest:
+    needs: [prepare, publish]
+    if: needs.prepare.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: build-xcsh
+          fetch-depth: 0
+
+      - name: Generate the fork-owned stable manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          protocol="$(git show "v${VERSION}:src/protocol/wire.rs" | sed -n 's/^pub const PROTOCOL_VERSION: u32 = \([0-9][0-9]*\);/\1/p')"
+          test -n "$protocol"
+          python3 scripts/changelog.py sync-latest-json \
+            --version "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --protocol "$protocol" \
+            --output distribution/latest.json
+          python3 scripts/changelog.py verify-release-state \
+            --version "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --protocol "$protocol" \
+            --output distribution/latest.json \
+            --live-url "file://$GITHUB_WORKSPACE/distribution/latest.json"
+
+      - name: Commit the stable manifest to build-xcsh
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add distribution/latest.json
+          git diff --cached --quiet || git commit -m "chore(release): publish v${VERSION} stable manifest"
+          for attempt in 1 2 3; do
+            git pull --rebase origin build-xcsh
+            if git push origin HEAD:build-xcsh; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 2))
+            fi
+          done
+          echo "failed to publish stable manifest after 3 attempts" >&2
+          exit 1
 
   publish-homebrew:
     needs: [prepare, publish]

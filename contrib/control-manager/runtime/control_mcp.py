@@ -128,7 +128,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "native_xcsh_admit",
-        "description": "Atomically admit one installed, disposable XCSH semantic-turn execution through Herdr. Requires immutable runtime identities and an idempotency key; terminal process output never settles the task.",
+        "description": "Atomically admit one installed, disposable xcsh semantic-turn execution through Herdr. Requires immutable runtime identities and an idempotency key; terminal process output never settles the task.",
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
         "inputSchema": {"type": "object", "additionalProperties": False,
             "required": ["target", "cwd", "priority", "prompt", "workspace_id", "argv", "runtime_identity", "idempotency_key"],

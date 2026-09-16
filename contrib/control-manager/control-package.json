@@ -7,7 +7,7 @@
   "commit_message_policy": "autonomous_conventional",
   "presentation_policy": "human_meaningful_voice_v1",
   "scope": "recovery_manager_with_native_xcsh_uat_source",
-  "excluded_product_modules": ["XCSH native synthetic fixture runner", "test/dev state and receipts", "installed prompt UAT evidence", "live-release UAT drivers"],
+  "excluded_product_modules": ["xcsh native synthetic fixture runner", "test/dev state and receipts", "installed prompt UAT evidence", "live-release UAT drivers"],
   "native_uat_source_handoff": {
     "control_broker.py": "61854bcc8da33eab57cddb08eed8a942f79733ccf4f7345f932ea34ab97fafe4",
     "control_mcp.py": "f19fa2924b525e5cec98e35f1f2f58c1f967c38ed9792da905566d37a7657b01",

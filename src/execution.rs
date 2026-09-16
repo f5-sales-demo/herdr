@@ -22,6 +22,7 @@ struct Inner {
     state: Mutex<State>,
     pane_executions: Mutex<HashMap<u32, String>>,
     pending_pane_output: Mutex<HashMap<u32, CapturedOutput>>,
+    output_utf8_pending: Mutex<HashMap<u32, Vec<u8>>>,
     native_capabilities: Mutex<HashMap<String, String>>,
 }
 #[derive(Default)]
@@ -29,6 +30,7 @@ struct CapturedOutput {
     bytes: u64,
     tail: String,
     truncated: bool,
+    utf8_pending: Vec<u8>,
 }
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct State {
@@ -61,32 +63,38 @@ struct ExecutionTombstone {
 }
 
 impl ExecutionManager {
-    pub(crate) fn global() -> &'static Self {
-        static MANAGER: std::sync::OnceLock<ExecutionManager> = std::sync::OnceLock::new();
-        MANAGER.get_or_init(Self::load)
-    }
     pub(crate) fn load() -> Self {
         Self::load_at(crate::session::data_dir().join("executions.json"))
     }
 
     pub(crate) fn load_at(path: PathBuf) -> Self {
+        Self::load_at_with_restart_policy(path, true)
+    }
+
+    fn load_at_for_handoff(path: PathBuf) -> Self {
+        Self::load_at_with_restart_policy(path, false)
+    }
+
+    fn load_at_with_restart_policy(path: PathBuf, mark_interrupted_lost: bool) -> Self {
         let mut state: State = std::fs::read(&path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
         let now = now_ms();
         let mut changed = false;
-        for record in &mut state.records {
-            if matches!(
-                record.state,
-                ExecutionState::Starting | ExecutionState::Running
-            ) {
-                state.revision += 1;
-                record.revision = state.revision;
-                record.state = ExecutionState::Lost;
-                record.finished_at_unix_ms = Some(now);
-                record.evidence_gap = Some("server restarted without retained child ownership; process survival and exit status are unknown".into());
-                changed = true;
+        if mark_interrupted_lost {
+            for record in &mut state.records {
+                if matches!(
+                    record.state,
+                    ExecutionState::Starting | ExecutionState::Running
+                ) {
+                    state.revision += 1;
+                    record.revision = state.revision;
+                    record.state = ExecutionState::Lost;
+                    record.finished_at_unix_ms = Some(now);
+                    record.evidence_gap = Some("server restarted without retained child ownership; process survival and exit status are unknown".into());
+                    changed = true;
+                }
             }
         }
         let manager = Self(Arc::new(Inner {
@@ -94,6 +102,7 @@ impl ExecutionManager {
             state: Mutex::new(state),
             pane_executions: Mutex::new(HashMap::new()),
             pending_pane_output: Mutex::new(HashMap::new()),
+            output_utf8_pending: Mutex::new(HashMap::new()),
             native_capabilities: Mutex::new(HashMap::new()),
         }));
         if changed {
@@ -393,9 +402,48 @@ impl ExecutionManager {
                 record.stdout_bytes = pending.bytes;
                 record.stdout_tail = pending.tail;
                 record.output_truncated = pending.truncated;
+                if !pending.utf8_pending.is_empty() {
+                    self.0
+                        .output_utf8_pending
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(pane_raw, pending.utf8_pending);
+                }
             }
         })?;
         self.get(id).ok_or_else(|| "execution_not_found".into())
+    }
+
+    pub(crate) fn rebind_handoff_panes(
+        &self,
+        panes: impl IntoIterator<Item = (u32, String)>,
+    ) -> Result<(), String> {
+        let active_by_public_id: HashMap<String, String> = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| "execution state lock poisoned")?
+            .records
+            .iter()
+            .filter(|record| !record.output_complete)
+            .filter_map(|record| {
+                record
+                    .pane_id
+                    .as_ref()
+                    .map(|pane_id| (pane_id.clone(), record.execution_id.clone()))
+            })
+            .collect();
+        let mut pane_executions = self
+            .0
+            .pane_executions
+            .lock()
+            .map_err(|_| "execution pane map lock poisoned")?;
+        for (pane_raw, public_pane_id) in panes {
+            if let Some(execution_id) = active_by_public_id.get(&public_pane_id) {
+                pane_executions.insert(pane_raw, execution_id.clone());
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn finish_visible(
@@ -485,9 +533,17 @@ impl ExecutionManager {
             }
             return;
         };
+        let text = {
+            let mut pending = self
+                .0
+                .output_utf8_pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            decode_utf8_chunk(pending.entry(pane_raw).or_default(), bytes, false)
+        };
         let _ = self.mutate(&id, |record| {
             record.stdout_bytes = record.stdout_bytes.saturating_add(bytes.len() as u64);
-            append_bounded_tail(&mut record.stdout_tail, &mut record.output_truncated, bytes);
+            append_bounded_text(&mut record.stdout_tail, &mut record.output_truncated, &text);
         });
     }
 
@@ -499,7 +555,22 @@ impl ExecutionManager {
             .ok()
             .and_then(|map| map.get(&pane_raw).cloned());
         if let Some(id) = id {
-            let _ = self.mutate(&id, |record| record.output_complete = true);
+            let final_text = self
+                .0
+                .output_utf8_pending
+                .lock()
+                .ok()
+                .and_then(|mut pending| pending.remove(&pane_raw))
+                .map(|mut pending| decode_utf8_chunk(&mut pending, &[], true))
+                .unwrap_or_default();
+            let _ = self.mutate(&id, |record| {
+                append_bounded_text(
+                    &mut record.stdout_tail,
+                    &mut record.output_truncated,
+                    &final_text,
+                );
+                record.output_complete = true;
+            });
             if self.get(&id).is_some_and(|record| {
                 !matches!(
                     record.state,
@@ -512,7 +583,9 @@ impl ExecutionManager {
             }
         }
         if let Ok(mut pending) = self.0.pending_pane_output.lock() {
-            pending.remove(&pane_raw);
+            if let Some(mut captured) = pending.remove(&pane_raw) {
+                let _ = decode_utf8_chunk(&mut captured.utf8_pending, &[], true);
+            }
         }
     }
 
@@ -1042,13 +1115,55 @@ impl ExecutionManager {
     }
 }
 
-fn append_captured(captured: &mut CapturedOutput, bytes: &[u8]) {
-    captured.bytes = captured.bytes.saturating_add(bytes.len() as u64);
-    append_bounded_tail(&mut captured.tail, &mut captured.truncated, bytes);
+/// Durable execution and semantic-turn state owned by one server runtime.
+///
+/// Clones share the same managers, allowing API connection threads and the
+/// application loop to coordinate without process-global state.
+#[derive(Clone)]
+pub(crate) struct SharedRuntimeState {
+    pub(crate) executions: ExecutionManager,
+    pub(crate) agent_turns: crate::agent_turn::AgentTurnManager,
 }
 
-fn append_bounded_tail(tail: &mut String, truncated: &mut bool, bytes: &[u8]) {
-    tail.push_str(&redact(&String::from_utf8_lossy(bytes)));
+impl SharedRuntimeState {
+    pub(crate) fn load() -> Self {
+        Self {
+            executions: ExecutionManager::load(),
+            agent_turns: crate::agent_turn::AgentTurnManager::load(),
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn load_for_handoff() -> Self {
+        let root = crate::session::data_dir();
+        Self {
+            executions: ExecutionManager::load_at_for_handoff(root.join("executions.json")),
+            agent_turns: crate::agent_turn::AgentTurnManager::load_at_for_handoff(
+                root.join("agent-turns.json"),
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn isolated() -> Self {
+        let root = std::env::temp_dir().join(format!("herdr-runtime-{}", uuid::Uuid::new_v4()));
+        Self {
+            executions: ExecutionManager::load_at(root.join("executions.json")),
+            agent_turns: crate::agent_turn::AgentTurnManager::load_at(
+                root.join("agent-turns.json"),
+            ),
+        }
+    }
+}
+
+fn append_captured(captured: &mut CapturedOutput, bytes: &[u8]) {
+    captured.bytes = captured.bytes.saturating_add(bytes.len() as u64);
+    let text = decode_utf8_chunk(&mut captured.utf8_pending, bytes, false);
+    append_bounded_text(&mut captured.tail, &mut captured.truncated, &text);
+}
+
+fn append_bounded_text(tail: &mut String, truncated: &mut bool, text: &str) {
+    tail.push_str(&redact(text));
     if tail.len() > OUTPUT_TAIL_BYTES {
         let mut drop_at = tail.len() - OUTPUT_TAIL_BYTES;
         while !tail.is_char_boundary(drop_at) {
@@ -1057,6 +1172,43 @@ fn append_bounded_tail(tail: &mut String, truncated: &mut bool, bytes: &[u8]) {
         tail.drain(..drop_at);
         *truncated = true;
     }
+}
+
+fn decode_utf8_chunk(pending: &mut Vec<u8>, bytes: &[u8], flush: bool) -> String {
+    pending.extend_from_slice(bytes);
+    let mut output = String::new();
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(valid) => {
+                output.push_str(valid);
+                pending.clear();
+                break;
+            }
+            Err(error) => {
+                let valid_up_to = error.valid_up_to();
+                if valid_up_to > 0 {
+                    output.push_str(
+                        std::str::from_utf8(&pending[..valid_up_to])
+                            .expect("validated UTF-8 prefix must decode"),
+                    );
+                    pending.drain(..valid_up_to);
+                }
+                match error.error_len() {
+                    Some(invalid_len) => {
+                        output.push('\u{FFFD}');
+                        pending.drain(..invalid_len);
+                    }
+                    None if flush => {
+                        output.push('\u{FFFD}');
+                        pending.clear();
+                        break;
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    output
 }
 
 const EXPIRED_FILTER_BYTES: usize = 8192;
@@ -1135,7 +1287,7 @@ fn validate_resume(p: &ExecutionResumeParams) -> Result<(), String> {
         );
     }
     if !is_canonical_xcsh_session_id(&p.native_launch.session_header.id) {
-        return Err("invalid_xcsh_session_id: execution.resume requires the canonical 16-character lowercase hexadecimal XCSH SessionHeader ID; ID prefixes and session paths cannot bind reporter provenance exactly".into());
+        return Err("invalid_xcsh_session_id: execution.resume requires the canonical 16-character lowercase hexadecimal xcsh SessionHeader ID; ID prefixes and session paths cannot bind reporter provenance exactly".into());
     }
     if p.native_launch.model.is_empty()
         || p.native_launch.model.len() > 256
@@ -1146,7 +1298,7 @@ fn validate_resume(p: &ExecutionResumeParams) -> Result<(), String> {
     if !is_sha256_hex(&p.native_launch.session_header.sha256) {
         return Err("invalid_native_launch: session_header.sha256 must be 64 lowercase hexadecimal characters".into());
     }
-    // XCSH serializes generations as JavaScript Number. Larger values round
+    // xcsh serializes generations as JavaScript Number. Larger values round
     // and could silently select a different durable generation binding.
     if p.generation > 9_007_199_254_740_991 {
         return Err(
@@ -1156,7 +1308,7 @@ fn validate_resume(p: &ExecutionResumeParams) -> Result<(), String> {
     Ok(())
 }
 
-/// Canonicalize and bind the exact XCSH JSONL SessionHeader. The digest is of
+/// Canonicalize and bind the exact xcsh JSONL SessionHeader. The digest is of
 /// the first line's original bytes including the LF separator; this makes the
 /// durable receipt unambiguous and catches a header rewrite before launch.
 pub(crate) fn measure_xcsh_session_header(
@@ -1207,7 +1359,7 @@ pub(crate) fn measure_xcsh_session_header(
         .map_err(|_| "invalid_xcsh_session_header: first line is not JSON".to_string())?;
     if value.get("type").and_then(serde_json::Value::as_str) != Some("session") {
         return Err(
-            "invalid_xcsh_session_header: first JSONL line is not an XCSH session header".into(),
+            "invalid_xcsh_session_header: first JSONL line is not an xcsh session header".into(),
         );
     }
     let id = value
@@ -1243,7 +1395,7 @@ fn sha256_hex(value: &str) -> String {
     format!("{:x}", sha2::Sha256::digest(value.as_bytes()))
 }
 
-/// Measure an explicit XCSH executable without consulting PATH. The binding is
+/// Measure an explicit xcsh executable without consulting PATH. The binding is
 /// persisted in the native execution receipt and checked again at effect time,
 /// so a symlink replacement or in-place update cannot silently launch another
 /// program after the durable claim.
@@ -1251,7 +1403,7 @@ pub(crate) fn measure_xcsh_executable(path: &str) -> Result<NativeExecutableBind
     let requested = Path::new(path);
     if !requested.is_absolute() {
         return Err(
-            "invalid_xcsh_executable: execution.resume requires an absolute XCSH executable path"
+            "invalid_xcsh_executable: execution.resume requires an absolute xcsh executable path"
                 .into(),
         );
     }
@@ -1324,9 +1476,9 @@ fn is_canonical_xcsh_session_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
-/// The complete supported XCSH argv derived from protocol-23's typed launch.
+/// The complete supported xcsh argv derived from protocol-24's typed launch.
 /// No caller-controlled argv or environment reaches the child. `managed_turn_v1`
-/// is a durable Herdr/producer lifecycle contract, not an undocumented XCSH
+/// is a durable Herdr/producer lifecycle contract, not an undocumented xcsh
 /// command-line option.
 fn native_xcsh_argv(
     executable: &NativeExecutableBinding,
@@ -1875,6 +2027,40 @@ mod tests {
             .contains("restarted"));
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn handoff_reload_preserves_nonterminal_execution_state() {
+        let path = temp("handoff-preserves-running");
+        let manager = ExecutionManager::load_at(path.clone());
+        let (record, admitted) = manager.admit_visible(&params("handoff-running")).unwrap();
+        assert!(admitted);
+        assert_eq!(record.state, ExecutionState::Starting);
+        manager
+            .attach_visible(
+                "handoff-running",
+                7,
+                "w1:p1".into(),
+                "w1:t1".into(),
+                Some(42),
+            )
+            .unwrap();
+        drop(manager);
+
+        let reloaded = ExecutionManager::load_at_for_handoff(path.clone());
+        reloaded
+            .rebind_handoff_panes([(9, "w1:p1".to_string())])
+            .unwrap();
+        assert_eq!(
+            reloaded.get("handoff-running").unwrap().state,
+            ExecutionState::Running
+        );
+        reloaded.finish_visible(9, Some(&portable_pty::ExitStatus::with_exit_code(0)), None);
+        assert_eq!(
+            reloaded.get("handoff-running").unwrap().state,
+            ExecutionState::Exited
+        );
+        let _ = std::fs::remove_file(path);
+    }
     #[test]
     fn idempotent_admission_and_conflict() {
         let path = temp("idem");
@@ -2049,6 +2235,7 @@ mod tests {
             bytes: 41,
             tail: tail_with_multibyte_prefix_at_cap_boundary(),
             truncated: false,
+            utf8_pending: Vec::new(),
         };
 
         append_captured(&mut captured, b"x");
@@ -2060,6 +2247,20 @@ mod tests {
             captured.tail,
             format!("{}x\n", "x".repeat(OUTPUT_TAIL_BYTES - 3))
         );
+    }
+
+    #[test]
+    fn pending_output_preserves_utf8_split_across_pty_reads() {
+        let mut captured = CapturedOutput::default();
+        let encoded = "é".as_bytes();
+
+        append_captured(&mut captured, &encoded[..1]);
+        assert!(captured.tail.is_empty());
+
+        append_captured(&mut captured, &encoded[1..]);
+        assert_eq!(captured.bytes, 2);
+        assert_eq!(captured.tail, "é\n");
+        assert!(captured.utf8_pending.is_empty());
     }
 
     #[test]

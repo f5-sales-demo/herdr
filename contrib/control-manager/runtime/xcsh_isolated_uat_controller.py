@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Durable fail-closed controller for owned disposable XCSH UAT runtimes."""
+"""Durable fail-closed controller for owned disposable xcsh UAT runtimes."""
 from __future__ import annotations
 import argparse, hashlib, json, os, re, secrets, sqlite3, subprocess, time, uuid
 from pathlib import Path
 from typing import Any, Callable
 
 ALLOWED = {"reconnect_replay", "generation_supersession", "restart_loss"}
-# The released XCSH JSON-mode SessionHeader.id is the producer's canonical
+# The released xcsh JSON-mode SessionHeader.id is the producer's canonical
 # identity.  It is a 16-character lowercase hexadecimal sessionManager id,
 # not a CLI prefix, a path, or a UUID invented by this controller.
 CANONICAL_XCSH_SESSION_ID = re.compile(r"^[0-9a-f]{16}$")
@@ -160,9 +160,9 @@ class DisposableHerdrController(IsolatedController):
 
     def probe_xcsh_json_session(self, xcsh_binary: Path, expected_sha256: str, cwd: Path,
                                 session_dir: Path) -> dict[str, Any]:
-        """Observe the released XCSH JSON-mode session behavior without a prompt.
+        """Observe the released xcsh JSON-mode session behavior without a prompt.
 
-        XCSH has no ``--create-session-json`` or capabilities command.  Its
+        xcsh has no ``--create-session-json`` or capabilities command.  Its
         supported non-interactive ``--mode json --session-dir`` invocation
         emits a SessionHeader first on stdout, before any prompt is submitted.
         The controller uses that observable behavior; it does not accept a
@@ -173,16 +173,16 @@ class DisposableHerdrController(IsolatedController):
         """
         if (not xcsh_binary.is_file() or hashlib.sha256(xcsh_binary.read_bytes()).hexdigest() != expected_sha256
                 or not cwd.is_dir() or not session_dir.is_absolute() or session_dir.exists()):
-            raise ControllerError("controller requires a measured XCSH binary and fresh absolute session directory")
+            raise ControllerError("controller requires a measured xcsh binary and fresh absolute session directory")
         session_dir.mkdir(parents=True, mode=0o700)
         argv = [str(xcsh_binary), "--mode", "json", "--session-dir", str(session_dir),
                 "--no-tools", "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules"]
         try:
             call = subprocess.run(argv, cwd=cwd, check=False, capture_output=True, text=True, timeout=20)
         except subprocess.TimeoutExpired as exc:
-            raise ControllerError("XCSH JSON-mode session header timed out") from exc
+            raise ControllerError("xcsh JSON-mode session header timed out") from exc
         if call.returncode:
-            raise ControllerError(f"owned XCSH JSON-mode session creation failed: {call.stderr.strip()[:500]}")
+            raise ControllerError(f"owned xcsh JSON-mode session creation failed: {call.stderr.strip()[:500]}")
         header: dict[str, Any] | None = None
         for line in call.stdout.splitlines():
             try:
@@ -194,9 +194,9 @@ class DisposableHerdrController(IsolatedController):
                 break
         session = header.get("id") if header else None
         if not isinstance(session, str) or not CANONICAL_XCSH_SESSION_ID.fullmatch(session):
-            raise ControllerError("XCSH JSON-mode header lacks canonical sessionManager id")
+            raise ControllerError("xcsh JSON-mode header lacks canonical sessionManager id")
         if header.get("cwd") != str(cwd.resolve()):
-            raise ControllerError("XCSH JSON-mode header cwd does not match the owned invocation")
+            raise ControllerError("xcsh JSON-mode header cwd does not match the owned invocation")
         files = list(session_dir.rglob("*.jsonl"))
         session_file: str | None = None
         if len(files) == 1:
@@ -204,13 +204,13 @@ class DisposableHerdrController(IsolatedController):
                 with files[0].open("rb") as persisted_file:
                     first_line = persisted_file.readline()
                 if not first_line.endswith(b"\n"):
-                    raise ControllerError("XCSH persisted session header lacks its terminating LF")
+                    raise ControllerError("xcsh persisted session header lacks its terminating LF")
                 persisted = json.loads(first_line)
             except (OSError, IndexError, json.JSONDecodeError) as exc:
-                raise ControllerError("XCSH persisted session header is unreadable") from exc
+                raise ControllerError("xcsh persisted session header is unreadable") from exc
             identity_fields = ("type", "version", "id", "timestamp", "cwd")
             if any(persisted.get(key) != header.get(key) for key in identity_fields):
-                raise ControllerError("XCSH stdout and persisted session headers disagree")
+                raise ControllerError("xcsh stdout and persisted session headers disagree")
             session_file = str(files[0].resolve())
         return {"session_id": session, "session_file": session_file,
                 "session_dir": str(session_dir.resolve()),
@@ -225,7 +225,7 @@ class DisposableHerdrController(IsolatedController):
         receipt = self.probe_xcsh_json_session(xcsh_binary, expected_sha256, cwd, session_dir)
         if not receipt["resume_ready"]:
             raise ControllerError(
-                "released XCSH emitted a JSON session header but did not persist a resume-ready session; "
+                "released xcsh emitted a JSON session header but did not persist a resume-ready session; "
                 "the producer needs a prompt-free durable session creation API"
             )
         return {"session_id": receipt["session_id"], "session_dir": receipt["session_dir"],

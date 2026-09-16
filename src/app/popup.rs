@@ -13,11 +13,6 @@ pub(crate) struct PopupGeometry {
 }
 
 impl App {
-    pub(crate) fn popup_runtime(&self) -> Option<&TerminalRuntime> {
-        let terminal_id = &self.state.popup_pane.as_ref()?.terminal_id;
-        self.terminal_runtimes.get(terminal_id)
-    }
-
     pub(crate) fn close_popup_pane(&mut self) -> bool {
         let Some(popup) = self.state.popup_pane.take() else {
             return false;
@@ -26,29 +21,14 @@ impl App {
             .direct_attach_resize_locks
             .remove(&popup.terminal_id);
         self.state.terminals.remove(&popup.terminal_id);
-        if let Some(runtime) = self.terminal_runtimes.remove(&popup.terminal_id) {
-            runtime.shutdown();
-        }
+        self.shutdown_terminal_runtime(popup.terminal_id);
         self.state.mode = if self.state.active.is_some() {
             Mode::Terminal
         } else {
             Mode::Navigate
         };
-        self.render_dirty
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.render_dirty.request_generic();
         self.render_notify.notify_one();
-        true
-    }
-
-    pub(crate) fn try_route_paste_to_popup(&mut self, text: &str) -> bool {
-        if self.state.popup_pane.is_none() {
-            return false;
-        }
-        let Some(runtime) = self.popup_runtime() else {
-            self.close_popup_pane();
-            return true;
-        };
-        let _ = runtime.try_send_paste(text.to_owned());
         true
     }
 
@@ -74,6 +54,7 @@ impl App {
                     crate::pane::AgentDetection::Disabled,
                     app.state.pane_scrollback_limit_bytes,
                     app.state.host_terminal_theme,
+                    app.state.host_terminal_appearance,
                     app.event_tx.clone(),
                     app.render_notify.clone(),
                     app.render_dirty.clone(),
@@ -103,8 +84,10 @@ impl App {
                     argv,
                     launch_env,
                     crate::pane::AgentDetection::Disabled,
+                    None,
                     app.state.pane_scrollback_limit_bytes,
                     app.state.host_terminal_theme,
+                    app.state.host_terminal_appearance,
                     app.event_tx.clone(),
                     app.render_notify.clone(),
                     app.render_dirty.clone(),
@@ -219,7 +202,7 @@ mod tests {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &crate::config::Config::default(),
-            true,
+            crate::app::AppPolicy::TEST,
             None,
             api_rx,
             crate::api::EventHub::default(),

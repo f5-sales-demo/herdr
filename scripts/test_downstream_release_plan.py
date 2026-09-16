@@ -30,6 +30,13 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertEqual(release_level(["fix: repair lifecycle", "feat(queue): admit prompts"]), "minor")
         self.assertEqual(bump("0.7.5", "minor"), "0.8.0")
 
+    def test_pinned_upstream_merge_plans_v0_16_0_from_fork_v0_15_8(self) -> None:
+        messages = [
+            "feat: merge herdrdev/herdr at ab15da285e9d74bea476375f635f73148d551d24"
+        ]
+        self.assertEqual(release_level(messages), "minor")
+        self.assertEqual(bump("0.15.8", "minor"), "0.16.0")
+
     def test_breaking_change_is_a_major_release(self) -> None:
         self.assertEqual(release_level(["feat(api)!: replace protocol"]), "major")
         self.assertEqual(release_level(["feat: replace protocol\n\nBREAKING CHANGE: old clients stop working"]), "major")

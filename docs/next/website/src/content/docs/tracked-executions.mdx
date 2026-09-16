@@ -12,7 +12,7 @@ Tracked executions provide process lifecycle evidence without interpreting termi
 - `{"mode":"argv","argv":[...]}` executes the argument vector directly.
 - `{"mode":"shell","shell":"bash|zsh","text":"..."}` executes the exact text with the selected shell's `-lc` semantics.
 
-Each admitted execution creates a new tab in the selected or active workspace. The tab is not focused. Its root pane directly spawns the requested command under Herdr's native PTY, so output is visible and normal `pane.send_text`, `pane.send_keys`, and terminal attachment remain available for interactive tools such as XCSH.
+Each admitted execution creates a new tab in the selected or active workspace. The tab is not focused. Its root pane directly spawns the requested command under Herdr's native PTY, so output is visible and normal `pane.send_text`, `pane.send_keys`, and terminal attachment remain available for interactive tools such as xcsh.
 
 Repeating a start with the same ID and identical specification returns the existing record with `admitted: false` and never creates another tab. Reusing the ID for a different specification fails with `execution_id_conflict`. The server records admission, successful PTY spawn, tab and pane IDs, PID, observed exit code or signal name, cancellation requests, byte counts, and a bounded redacted 4 KiB tail of the combined PTY stream. PTYs do not preserve a reliable stdout/stderr distinction, so `stdout_tail` represents the combined stream and `stderr_tail` remains empty. Process exit and PTY output drain are independent facts: `output_complete: true` means the native reader reached EOF after draining available bytes.
 
@@ -26,7 +26,7 @@ Use `execution.get`, `execution.list`, and `execution.wait` to query, long-poll 
 
 Records are persisted independently of panes. If the Herdr server restarts while a command is starting or running, the restored record becomes `lost` with an `evidence_gap`; Herdr does not claim the child survived, was killed, or exited successfully. This is at-least-once admission with idempotent duplicate suppression, not distributed exactly-once execution.
 
-Tracked executions are visible interactive PTY panes but do not steal focus. A shell prompt, terminal contents, or TUI idle appearance is never exit evidence. A Codex or XCSH process exiting successfully is also not proof that its requested task succeeded: consume the agent's native semantic lifecycle separately.
+Tracked executions are visible interactive PTY panes but do not steal focus. A shell prompt, terminal contents, or TUI idle appearance is never exit evidence. A Codex or xcsh process exiting successfully is also not proof that its requested task succeeded: consume the agent's native semantic lifecycle separately.
 
 ## Native semantic turns
 

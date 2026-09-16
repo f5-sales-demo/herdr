@@ -8,20 +8,37 @@ use crate::api::schema::{
     ReadSource, Request, SplitDirection,
 };
 
+macro_rules! print {
+    ($($arg:tt)*) => {{
+        crate::platform::begin_cli_output();
+        std::print!($($arg)*);
+    }};
+}
+
+macro_rules! println {
+    ($($arg:tt)*) => {{
+        crate::platform::begin_cli_output();
+        std::println!($($arg)*);
+    }};
+}
+
 mod agent;
 mod api;
 mod completion;
 mod execution;
 mod integration;
+mod machine;
 mod notification;
 mod pane;
 mod plugin;
 mod protocol_guard;
 mod runtime;
 mod server;
+mod server_not_running;
 mod spec;
 mod status;
 mod tab;
+mod target;
 mod workspace;
 mod worktree;
 
@@ -29,6 +46,15 @@ const TERMINAL_SESSION_OBSERVE_USAGE: &str =
     "usage: herdr terminal session observe <target> [--cols N] [--rows N]";
 const TERMINAL_SESSION_CONTROL_USAGE: &str =
     "usage: herdr terminal session control <target> [--takeover] [--cols N] [--rows N]";
+pub(crate) const AGENT_HELP_FOOTER: &str = concat!(
+    "Are you an AI? Use these resources ONLY IF your task specifically asks you to:\n",
+    "  Help a human understand or set up Herdr for the first time:\n",
+    "    https://github.com/f5-sales-demo/herdr/blob/build-xcsh/distribution/agent-guide.md\n",
+    "  Debug or investigate a problem with Herdr:\n",
+    "    https://github.com/f5-sales-demo/herdr/issues\n",
+    "  Control Herdr panes, agents, or workspaces:\n",
+    "    SKIP if a Herdr skill is already in your context. Otherwise run: herdr --skill",
+);
 
 pub(crate) fn parse_token_assignment(raw: &str) -> Result<(String, Option<String>), String> {
     let Some((key, value)) = raw.split_once('=') else {
@@ -69,6 +95,10 @@ pub(super) fn print_read_response(response: &serde_json::Value) -> std::io::Resu
     Ok(0)
 }
 
+pub(crate) fn maybe_run_machine(args: &[String]) -> Option<std::io::Result<CommandOutcome>> {
+    target::maybe_run(args)
+}
+
 pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
     let Some(command) = args.get(1).map(|arg| arg.as_str()) else {
         return Ok(CommandOutcome::NotCli);
@@ -90,6 +120,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "completion" | "completions" => completion::run_completion_command(&args[2..])?,
         "config" => run_config_command(&args[2..])?,
         "channel" => run_channel_command(&args[2..])?,
+        "machine" => machine::run_machine_command(&args[2..])?,
         "workspace" => workspace::run_workspace_command(&args[2..])?,
         "worktree" => worktree::run_worktree_command(&args[2..])?,
         "tab" => tab::run_tab_command(&args[2..])?,
@@ -186,6 +217,7 @@ fn channel_set(args: &[String]) -> std::io::Result<i32> {
         ChannelSetInstallAction::RunSelfUpdate => {}
     }
 
+    crate::platform::end_cli_output();
     if let Err(err) = crate::update::self_update(crate::update::SelfUpdateOptions::default()) {
         eprintln!("update failed: {err}");
         eprintln!("Run `herdr update` to retry.");
@@ -206,16 +238,12 @@ fn parse_channel_set_arg(args: &[String]) -> Option<&str> {
 
 fn channel_set_rejection(
     channel: &str,
-    install_rejection: Option<&'static str>,
+    _install_rejection: Option<&'static str>,
 ) -> Option<&'static str> {
-    if cfg!(windows) && channel == "stable" {
-        return Some(
-            "stable channel is not available on Windows yet; Windows builds are preview-only",
-        );
-    }
-
     if channel == "preview" {
-        return install_rejection;
+        return Some(
+            "preview self-update is unavailable until the maintained fork has a fork-owned preview channel",
+        );
     }
 
     None
@@ -743,29 +771,30 @@ pub(super) fn send_ok_request(method: Method) -> std::io::Result<i32> {
 }
 
 pub(super) fn send_request(request: &Request) -> std::io::Result<serde_json::Value> {
-    let client = ApiClient::local();
+    let client = target::api_client()?;
     ensure_server_protocol_compatible(&client, &request.id)?;
     client
         .request_value(request)
-        .map_err(api_client_error_to_io)
+        .map_err(|err| map_server_not_running_or_io(err, &request.id, &client))
 }
 
 pub(super) fn send_request_unchecked(request: &Request) -> std::io::Result<serde_json::Value> {
-    ApiClient::local()
+    let client = target::api_client()?;
+    client
         .request_value(request)
-        .map_err(api_client_error_to_io)
+        .map_err(|err| map_server_not_running_or_io(err, &request.id, &client))
 }
 
 fn ensure_server_protocol_compatible(client: &ApiClient, request_id: &str) -> std::io::Result<()> {
-    let status = client.status().map_err(api_client_error_to_io)?;
+    let status = client
+        .status()
+        .map_err(|err| map_server_not_running_or_io(err, request_id, client))?;
     let server_protocol = status
         .protocol
         .ok_or_else(|| std::io::Error::other("server ping did not include a protocol version"))?;
-    let Some(response) = protocol_guard::mismatch_response(
-        request_id,
-        server_protocol,
-        &crate::session::active_restart_after_update_guidance(),
-    ) else {
+    let Some(response) =
+        protocol_guard::mismatch_response(request_id, server_protocol, &target::restart_guidance())
+    else {
         return Ok(());
     };
 
@@ -778,6 +807,52 @@ fn ensure_server_protocol_compatible(client: &ApiClient, request_id: &str) -> st
 
 pub(crate) fn protocol_mismatch_was_reported(err: &std::io::Error) -> bool {
     protocol_guard::was_reported(err)
+}
+
+pub(crate) fn server_not_running_was_reported(err: &std::io::Error) -> bool {
+    server_not_running::was_reported(err)
+}
+
+/// Returns the `ErrorResponse` carried by a `server_not_running` marker, if any,
+/// so the edge that surfaces the error can print it exactly once (deferred
+/// printing: recovering callers like plugin offline fallback print nothing).
+pub(crate) fn server_not_running_reported_response(
+    err: &std::io::Error,
+) -> Option<&crate::api::schema::ErrorResponse> {
+    server_not_running::reported_response(err)
+}
+
+/// True when an io::Error indicates nothing is listening on the API socket.
+/// Classify by `ErrorKind` only: Windows named pipes surface different raw
+/// errno values than Unix domain sockets but the same error kinds.
+pub(super) fn server_not_running_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+    )
+}
+
+/// Maps an `ApiClientError` from a socket command into the io::Error that
+/// bubbles up to `main`. A dead-server connect failure is reported as a
+/// friendly `server_not_running` JSON error plus a recognizable marker; all
+/// other errors fall through unchanged so existing handling is preserved.
+fn map_server_not_running_or_io(
+    err: ApiClientError,
+    request_id: &str,
+    client: &ApiClient,
+) -> std::io::Error {
+    if target::is_remote() {
+        return target::remote_error(api_client_error_to_io(err));
+    }
+    match err {
+        ApiClientError::Io(io_err) if server_not_running_error(&io_err) => {
+            server_not_running::reported_error(server_not_running::response(
+                request_id,
+                &client.socket_path(),
+            ))
+        }
+        err => api_client_error_to_io(err),
+    }
 }
 
 fn api_client_error_to_io(err: ApiClientError) -> std::io::Error {
@@ -869,6 +944,25 @@ pub(super) fn parse_u64_flag(flag: &str, value: &str) -> std::io::Result<u64> {
         .map_err(|_| std::io::Error::other(format!("invalid value for {flag}: {value}")))
 }
 
+/// Expand `--flag=value` tokens into separate `--flag` and `value` tokens so
+/// the hand-rolled subcommand parsers accept the same `--flag=value` form the
+/// clap-generated help and completions imply. Only `value_options` are split:
+/// boolean and unknown options keep their attached value so they still reach
+/// the parser's unknown-option branch.
+pub(super) fn expand_equals_args(args: &[String], value_options: &[&str]) -> Vec<String> {
+    let mut expanded = Vec::with_capacity(args.len());
+    for arg in args {
+        match arg.split_once('=') {
+            Some((flag, value)) if value_options.contains(&flag) => {
+                expanded.push(flag.to_string());
+                expanded.push(value.to_string());
+            }
+            _ => expanded.push(arg.clone()),
+        }
+    }
+    expanded
+}
+
 fn parse_session_json_only(args: &[String], usage: &str) -> Result<bool, i32> {
     match args {
         [] => Ok(false),
@@ -883,8 +977,11 @@ fn parse_session_json_only(args: &[String], usage: &str) -> Result<bool, i32> {
 fn parse_session_name_and_json(args: &[String], usage: &str) -> Result<(String, bool), i32> {
     let mut name = None;
     let mut json = false;
+    let mut options_ended = false;
     for arg in args {
-        if arg == "--json" {
+        if !options_ended && arg == "--" {
+            options_ended = true;
+        } else if !options_ended && arg == "--json" {
             json = true;
         } else if name.is_none() {
             name = Some(arg.clone());
@@ -980,36 +1077,16 @@ mod tests {
     }
 
     #[test]
-    fn channel_set_rejects_package_managed_preview_before_config_write() {
+    fn channel_set_rejects_preview_until_the_fork_owns_that_channel() {
         assert_eq!(
             super::channel_set_rejection("preview", Some("no preview")),
-            Some("no preview")
+            Some("preview self-update is unavailable until the maintained fork has a fork-owned preview channel")
         );
         assert_eq!(
             super::channel_set_rejection("stable", Some("no preview")),
-            if cfg!(windows) {
-                Some(
-                    "stable channel is not available on Windows yet; Windows builds are preview-only",
-                )
-            } else {
-                None
-            }
+            None
         );
-        assert_eq!(super::channel_set_rejection("preview", None), None);
-    }
-
-    #[test]
-    fn channel_set_rejects_stable_only_on_windows() {
-        assert_eq!(
-            super::channel_set_rejection("stable", None),
-            if cfg!(windows) {
-                Some(
-                    "stable channel is not available on Windows yet; Windows builds are preview-only",
-                )
-            } else {
-                None
-            }
-        );
+        assert!(super::channel_set_rejection("preview", None).is_some());
     }
 
     #[test]
@@ -1025,6 +1102,16 @@ mod tests {
     }
 
     #[test]
+    fn session_name_parser_accepts_option_terminator() {
+        for name in ["-h", "--json"] {
+            assert_eq!(
+                super::parse_session_name_and_json(&["--".to_string(), name.to_string()], "usage",),
+                Ok((name.to_string(), false))
+            );
+        }
+    }
+
+    #[test]
     fn parse_env_assignment_accepts_empty_values() {
         assert_eq!(
             super::parse_env_assignment("HERDR_ROLE=").unwrap(),
@@ -1037,6 +1124,69 @@ mod tests {
         assert_eq!(
             super::parse_env_assignment("HERDR_ROLE").unwrap_err(),
             "env must use KEY=VALUE"
+        );
+    }
+
+    #[test]
+    fn maps_dead_server_connect_failure_to_friendly_error() {
+        use crate::api::client::{ApiClient, ApiClientError};
+
+        let client = ApiClient::local();
+        let socket = client.socket_path().display().to_string();
+
+        // The helper does NOT print; it returns a recognizable marker carrying
+        // the ErrorResponse so the surfacing edge can print it exactly once.
+        let mapped = super::map_server_not_running_or_io(
+            ApiClientError::Io(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            "cli:workspace:create",
+            &client,
+        );
+
+        let response = super::server_not_running::reported_response(&mapped)
+            .expect("dead-server connect failure should carry a server_not_running response");
+        assert_eq!(response.id, "cli:workspace:create");
+        assert_eq!(response.error.code, "server_not_running");
+        assert!(response.error.message.contains(&socket));
+
+        // The mapping is recognizable without string matching.
+        assert!(super::server_not_running::was_reported(&mapped));
+    }
+
+    #[test]
+    fn classifier_ignores_unrelated_io_kinds() {
+        use crate::api::client::{ApiClient, ApiClientError};
+
+        let client = ApiClient::local();
+        let mapped = super::map_server_not_running_or_io(
+            ApiClientError::Io(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+            "cli:workspace:create",
+            &client,
+        );
+        assert!(!super::server_not_running::was_reported(&mapped));
+    }
+
+    #[test]
+    fn expand_equals_args_splits_value_options_only() {
+        // Known value options split; values may contain `=`. Boolean and
+        // unknown options keep the attached form so parsers still reject them.
+        let args = vec![
+            "--match=a=b".to_string(),
+            "name=value".to_string(),
+            "--raw=value".to_string(),
+            "--bogus=value".to_string(),
+            "--timeout=5000".to_string(),
+        ];
+        assert_eq!(
+            super::expand_equals_args(&args, &["--match", "--timeout"]),
+            vec![
+                "--match",
+                "a=b",
+                "name=value",
+                "--raw=value",
+                "--bogus=value",
+                "--timeout",
+                "5000",
+            ]
         );
     }
 }

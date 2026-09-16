@@ -28,42 +28,48 @@ struct State {
 }
 
 impl AgentTurnManager {
-    pub(crate) fn global() -> &'static Self {
-        static MANAGER: std::sync::OnceLock<AgentTurnManager> = std::sync::OnceLock::new();
-        MANAGER.get_or_init(Self::load)
-    }
-
-    fn load() -> Self {
+    pub(crate) fn load() -> Self {
         Self::load_at(crate::session::data_dir().join("agent-turns.json"))
     }
 
-    fn load_at(path: PathBuf) -> Self {
+    pub(crate) fn load_at(path: PathBuf) -> Self {
+        Self::load_at_with_restart_policy(path, true)
+    }
+
+    pub(crate) fn load_at_for_handoff(path: PathBuf) -> Self {
+        Self::load_at_with_restart_policy(path, false)
+    }
+
+    fn load_at_with_restart_policy(path: PathBuf, mark_interrupted_lost: bool) -> Self {
         let mut state: State = std::fs::read(&path)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
-        let active: Vec<_> = state
-            .records
-            .iter()
-            .filter(|record| {
-                is_latest(&state.records, record) && !record.report.state.is_terminal()
-            })
-            .cloned()
-            .collect();
-        for record in active {
-            state.revision += 1;
-            let mut report = record.report;
-            report.event_revision += 1;
-            report.state = AgentTurnState::Lost;
-            report.result = None;
-            report.reason =
-                Some("Herdr restarted before the semantic turn reached a terminal state".into());
-            report.result_digest = None;
-            state.records.push(AgentTurnRecord {
-                report,
-                revision: state.revision,
-                reported_at_unix_ms: now_ms(),
-            });
+        if mark_interrupted_lost {
+            let active: Vec<_> = state
+                .records
+                .iter()
+                .filter(|record| {
+                    is_latest(&state.records, record) && !record.report.state.is_terminal()
+                })
+                .cloned()
+                .collect();
+            for record in active {
+                state.revision += 1;
+                let mut report = record.report;
+                report.event_revision += 1;
+                report.state = AgentTurnState::Lost;
+                report.result = None;
+                report.reason = Some(
+                    "Herdr restarted before the semantic turn reached a terminal state".into(),
+                );
+                report.result_digest = None;
+                state.records.push(AgentTurnRecord {
+                    report,
+                    revision: state.revision,
+                    reported_at_unix_ms: now_ms(),
+                });
+            }
         }
         enforce_retention(&mut state);
         let manager = Self(Arc::new(Inner {
@@ -77,8 +83,9 @@ impl AgentTurnManager {
     pub(crate) fn report(
         &self,
         report: AgentTurnReportParams,
+        executions: &crate::execution::ExecutionManager,
     ) -> Result<(AgentTurnRecord, bool), String> {
-        self.report_with_execution_manager(report, crate::execution::ExecutionManager::global())
+        self.report_with_execution_manager(report, executions)
     }
 
     fn report_with_execution_manager(
@@ -413,6 +420,49 @@ mod tests {
         drop(manager);
         let persisted: State = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(persisted.revision, 5);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn handoff_reload_preserves_latest_nonterminal_turn() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-agent-turn-handoff-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("agent-turns.json");
+        let report = AgentTurnReportParams {
+            execution_id: "execution-1".into(),
+            pane_id: "w1:p1".into(),
+            producer: "xcsh".into(),
+            session_id: "session-1".into(),
+            turn_id: "turn-1".into(),
+            generation: 0,
+            event_revision: 1,
+            state: AgentTurnState::Working,
+            result: None,
+            reason: None,
+            result_digest: None,
+            native_capability: None,
+        };
+        let state = State {
+            revision: 4,
+            records: vec![AgentTurnRecord {
+                report,
+                revision: 4,
+                reported_at_unix_ms: now_ms(),
+            }],
+            tombstones: Vec::new(),
+        };
+        std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+
+        let manager = AgentTurnManager::load_at_for_handoff(path.clone());
+        let records = manager.list_since(0);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].revision, 4);
+        assert_eq!(records[0].report.state, AgentTurnState::Working);
+        drop(manager);
         std::fs::remove_dir_all(root).unwrap();
     }
 

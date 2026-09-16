@@ -256,7 +256,7 @@ def normalized_cwd(raw: str) -> str:
 
 
 def measure_xcsh_executable(raw: str | None, *, expected_sha256: str | None = None) -> dict[str, str]:
-    """Resolve and hash the one XCSH program a native generation may launch.
+    """Resolve and hash the one xcsh program a native generation may launch.
 
     This deliberately accepts neither a PATH selector nor a caller-declared
     hash as evidence. The controller supplies an absolute path and its own
@@ -313,9 +313,9 @@ def native_model_selector(raw: Any, field: str) -> str:
 
 
 def measure_native_launch(raw: Any, *, expected_executable_sha256: str | None = None) -> dict[str, Any]:
-    """Validate and independently measure the protocol-23 ``native_launch`` v3.
+    """Validate and independently measure the protocol-24 ``native_launch`` v3.
 
-    The launch is a closed typed value, not a transport for arbitrary XCSH
+    The launch is a closed typed value, not a transport for arbitrary xcsh
     argv, environment, identity, or secrets.  Its session header hash covers
     the raw first JSONL line *including* its mandatory LF, exactly as Herdr's
     native-launch contract specifies.
@@ -325,7 +325,7 @@ def measure_native_launch(raw: Any, *, expected_executable_sha256: str | None = 
     allowed = {"version", "xcsh_executable", "session_dir", "session_path", "session_header",
                "model", "discovery", "tools", "interactive", "lifecycle_mode"}
     if set(raw) != allowed:
-        raise ValueError("native_launch must contain exactly the protocol-23 v3 fields")
+        raise ValueError("native_launch must contain exactly the protocol-24 v3 fields")
     if raw.get("version") != 3:
         raise ValueError("native_launch.version must be 3")
     executable = measure_xcsh_executable(raw.get("xcsh_executable"), expected_sha256=expected_executable_sha256)
@@ -616,7 +616,7 @@ class StateDB:
                 last_revision INTEGER NOT NULL DEFAULT 0,
                 updated_at REAL NOT NULL
             );
-            -- An XCSH task is a semantic execution.  Each visible child is a
+            -- An xcsh task is a semantic execution.  Each visible child is a
             -- separately-owned, append-only backend generation.  Keeping this
             -- outside tasks prevents a late old-child terminal report from
             -- replacing the current child provenance.
@@ -1358,7 +1358,7 @@ class StateDB:
                     raise ValueError("idempotency_key was already used for a different admission")
                 row = self.task(prior["task_id"])
                 if row is None:
-                    raise RuntimeError("native XCSH admission evidence has no retained task")
+                    raise RuntimeError("native xcsh admission evidence has no retained task")
                 self.conn.commit()
                 return row
             self.add_task(data, commit=False)
@@ -1387,7 +1387,7 @@ class StateDB:
             raise
         row = self.task(data["id"])
         if row is None:
-            raise RuntimeError("native XCSH atomic admission disappeared")
+            raise RuntimeError("native xcsh atomic admission disappeared")
         return row
 
     def update(self, task_id: str, *, event: str | None = None, **values: Any) -> sqlite3.Row:
@@ -1699,14 +1699,14 @@ class StateDB:
                 if (int(task["run_generation"]) != source_generation or task["state"] not in {"waiting_human", "blocked"}
                         or source is None or source["turn_id"] != source_turn_id
                         or int(source["last_event_revision"]) != source_event_revision):
-                    raise ValueError("XCSH continuation source generation is no longer the current waiting turn")
+                    raise ValueError("xcsh continuation source generation is no longer the current waiting turn")
                 prior_action = self.conn.execute(
                     "SELECT * FROM native_execution_generations WHERE task_id=? AND source_generation=?",
                     (task_id, source_generation),
                 ).fetchone()
                 if prior_action is not None:
                     if prior_action["request_sha256"] != request_sha256:
-                        raise ValueError("XCSH continuation conflicts with the durable source-turn action")
+                        raise ValueError("xcsh continuation conflicts with the durable source-turn action")
                     self.conn.commit()
                     return prior_action
             current = self.current_native_generation(task_id)
@@ -1736,7 +1736,7 @@ class StateDB:
                     (generation, ts, task_id, source_generation),
                 ).rowcount
                 if changed != 1:
-                    raise ValueError("XCSH continuation compare-and-set lost its waiting generation")
+                    raise ValueError("xcsh continuation compare-and-set lost its waiting generation")
                 self.record_transition(task_id, task["state"], "starting", "xcsh_continuation_claimed", at=ts)
             self.conn.commit()
         except Exception:
@@ -1935,7 +1935,7 @@ class StateDB:
             return None
         if row["state"] in TERMINAL_STATES:
             raise ValueError("native turn attempted to change terminal task")
-        summary = (result if state == "completed" else str(report.get("reason") or f"Native XCSH turn {state}."))[:MAX_SUMMARY]
+        summary = (result if state == "completed" else str(report.get("reason") or f"Native xcsh turn {state}."))[:MAX_SUMMARY]
         values: dict[str, Any] = {"state": mapped, "summary": summary, "output_excerpt": result if state == "completed" else row["output_excerpt"]}
         if row["agent_session_id"] != session_id or row["native_turn_id"] != turn_id:
             values.update(agent_session_id=session_id, native_turn_id=turn_id)
@@ -2716,11 +2716,11 @@ class Broker:
         return result
 
     async def native_xcsh_admit(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Atomically admit one installed XCSH execution through Herdr.
+        """Atomically admit one installed xcsh execution through Herdr.
 
         This is intentionally separate from Codex dispatch.  It records a
         durable task/idempotency claim before ``execution.resume`` and waits for
-        protocol-23 typed-native-launch binding plus semantic reports to settle it; process exit/output is not
+        protocol-24 typed-native-launch binding plus semantic reports to settle it; process exit/output is not
         task success evidence.
         """
         if params.get("idempotency_key") is None:
@@ -2768,7 +2768,7 @@ class Broker:
             await self._require_native_xcsh_resume_contract()
             await self.herdr.request("workspace.get", {"workspace_id": workspace_id}, timeout=10)
         except Exception as exc:
-            raise ValueError(f"native XCSH workspace is not available: {exc}") from exc
+            raise ValueError(f"native xcsh workspace is not available: {exc}") from exc
         task_id = f"xut-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
         if session_id != launch["session_header"]["id"]:
             raise ValueError("session_id must equal native_launch.session_header.id")
@@ -2782,7 +2782,7 @@ class Broker:
         row = self.db.admit_native_xcsh_task({
             "id": task_id, "parent_id": None, "target": target, "cwd": cwd,
             "priority": priority, "prompt": prompt,
-            "summary": "Installed XCSH semantic UAT admission claimed.", "work_kind": "xcsh",
+            "summary": "Installed xcsh semantic UAT admission claimed.", "work_kind": "xcsh",
             "native_runtime_json": identity_json,
         }, idempotency_key=bounded(params.get("idempotency_key"), 160, "idempotency_key", required=True) or "",
            idempotency_digest=idempotency_digest, session_id=session_id or "", workspace_id=workspace_id or "",
@@ -2791,20 +2791,20 @@ class Broker:
                                                    text=text or "", label="xcsh-native-uat")
 
     async def _require_native_xcsh_resume_contract(self) -> None:
-        """Require protocol-23's typed native-launch response contract.
+        """Require protocol-24's typed native-launch response contract.
 
-        The authoritative compatibility boundary is protocol 23 plus the existing tracked execution and
-        semantic-journal capabilities. Protocol 23 adds the immutable
+        The authoritative compatibility boundary is protocol 24 plus the existing tracked execution and
+        semantic-journal capabilities. Protocol 24 adds the immutable
         workspace receipt needed to bind the returned pane/tab to the claimed
         workspace. Receipt validation below proves the required response
         schema at every admission.
         """
         pong = await self.herdr.request("ping", {}, timeout=10)
         caps = (pong or {}).get("capabilities") or {}
-        if (int((pong or {}).get("protocol", 0)) < 23
+        if (int((pong or {}).get("protocol", 0)) < 24
                 or not caps.get("tracked_executions")
                 or not caps.get("agent_turn_journal")):
-            raise ValueError("Herdr lacks the protocol-23 workspace-bound typed-native-launch, tracked-executions, and semantic-journal contract required for execution.resume")
+            raise ValueError("Herdr lacks the protocol-24 workspace-bound typed-native-launch, tracked-executions, and semantic-journal contract required for execution.resume")
 
     @staticmethod
     def _native_xcsh_effect_request(request: dict[str, Any], label: str) -> dict[str, Any]:
@@ -2867,14 +2867,14 @@ class Broker:
                                       source_event_revision: int | None = None) -> dict[str, Any]:
         row = self.db.task(task_id)
         if row is None or row["work_kind"] != "xcsh" or not row["workspace_id"]:
-            raise ValueError("XCSH resume lacks an admitted task workspace")
+            raise ValueError("xcsh resume lacks an admitted task workspace")
         # Reject a downgraded runtime before continuation CAS can allocate a
         # new generation. A second check remains immediately before I/O below.
         await self._require_native_xcsh_resume_contract()
         try:
             runtime_identity = json.loads(row["native_runtime_json"] or "{}")
         except json.JSONDecodeError as exc:
-            raise RuntimeError("XCSH resume has malformed durable runtime provenance") from exc
+            raise RuntimeError("xcsh resume has malformed durable runtime provenance") from exc
         launch = measure_native_launch(runtime_identity.get("native_launch"),
                                        expected_executable_sha256=runtime_identity.get("xcsh_executable_sha256"))
         if session_id != launch["session_header"]["id"]:
@@ -2897,7 +2897,7 @@ class Broker:
                     run_generation=generation, pane_id=binding["pane_id"], tab_id=binding["tab_id"],
                     agent_session_id=binding["session_id"], native_turn_id=None, herdr_state="starting",
                     session_state="live", cleanup_deadline=None, terminal_reported_at=None, terminal_event_id=None,
-                    summary="Recovered the durable XCSH execution.resume receipt after an interrupted response.",
+                    summary="Recovered the durable xcsh execution.resume receipt after an interrupted response.",
                 )
             return public_task(row) | {"admitted": False, "generation_replayed": True,
                                        "backend_execution_id": binding["backend_execution_id"]} | self._native_xcsh_public_binding(binding)
@@ -2914,7 +2914,7 @@ class Broker:
                 run_generation=generation, pane_id=binding["pane_id"], tab_id=binding["tab_id"],
                 agent_session_id=session_id, native_turn_id=None, herdr_state=execution.get("state", "starting"),
                 session_state="live", cleanup_deadline=None, terminal_reported_at=None, terminal_event_id=None,
-                summary="Installed XCSH execution.resume admitted; awaiting semantic journal identity.",
+                summary="Installed xcsh execution.resume admitted; awaiting semantic journal identity.",
             )
             admitted = bool(result.get("admitted", True))
             return public_task(updated) | {"admitted": admitted,
@@ -2923,7 +2923,7 @@ class Broker:
         except Exception as exc:
             updated = self.db.update(task_id, event="xcsh_resume_unverified", state="unknown",
                                      herdr_state="unknown", session_state="admitting",
-                                     summary=f"XCSH execution.resume outcome is unverified: {str(exc)[:900]}")
+                                     summary=f"xcsh execution.resume outcome is unverified: {str(exc)[:900]}")
             asyncio.create_task(self.emit_attention(updated))
             return public_task(updated) | {"admitted": False, "admission_uncertain": True}
 
@@ -2950,9 +2950,9 @@ class Broker:
                                    pane_id=admitted["pane_id"], tab_id=admitted["tab_id"],
                                    agent_session_id=admitted["session_id"], native_turn_id=None,
                                    herdr_state=execution.get("state", "starting"), session_state="live",
-                                   summary="XCSH execution.resume reconciliation recovered the claimed child.")
+                                   summary="xcsh execution.resume reconciliation recovered the claimed child.")
             except Exception as exc:
-                LOG.debug("native XCSH resume reconciliation pending for %s/%s: %s", task["id"], binding["generation"], exc)
+                LOG.debug("native xcsh resume reconciliation pending for %s/%s: %s", task["id"], binding["generation"], exc)
         actions = self.db.conn.execute(
             "SELECT * FROM native_execution_actions WHERE kind='cancel' AND state='claimed'" +
             (" AND task_id=?" if task_id else ""), (() if task_id is None else (task_id,)),
@@ -2967,7 +2967,7 @@ class Broker:
                 self._validate_native_xcsh_cancel_receipt(binding, execution)
                 self.db.complete_native_action(action["action_key"], execution)
             except Exception as exc:
-                LOG.debug("native XCSH cancellation reconciliation pending for %s: %s", action["action_key"], exc)
+                LOG.debug("native xcsh cancellation reconciliation pending for %s: %s", action["action_key"], exc)
 
     async def create_feature(self, params: dict[str, Any]) -> dict[str, Any]:
         feature_id = bounded(params.get("feature_id"), 120, "feature_id", required=True)
@@ -4045,23 +4045,23 @@ class Broker:
         )
 
     async def _continue_xcsh_task(self, row: sqlite3.Row, text: str) -> dict[str, Any]:
-        """Continue only the same admitted XCSH pane/session generation."""
+        """Continue only the same admitted xcsh pane/session generation."""
         if row["state"] not in {"waiting_human", "blocked"}:
             replay = self.db.current_native_generation(row["id"])
             if replay is not None and replay["source_generation"] is not None:
                 request = json.loads(replay["request_json"])
                 if request.get("text") != text:
-                    raise ValueError("XCSH continuation conflicts with the durable source-turn action")
+                    raise ValueError("xcsh continuation conflicts with the durable source-turn action")
                 return await self._resume_xcsh_generation(
                     row["id"], generation=int(replay["generation"]), session_id=str(replay["session_id"]),
                     text=text, label="xcsh-native-continuation", source_generation=int(replay["source_generation"]),
                     source_turn_id=str(replay["source_turn_id"] or ""),
                     source_event_revision=int(replay["source_event_revision"]),
                 )
-            raise ValueError("XCSH continuation requires a semantic waiting state")
+            raise ValueError("xcsh continuation requires a semantic waiting state")
         binding = self.db.current_native_generation(row["id"])
         if binding is None or not row["agent_session_id"] or binding["session_id"] != row["agent_session_id"]:
-            raise RuntimeError("XCSH continuation lacks an admitted semantic identity")
+            raise RuntimeError("xcsh continuation lacks an admitted semantic identity")
         self._cancel_cleanup(row["id"])
         return await self._resume_xcsh_generation(
             row["id"], generation=int(binding["generation"]) + 1,
@@ -4097,7 +4097,7 @@ class Broker:
                 if row["work_kind"] == "xcsh":
                     binding = self.db.current_native_generation(task_id or "")
                     if binding is None or binding["backend_execution_id"] is None:
-                        raise RuntimeError("XCSH cancellation lacks a current admitted backend execution")
+                        raise RuntimeError("xcsh cancellation lacks a current admitted backend execution")
                     execution_id = binding["backend_execution_id"]
                     action = self.db.claim_native_cancel(task_id or "", int(binding["generation"]), execution_id)
                     if action["state"] == "completed":
@@ -4119,7 +4119,7 @@ class Broker:
                     self.db.update(
                         task_id or "", event="xcsh_cancel_requested", stop_requested_at=self.clock(),
                         herdr_state=result.get("execution", result).get("state", "cancelling"),
-                        summary="Graceful XCSH cancellation requested; awaiting semantic cancelled report.",
+                        summary="Graceful xcsh cancellation requested; awaiting semantic cancelled report.",
                     )
                 return public_task(self.db.task(task_id or ""))
             else:

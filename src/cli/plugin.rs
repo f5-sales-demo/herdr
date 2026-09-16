@@ -701,6 +701,15 @@ fn parse_split_direction(value: &str) -> Option<SplitDirection> {
 }
 
 fn normalize_plugin_path_arg(value: &str) -> std::io::Result<String> {
+    if super::target::is_remote() {
+        if super::target::remote_path_is_absolute(value) {
+            return Ok(value.to_owned());
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "remote plugin paths must be absolute",
+        ));
+    }
     let path = crate::worktree::expand_tilde_path(value);
     let absolute = if path.is_absolute() {
         path
@@ -1618,14 +1627,22 @@ fn current_unix_ms() -> u64 {
 }
 
 fn is_connection_error(err: &std::io::Error) -> bool {
-    matches!(
-        err.kind(),
-        std::io::ErrorKind::NotFound
-            | std::io::ErrorKind::ConnectionRefused
-            | std::io::ErrorKind::ConnectionAborted
-            | std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::BrokenPipe
-    )
+    if super::target::is_remote() {
+        return false;
+    }
+    // A `server_not_running` marker is a connect failure for recovery purposes:
+    // treating it as a connection error lets plugin commands fall back to the
+    // offline registry. The marker carries (but does not print) a friendly
+    // response, so recovering here prints nothing.
+    super::server_not_running_was_reported(err)
+        || matches!(
+            err.kind(),
+            std::io::ErrorKind::NotFound
+                | std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::BrokenPipe
+        )
 }
 
 fn print_plugin_response(method: Method) -> std::io::Result<i32> {
@@ -1666,6 +1683,15 @@ fn print_plugin_pane_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn machine_plugin_connection_errors_never_use_local_offline_state() {
+        crate::cli::target::with_test_client(crate::api::client::ApiClient::local(), || {
+            assert!(!is_connection_error(&std::io::Error::from(
+                std::io::ErrorKind::ConnectionRefused
+            )));
+        });
+    }
 
     fn unique_plugin_id(label: &str) -> String {
         let nanos = SystemTime::now()

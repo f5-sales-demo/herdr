@@ -10,7 +10,7 @@ Broker feature lifecycles are its only durable scheduler. The canonical
 manager runs with Codex goals disabled; the supervisor detects and idempotently
 clears any persisted goal without creating a turn or replacing the thread.
 
-Release scope includes the reviewed source-only native XCSH admission consumer,
+Release scope includes the reviewed source-only native xcsh admission consumer,
 installed-runtime UAT driver, disposable-runtime controller, catalog, and
 acceptance boundary. It deliberately excludes synthetic fixture runners,
 test/dev state, local receipts, credentials, installed-artifact evidence, and

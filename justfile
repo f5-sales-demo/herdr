@@ -1,15 +1,27 @@
 # herdr task runner
+set windows-shell := ["cmd.exe", "/d", "/s", "/c"]
+
+python := if os() == "windows" { "python" } else { "python3" }
 
 # Run tests
 test:
     cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_downstream_release_plan scripts.test_downstream_release_workflow scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_render_downstream_homebrew_formula scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
+    just maintenance-test
+    just ui-hot-path-architecture-test
     just integration-assets-test
-    just plugin-marketplace-test
+    just docs-contract-test
+
+# Run repository maintenance contract tests
+maintenance-test:
+    {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_downstream_release_plan scripts.test_downstream_release_workflow scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_render_downstream_homebrew_formula scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross
 
 # Run one nextest filter, e.g. `just test-one codex_stale_working`
 test-one filter:
     cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
+
+# Enforce deterministic UI hot-path architecture boundaries
+ui-hot-path-architecture-test:
+    {{python}} -m unittest scripts.test_ui_hot_path_architecture
 
 # Run fast local lint checks
 [unix]
@@ -23,22 +35,30 @@ lint:
     & .\scripts\windows_check.ps1 -Mode lint
 
 # Run PR CI checks
-[unix]
 ci filter='all()': lint
+    just ci-tests "{{filter}}"
+
+# Keep the test build independently configurable from clippy in CI.
+ci-tests filter='all()':
     cargo nextest run --locked -E "{{filter}}" --status-level fail --final-status-level slow --failure-output final --success-output never
+    just maintenance-test
+    just ui-hot-path-architecture-test
     just integration-assets-test
-    just plugin-marketplace-test
+
+# Download the Windows SDK once (requires xwin; prompts for Microsoft's SDK license)
+[unix]
+setup-windows-cross *args:
+    {{python}} scripts/windows_cross.py setup {{args}}
 
 # Run Windows target lint from Unix/macOS to catch cfg(windows) compile and clippy failures before CI
 [unix]
 windows-lint:
-    rustup target add x86_64-pc-windows-msvc
-    LIBGHOSTTY_VT_SIMD=false cargo clippy --bin herdr --locked --target x86_64-pc-windows-msvc -- -D warnings
+    {{python}} scripts/windows_cross.py lint
 
-# Check formatting + run unit tests + Windows target lint + maintenance script tests
+# Check formatting + run unit tests + Windows target lint + documentation contract tests
 [unix]
 check: ci windows-lint
-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_downstream_release_plan scripts.test_downstream_release_workflow scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_render_downstream_homebrew_formula scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
+    just docs-contract-test
     @echo "docs reminder: if this changes user-facing behavior, make sure the relevant release docs are updated or called out before release."
 
 [script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
@@ -57,18 +77,28 @@ install-hooks:
 build:
     cargo build --release --locked
 
-# Build the website and documentation
-website-build:
-    cd website && bun install --frozen-lockfile && bun run build
+# Non-gating full-render scaling profile for background workspaces and active panes
+bench-render-scale:
+    cargo test --release --locked --bin herdr render_scale_profile -- --ignored --nocapture --test-threads=1
+
+# ~3-5 minute CPU comparison; downloads stable unless HERDR_PERF_BASELINE_BIN is set
+bench-release-smoke:
+    cargo build --release --locked
+    scripts/release_perf_smoke.sh "${CARGO_TARGET_DIR:-target}/release/herdr"
+
+# Test public documentation snapshot and release lifecycle tooling
+docs-contract-test:
+    bun test ./scripts/docs
 
 # Test bundled agent integration assets
 integration-assets-test:
     bun test src/integration/assets/herdr-agent-state.test.ts
     bun test src/integration/assets/opencode/herdr-agent-state.test.ts
+    bun test src/integration/assets/opencode/herdr-tui-session.test.ts
 
-# Run plugin marketplace Worker tests
-plugin-marketplace-test:
-    cd workers/plugin-marketplace && bun test
+# Regenerate the C API bindings with bindgen-cli 0.72.1
+libghostty-bindings *clang_args:
+    bash scripts/generate_libghostty_bindings.sh {{clang_args}}
 
 # Build the vendored libghostty-vt source dist
 build-libghostty-vt:
@@ -76,17 +106,20 @@ build-libghostty-vt:
 
 # Check that release docs and changelog have been finalized from docs/next before release
 release-docs-check:
-    python3 scripts/agent_detection_manifest_check.py --require-website
+    python3 scripts/agent_detection_manifest_check.py --require-all-published
     python3 scripts/config_reference_check.py
-    node website/scripts/docs-versions.mjs check
+    node scripts/docs/versions.mjs check
+    node scripts/docs/preview.mjs check
+    just docs-contract-test
     @test -f docs/next/README.md
+    @test -f docs/next/README.zh-CN.md
     @if ! diff -u CHANGELOG.md docs/next/CHANGELOG.md; then \
         echo "error: CHANGELOG.md differs from docs/next/CHANGELOG.md; finalize release notes before releasing"; \
         exit 1; \
     fi
     @for file in CONFIGURATION.md INTEGRATIONS.md SOCKET_API.md; do \
         if [ -e "$file" ]; then \
-            echo "error: $file was replaced by website docs; remove the root copy"; \
+            echo "error: $file was replaced by technical docs; remove the root copy"; \
             exit 1; \
         fi; \
     done
@@ -108,8 +141,15 @@ release-docs-check:
         fi; \
     done
     python3 scripts/docs_translation_parity.py --docs-root docs/next/website/src/content/docs
-    python3 scripts/docs_translation_parity.py --docs-root website/src/content/docs
-    just website-build
+
+# Validate release docs, render scaling, and end-to-end CPU before release preparation
+pre-release-check:
+    just release-docs-check
+    just bench-render-scale
+    just bench-release-smoke
+    @echo "release review required: investigate material render-scaling regressions before publishing."
+    @echo "release review required: update skills/herdr/SKILL.md for this stable release so it matches the current CLI, IDs, agent lifecycle semantics, and safety guidance."
+    @echo "release policy: do not update skills/herdr/SKILL.md between stable releases; preview builds keep the latest stable skill."
 
 # Prepare the release commit without tagging or pushing (usage: just release-prepare 0.1.1)
 release-prepare version:
@@ -117,8 +157,10 @@ release-prepare version:
         echo "error: version must look like 0.6.6 without a v prefix"; \
         exit 1; \
     }
-    @if [ -n "$(git status --porcelain)" ]; then \
-        echo "error: commit your changes first"; \
+    @if ! git diff --quiet -- . ':(exclude)skills/herdr/SKILL.md' || \
+        ! git diff --cached --quiet -- . ':(exclude)skills/herdr/SKILL.md' || \
+        [ -n "$(git ls-files --others --exclude-standard)" ]; then \
+        echo "error: commit all changes except skills/herdr/SKILL.md first"; \
         exit 1; \
     fi
     @git fetch origin master --tags
@@ -126,13 +168,13 @@ release-prepare version:
         echo "error: tag v{{version}} already exists"; \
         exit 1; \
     fi
-    just release-docs-check
+    just pre-release-check
     python3 scripts/changelog.py prepare --version {{version}}
     cp CHANGELOG.md docs/next/CHANGELOG.md
     sed -i.bak 's/^version = ".*"/version = "{{version}}"/' Cargo.toml && rm -f Cargo.toml.bak
     cargo update -p herdr --offline
     just check
-    git add CHANGELOG.md docs/next/CHANGELOG.md Cargo.toml Cargo.lock
+    git add CHANGELOG.md docs/next/CHANGELOG.md Cargo.toml Cargo.lock skills/herdr/SKILL.md
     git diff --cached --quiet || git commit -m "release: v{{version}}"
     @echo "v{{version}} release commit prepared. Review it, then run: just release-publish {{version}}"
 
@@ -176,7 +218,7 @@ release-publish version:
     fi
     git tag -a v{{version}} -m "v{{version}}"
     git push origin v{{version}}
-    @echo "v{{version}} released — GitHub Actions building binaries and updating website/latest.json"
+    @echo "v{{version}} released — GitHub Actions building binaries and updating distribution/latest.json"
 
 # Prepare, verify, tag, push, and trigger the GitHub Release workflow (usage: just release 0.1.1)
 release version:

@@ -23,7 +23,6 @@ use crate::ipc::{
 };
 
 mod pane_graphics_stream;
-pub(crate) use pane_graphics_stream::cancel_inactive_streams as cancel_inactive_pane_graphics_streams;
 
 const SOCKET_PERMISSION_MODE: u32 = 0o600;
 pub(super) const CONNECTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -57,26 +56,39 @@ impl ServerHandle {
     }
 }
 
-pub fn start_server(
+pub(crate) fn start_server_with_stop_control(
     api_tx: ApiRequestSender,
     event_hub: EventHub,
+    server_stop: Arc<AtomicBool>,
+    runtime_state: crate::execution::SharedRuntimeState,
 ) -> std::io::Result<ServerHandle> {
-    start_server_with_capabilities(
+    start_server_inner(
         api_tx,
         event_hub,
-        Some(ServerCapabilities {
-            live_handoff: crate::platform::capabilities().live_handoff,
-            detached_server_daemon: crate::platform::current_process_is_detached_server_daemon(),
-            tracked_executions: true,
-            agent_turn_journal: true,
-        }),
+        default_capabilities(),
+        Some(server_stop),
+        runtime_state,
     )
 }
 
-pub fn start_server_with_capabilities(
+fn default_capabilities() -> Option<ServerCapabilities> {
+    Some(ServerCapabilities {
+        live_handoff: crate::platform::capabilities().live_handoff,
+        detached_server_daemon: crate::platform::current_process_is_detached_server_daemon(),
+        endpoint_protocol_generation: Some(crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION),
+        surface_interest: true,
+        health_check: true,
+        tracked_executions: true,
+        agent_turn_journal: true,
+    })
+}
+
+fn start_server_inner(
     api_tx: ApiRequestSender,
     event_hub: EventHub,
     capabilities: Option<ServerCapabilities>,
+    server_stop: Option<Arc<AtomicBool>>,
+    runtime_state: crate::execution::SharedRuntimeState,
 ) -> std::io::Result<ServerHandle> {
     let path = socket_path();
     prepare_socket_path(&path)?;
@@ -95,14 +107,18 @@ pub fn start_server_with_capabilities(
                     let api_tx = api_tx.clone();
                     let event_hub = event_hub.clone();
                     let capabilities = capabilities.clone();
+                    let server_stop = server_stop.clone();
+                    let runtime_state = runtime_state.clone();
                     let connection_running = Arc::clone(&listener_running);
                     std::thread::spawn(move || {
-                        if let Err(err) = handle_connection(
+                        if let Err(err) = handle_connection_with_stop(
                             stream,
                             &api_tx,
                             &event_hub,
                             &connection_running,
                             capabilities,
+                            server_stop.as_ref(),
+                            &runtime_state,
                         ) {
                             warn!(err = %err, "api connection failed");
                         }
@@ -138,12 +154,33 @@ fn restrict_socket_permissions(path: &Path) -> std::io::Result<()> {
     crate::ipc::restrict_socket_permissions(path, SOCKET_PERMISSION_MODE)
 }
 
+#[cfg(test)]
 fn handle_connection(
+    stream: LocalStream,
+    api_tx: &ApiRequestSender,
+    event_hub: &EventHub,
+    running: &Arc<AtomicBool>,
+    capabilities: Option<ServerCapabilities>,
+) -> std::io::Result<()> {
+    handle_connection_with_stop(
+        stream,
+        api_tx,
+        event_hub,
+        running,
+        capabilities,
+        None,
+        &crate::execution::SharedRuntimeState::isolated(),
+    )
+}
+
+fn handle_connection_with_stop(
     mut stream: LocalStream,
     api_tx: &ApiRequestSender,
     event_hub: &EventHub,
     running: &Arc<AtomicBool>,
     capabilities: Option<ServerCapabilities>,
+    server_stop: Option<&Arc<AtomicBool>>,
+    runtime_state: &crate::execution::SharedRuntimeState,
 ) -> std::io::Result<()> {
     if let Err(err) = stream.set_send_timeout(Some(STREAM_WRITE_TIMEOUT)) {
         debug!(err = %err, "api connection write timeout unavailable");
@@ -266,7 +303,9 @@ fn handle_connection(
                 },
                 api_tx,
                 capabilities,
+                server_stop,
                 Some(response_write_rx),
+                runtime_state,
             );
             let result = write_text_line_allow_disconnect(&mut stream, &response);
             let _ = response_write_tx.send(());
@@ -319,12 +358,12 @@ fn handle_request(
     request: Request,
     api_tx: &ApiRequestSender,
     capabilities: Option<ServerCapabilities>,
+    server_stop: Option<&Arc<AtomicBool>>,
     response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
+    runtime_state: &crate::execution::SharedRuntimeState,
 ) -> String {
-    let executions = crate::execution::ExecutionManager::global();
-    let agent_turns = crate::agent_turn::AgentTurnManager::global();
-    match request.method {
-        Method::Ping(_) => serde_json::to_string(&SuccessResponse {
+    if matches!(&request.method, Method::Ping(_)) {
+        return serde_json::to_string(&SuccessResponse {
             id: request.id,
             result: ResponseResult::Pong {
                 version: crate::build_info::version(),
@@ -335,104 +374,127 @@ fn handle_request(
         .unwrap_or_else(|_| {
             r#"{"id":"","error":{"code":"internal_error","message":"failed to encode response"}}"#
                 .to_string()
-        }),
-        Method::ExecutionGet(target) => match executions.get(&target.execution_id) {
-            Some(execution) => encode_execution_response(
+        });
+    }
+
+    if matches!(&request.method, Method::ClientShellSurfaceSet(_)) {
+        return error_response_json(
+            request.id,
+            "connection_local_only",
+            "client_shell.surface.set is only available through a client shell endpoint".into(),
+        );
+    }
+
+    if matches!(&request.method, Method::ServerStop(_)) {
+        if let Some(server_stop) = server_stop {
+            server_stop.store(true, Ordering::Release);
+            return serde_json::to_string(&SuccessResponse {
+                id: request.id,
+                result: ResponseResult::Ok {},
+            })
+            .unwrap_or_else(|_| "{}".to_string());
+        }
+    } else if server_stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
+        return error_response_json(
+            request.id,
+            "server_unavailable",
+            "server is shutting down".into(),
+        );
+    }
+
+    match request.method {
+        Method::ExecutionGet(target) => match runtime_state.executions.get(&target.execution_id) {
+            Some(execution) => encode_runtime_response(
                 request.id,
-                crate::api::schema::ResponseResult::Execution {
+                ResponseResult::Execution {
                     execution,
                     admitted: false,
                 },
             ),
-            None => encode_execution_error(request.id, "execution_not_found"),
+            None => encode_runtime_error(request.id, "execution_not_found"),
         },
-        Method::ExecutionList(params) => encode_execution_response(
+        Method::ExecutionList(params) => encode_runtime_response(
             request.id,
-            crate::api::schema::ResponseResult::ExecutionList {
-                executions: executions.list_since(params.since_revision),
+            ResponseResult::ExecutionList {
+                executions: runtime_state.executions.list_since(params.since_revision),
             },
         ),
-        Method::ExecutionWait(params) => encode_execution_response(
+        Method::ExecutionWait(params) => encode_runtime_response(
             request.id,
-            crate::api::schema::ResponseResult::ExecutionList {
-                executions: executions.wait_since(params.after_revision, params.timeout_ms),
+            ResponseResult::ExecutionList {
+                executions: runtime_state
+                    .executions
+                    .wait_since(params.after_revision, params.timeout_ms),
             },
         ),
-        Method::AgentTurnReport(params) => match agent_turns.report(params) {
-            Ok((turn, admitted)) => encode_execution_response(
-                request.id,
-                crate::api::schema::ResponseResult::AgentTurn { turn, admitted },
-            ),
-            Err(error) => {
-                let code = error.split(':').next().unwrap_or("agent_turn_error");
-                encode_execution_error(request.id, code)
+        Method::AgentTurnReport(params) => match runtime_state
+            .agent_turns
+            .report(params, &runtime_state.executions)
+        {
+            Ok((turn, admitted)) => {
+                encode_runtime_response(request.id, ResponseResult::AgentTurn { turn, admitted })
             }
+            Err(error) => encode_runtime_error(request.id, &error),
         },
-        Method::AgentTurnActionGet(params) => match executions.native_actions(&params) {
-            Ok(actions) => encode_execution_response(
+        Method::AgentTurnActionGet(params) => {
+            match runtime_state.executions.native_actions(&params) {
+                Ok(actions) => encode_runtime_response(
+                    request.id,
+                    ResponseResult::AgentTurnActionList { actions },
+                ),
+                Err(error) => encode_runtime_error(request.id, &error),
+            }
+        }
+        Method::AgentTurnActionAck(params) => {
+            match runtime_state.executions.acknowledge_native_action(&params) {
+                Ok((action, admitted)) => encode_runtime_response(
+                    request.id,
+                    ResponseResult::AgentTurnAction { action, admitted },
+                ),
+                Err(error) => encode_runtime_error(request.id, &error),
+            }
+        }
+        Method::AgentTurnGet(target) => match runtime_state.agent_turns.get(&target) {
+            Some(turn) => encode_runtime_response(
                 request.id,
-                crate::api::schema::ResponseResult::AgentTurnActionList { actions },
-            ),
-            Err(error) => encode_execution_error(request.id, &error),
-        },
-        Method::AgentTurnActionAck(params) => match executions.acknowledge_native_action(&params) {
-            Ok((action, admitted)) => encode_execution_response(
-                request.id,
-                crate::api::schema::ResponseResult::AgentTurnAction { action, admitted },
-            ),
-            Err(error) => encode_execution_error(request.id, &error),
-        },
-        Method::AgentTurnGet(target) => match agent_turns.get(&target) {
-            Some(turn) => encode_execution_response(
-                request.id,
-                crate::api::schema::ResponseResult::AgentTurn {
+                ResponseResult::AgentTurn {
                     turn,
                     admitted: false,
                 },
             ),
-            None => encode_execution_error(request.id, "agent_turn_not_found"),
+            None => encode_runtime_error(request.id, "agent_turn_not_found"),
         },
-        Method::AgentTurnList(params) => encode_execution_response(
+        Method::AgentTurnList(params) => encode_runtime_response(
             request.id,
-            crate::api::schema::ResponseResult::AgentTurnList {
-                turns: agent_turns.list_since(params.since_revision),
+            ResponseResult::AgentTurnList {
+                turns: runtime_state.agent_turns.list_since(params.since_revision),
             },
         ),
-        Method::AgentTurnWait(params) => encode_execution_response(
+        Method::AgentTurnWait(params) => encode_runtime_response(
             request.id,
-            crate::api::schema::ResponseResult::AgentTurnList {
-                turns: agent_turns.wait_since(params.after_revision, params.timeout_ms),
+            ResponseResult::AgentTurnList {
+                turns: runtime_state
+                    .agent_turns
+                    .wait_since(params.after_revision, params.timeout_ms),
             },
         ),
-        _ => dispatch_to_app_with_timeout_and_write_completion(
-            request,
-            api_tx,
-            None,
-            response_write_complete,
-        ),
+        _ => dispatch_to_app(request, api_tx, None, response_write_complete, None, None),
     }
 }
 
-fn encode_execution_response(id: String, result: crate::api::schema::ResponseResult) -> String {
+fn encode_runtime_response(id: String, result: ResponseResult) -> String {
     serde_json::to_string(&SuccessResponse { id, result }).unwrap_or_else(|_| {
         r#"{"id":"","error":{"code":"internal_error","message":"failed to encode response"}}"#
             .to_string()
     })
 }
 
-fn encode_execution_error(id: String, message: &str) -> String {
+fn encode_runtime_error(id: String, message: &str) -> String {
     let code = message.split(':').next().unwrap_or("execution_error");
-    serde_json::to_string(&ErrorResponse {
-        id,
-        error: ErrorBody {
-            code: code.into(),
-            message: message.into(),
-        },
-    })
-    .unwrap_or_else(|_| "{}".into())
+    error_response_json(id, code, message.into())
 }
 
-fn api_method_name(method: &Method) -> &'static str {
+pub(crate) fn api_method_name(method: &Method) -> &'static str {
     match method {
         Method::Ping(_) => "ping",
         Method::ServerStop(_) => "server.stop",
@@ -441,8 +503,12 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::ServerAgentManifests(_) => "server.agent_manifests",
         Method::ServerReloadAgentManifests(_) => "server.reload_agent_manifests",
         Method::NotificationShow(_) => "notification.show",
+        Method::ProductAnnouncementDismiss(_) => "product_announcement.dismiss",
+        Method::ReleaseNotesDismiss(_) => "release_notes.dismiss",
+        Method::CommandInvoke(_) => "command.invoke",
         Method::ClientWindowTitleSet(_) => "client.window_title.set",
         Method::ClientWindowTitleClear(_) => "client.window_title.clear",
+        Method::ClientShellSurfaceSet(_) => "client_shell.surface.set",
         Method::SessionSnapshot(_) => "session.snapshot",
         Method::WorkspaceCreate(_) => "workspace.create",
         Method::WorkspaceList(_) => "workspace.list",
@@ -489,10 +555,18 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneEdges(_) => "pane.edges",
         Method::PaneFocusDirection(_) => "pane.focus_direction",
         Method::PaneResize(_) => "pane.resize",
+        Method::PaneScroll(_) => "pane.scroll",
+        Method::PaneEditScrollback(_) => "pane.edit_scrollback",
+        Method::PaneSelectionRead(_) => "pane.selection.read",
+        Method::PaneCopyMotion(_) => "pane.copy_motion",
+        Method::PaneCopySearch(_) => "pane.copy_search",
         Method::PaneList(_) => "pane.list",
         Method::PaneCurrent(_) => "pane.current",
         Method::PaneGet(_) => "pane.get",
         Method::PaneFocus(_) => "pane.focus",
+        Method::PaneInputSet(_) => "pane.input.set",
+        Method::PaneLinkActivate(_) => "pane.link.activate",
+        Method::PaneLinkResolve(_) => "pane.link.resolve",
         Method::PaneRename(_) => "pane.rename",
         Method::PaneSendText(_) => "pane.send_text",
         Method::PaneSendKeys(_) => "pane.send_keys",
@@ -503,6 +577,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneGraphicsInfo(_) => "pane.graphics.info",
         Method::PaneGraphicsStream(_) => "pane.graphics.stream",
         Method::PaneGraphicsStreamSet(_) => "pane.graphics.stream.set",
+        Method::PaneGraphicsStreamDirect(_) => "pane.graphics.stream.direct",
         Method::PaneGraphicsStreamOpen(_) => "pane.graphics.stream.open",
         Method::PaneGraphicsStreamClose(_) => "pane.graphics.stream.close",
         Method::PaneReportAgent(_) => "pane.report_agent",
@@ -528,6 +603,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::AgentTurnList(_) => "agent.turn.list",
         Method::AgentTurnWait(_) => "agent.turn.wait",
         Method::PaneWaitForOutput(_) => "pane.wait_for_output",
+        Method::IntegrationList(_) => "integration.list",
         Method::IntegrationInstall(_) => "integration.install",
         Method::IntegrationUninstall(_) => "integration.uninstall",
         Method::PluginLink(_) => "plugin.link",
@@ -755,21 +831,28 @@ fn stream_subscriptions(
     event_hub: &EventHub,
     running: &Arc<AtomicBool>,
 ) -> std::io::Result<()> {
+    let event_start_sequence = event_hub.current_sequence();
     let mut subscriptions = Vec::with_capacity(params.subscriptions.len());
     for (index, subscription) in params.subscriptions.into_iter().enumerate() {
-        let active =
-            match ActiveSubscription::new(subscription, &request_id, index, api_tx, event_hub) {
-                Ok(active) => active,
-                Err(response) => {
-                    if let Err(err) = write_json_line(&mut stream, &response) {
-                        if is_connection_closed_error(&err) {
-                            return Ok(());
-                        }
-                        return Err(err);
+        let active = match ActiveSubscription::new(
+            subscription,
+            &request_id,
+            index,
+            api_tx,
+            event_hub,
+            event_start_sequence,
+        ) {
+            Ok(active) => active,
+            Err(response) => {
+                if let Err(err) = write_json_line(&mut stream, &response) {
+                    if is_connection_closed_error(&err) {
+                        return Ok(());
                     }
-                    return Ok(());
+                    return Err(err);
                 }
-            };
+                return Ok(());
+            }
+        };
         subscriptions.push(active);
     }
 
@@ -852,22 +935,68 @@ pub(super) fn dispatch_to_app_with_timeout(
     api_tx: &ApiRequestSender,
     timeout: Option<Duration>,
 ) -> String {
-    dispatch_to_app_with_timeout_and_write_completion(request, api_tx, timeout, None)
+    dispatch_to_app(request, api_tx, timeout, None, None, None)
 }
 
-fn dispatch_to_app_with_timeout_and_write_completion(
+pub(super) fn dispatch_to_app_with_caller_timeout(
+    request: Request,
+    api_tx: &ApiRequestSender,
+    timeout: Option<Duration>,
+) -> String {
+    dispatch_to_app(
+        request,
+        api_tx,
+        timeout,
+        None,
+        None,
+        Some(("timeout", "timed out waiting for agent status")),
+    )
+}
+
+pub(super) fn dispatch_stream_open(
+    request: Request,
+    api_tx: &ApiRequestSender,
+    timeout: Duration,
+    active: Arc<AtomicBool>,
+) -> String {
+    dispatch_to_app(request, api_tx, Some(timeout), None, Some(active), None)
+}
+
+pub(super) fn dispatch_stream_frame(
+    request: Request,
+    api_tx: &ApiRequestSender,
+    active: Arc<AtomicBool>,
+) -> String {
+    dispatch_to_app(
+        request,
+        api_tx,
+        Some(crate::app::pane_graphics::DIRECT_OUTER_TIMEOUT),
+        None,
+        Some(active),
+        None,
+    )
+}
+
+fn dispatch_to_app(
     request: Request,
     api_tx: &ApiRequestSender,
     timeout: Option<Duration>,
     response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
+    stream_active: Option<Arc<AtomicBool>>,
+    timeout_response: Option<(&str, &str)>,
 ) -> String {
     let request_id = request.id.clone();
+    let request_active = stream_active.clone();
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     if let Err(err) = api_tx.send(ApiRequestMessage {
         request,
         respond_to,
         response_write_complete,
+        stream_active,
     }) {
+        if let Some(active) = request_active {
+            active.store(false, Ordering::Release);
+        }
         return error_response_json(
             request_id,
             "server_unavailable",
@@ -896,12 +1025,43 @@ fn dispatch_to_app_with_timeout_and_write_completion(
 
     match response {
         Ok(response) => response,
-        Err(err) => error_response_json(
-            request_id,
-            "server_unavailable",
-            format!("request handling failed: {err}"),
-        ),
+        Err(err) => {
+            if let Some(active) = request_active {
+                active.store(false, Ordering::Release);
+            }
+            if err.kind() == std::io::ErrorKind::TimedOut {
+                if let Some((code, message)) = timeout_response {
+                    return error_response_json(request_id, code, message.into());
+                }
+            }
+            error_response_json(
+                request_id,
+                "server_unavailable",
+                format!("request handling failed: {err}"),
+            )
+        }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn caller_timeout_dispatch_uses_timeout_error() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let response = dispatch_to_app_with_caller_timeout(
+        Request {
+            id: "prompt-timeout".into(),
+            method: Method::AgentPrompt(crate::api::schema::AgentPromptParams {
+                target: "reviewer".into(),
+                text: "review this".into(),
+                provider: None,
+                wait: None,
+            }),
+        },
+        &tx,
+        Some(Duration::ZERO),
+    );
+    let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+    assert_eq!(error.error.code, "timeout");
 }
 
 fn error_response_json(id: String, code: &str, message: String) -> String {
@@ -1102,6 +1262,7 @@ mod tests {
     #[test]
     fn ping_request_returns_pong() {
         let (tx, _rx) = mpsc::unbounded_channel();
+        let runtime_state = crate::execution::SharedRuntimeState::isolated();
         let response = handle_request(
             Request {
                 id: "req_1".into(),
@@ -1111,15 +1272,60 @@ mod tests {
             Some(ServerCapabilities {
                 live_handoff: true,
                 detached_server_daemon: true,
+                endpoint_protocol_generation: Some(
+                    crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION,
+                ),
+                surface_interest: true,
+                health_check: true,
                 tracked_executions: true,
                 agent_turn_journal: true,
             }),
             None,
+            None,
+            &runtime_state,
         );
 
         let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed.id, "req_1");
         assert!(matches!(parsed.result, ResponseResult::Pong { .. }));
+    }
+
+    #[test]
+    fn server_stop_control_bypasses_app_channel() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let runtime_state = crate::execution::SharedRuntimeState::isolated();
+        let response = handle_request(
+            Request {
+                id: "priority_stop".into(),
+                method: Method::ServerStop(crate::api::schema::EmptyParams::default()),
+            },
+            &tx,
+            None,
+            Some(&stop),
+            None,
+            &runtime_state,
+        );
+
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["id"], "priority_stop");
+        assert_eq!(response["result"]["type"], "ok");
+        assert!(stop.load(Ordering::Acquire));
+
+        let rejected = handle_request(
+            Request {
+                id: "after_stop".into(),
+                method: Method::WorkspaceList(crate::api::schema::EmptyParams::default()),
+            },
+            &tx,
+            None,
+            Some(&stop),
+            None,
+            &runtime_state,
+        );
+        let rejected: serde_json::Value = serde_json::from_str(&rejected).unwrap();
+        assert_eq!(rejected["error"]["code"], "server_unavailable");
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -1131,8 +1337,10 @@ mod tests {
         };
 
         let request_for_thread = request.clone();
-        let thread =
-            std::thread::spawn(move || handle_request(request_for_thread, &tx, None, None));
+        let runtime_state = crate::execution::SharedRuntimeState::isolated();
+        let thread = std::thread::spawn(move || {
+            handle_request(request_for_thread, &tx, None, None, None, &runtime_state)
+        });
 
         let msg = rx.blocking_recv().unwrap();
         assert_eq!(msg.request.id, "req_2");
@@ -1440,6 +1648,8 @@ mod pane_graphics_request_tests {
             id: "graphics-max".into(),
             method: Method::PaneGraphicsSet(crate::api::schema::PaneGraphicsSetParams {
                 pane_id: "pane_1".into(),
+                layer_id: None,
+                z_index: 0,
                 owner: String::new(),
                 format: crate::api::schema::PaneGraphicsFormat::Png,
                 image_width: 1,

@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::model::KITTY_FLAG_REPORT_ALL_KEYS;
@@ -5,6 +7,7 @@ use super::{KeyboardProtocol, MouseProtocolEncoding, TerminalKey};
 
 const KITTY_FLAG_REPORT_EVENT_TYPES: u16 = 0b0000_0010;
 const KITTY_FLAG_REPORT_ALTERNATE_KEYS: u16 = 0b0000_0100;
+const KITTY_FLAG_REPORT_ASSOCIATED_TEXT: u16 = 0b0001_0000;
 
 /// Encode a key event for a PTY child using the pane's negotiated keyboard protocol.
 #[allow(dead_code)] // exercised in input unit tests; production uses TerminalRuntime helpers
@@ -13,8 +16,32 @@ pub fn encode_key(key: KeyEvent, protocol: KeyboardProtocol) -> Vec<u8> {
 }
 
 pub fn encode_terminal_key(key: TerminalKey, protocol: KeyboardProtocol) -> Vec<u8> {
-    if key.is_text_commit {
-        return encode_text_input(&key).unwrap_or_default();
+    // The host layout has not committed text for this Windows dead key. Neither
+    // legacy nor Kitty panes should receive its physical character fallback.
+    // Legacy Windows panes take the native ConPTY fallback before reaching this encoder.
+    if key.is_windows_dead_key() {
+        return Vec::new();
+    }
+
+    // Super has no legacy character encoding. Preserve the chord with CSI-u
+    // instead of leaking the unmodified character into the pane.
+    if matches!(protocol, KeyboardProtocol::Legacy)
+        && key.kind != crossterm::event::KeyEventKind::Release
+        && matches!(key.code, KeyCode::Char(_))
+        && key.modifiers.contains(KeyModifiers::SUPER)
+    {
+        if let Some(bytes) = try_encode_csi_u(&key, 0) {
+            return bytes;
+        }
+    }
+
+    // REPORT_ALL_KEYS must retain physical press/repeat/release semantics instead of
+    // reducing a native key to its layout-generated text.
+    let preserve_physical_key = key.has_physical_identity() && protocol.reports_all_keys();
+    if !preserve_physical_key && key.kind != crossterm::event::KeyEventKind::Release {
+        if let Some(text) = &key.generated_text {
+            return text.as_bytes().to_vec();
+        }
     }
 
     // A release event only produces bytes when the pane protocol reports event
@@ -120,7 +147,7 @@ fn encode_mouse_cb(
     encoding: MouseProtocolEncoding,
 ) -> Option<Vec<u8>> {
     let mut cb = match (encoding, release) {
-        (MouseProtocolEncoding::Sgr, true) => base_button,
+        (MouseProtocolEncoding::Sgr | MouseProtocolEncoding::SgrPixels, true) => base_button,
         (_, true) => 3,
         (_, false) => base_button,
     };
@@ -138,7 +165,7 @@ fn encode_mouse_cb(
     let row = row as u32 + 1;
 
     match encoding {
-        MouseProtocolEncoding::Sgr => Some(
+        MouseProtocolEncoding::Sgr | MouseProtocolEncoding::SgrPixels => Some(
             format!(
                 "\x1b[<{cb};{column};{row}{}",
                 if release { 'm' } else { 'M' }
@@ -238,14 +265,29 @@ fn try_encode_csi_u(key: &TerminalKey, flags: u16) -> Option<Vec<u8>> {
 
     let modifier = kitty_modifier(mods);
 
-    let sequence = match (alternate_shifted, event_suffix) {
-        (Some(shifted), Some(event)) => format!("\x1b[{codepoint}:{shifted};{modifier}:{event}u"),
-        (Some(shifted), None) => format!("\x1b[{codepoint}:{shifted};{modifier}u"),
-        (None, Some(event)) => format!("\x1b[{codepoint};{modifier}:{event}u"),
-        (None, None) => format!("\x1b[{codepoint};{modifier}u"),
-    };
+    let mut sequence = String::with_capacity(32);
+    sequence.push_str("\x1b[");
+    write!(&mut sequence, "{codepoint}").ok()?;
+    if let Some(shifted) = alternate_shifted {
+        write!(&mut sequence, ":{shifted}").ok()?;
+    }
+    write!(&mut sequence, ";{modifier}").ok()?;
+    if let Some(event) = event_suffix {
+        write!(&mut sequence, ":{event}").ok()?;
+    }
+    if flags & KITTY_FLAG_REPORT_ASSOCIATED_TEXT != 0 {
+        if let Some(text) = text_codepoint_for_key(key) {
+            write!(&mut sequence, ";{text}").ok()?;
+        }
+    }
+    sequence.push('u');
 
     Some(sequence.into_bytes())
+}
+
+fn text_codepoint_for_key(key: &TerminalKey) -> Option<u32> {
+    let ch = text_char_for_key(key)?;
+    (!ch.is_control()).then_some(ch as u32)
 }
 
 /// Legacy terminal encoding (standard escape sequences).
@@ -264,10 +306,7 @@ fn encode_legacy(key: TerminalKey) -> Vec<u8> {
 
     // Alt modifier on character keys: prefix with ESC
     if mods.contains(KeyModifiers::ALT) {
-        let inner = TerminalKey {
-            modifiers: mods.difference(KeyModifiers::ALT),
-            ..key
-        };
+        let inner = key.with_modifiers(mods.difference(KeyModifiers::ALT));
         let mut bytes = vec![0x1b];
         bytes.extend(encode_legacy_inner(inner));
         return bytes;
@@ -353,34 +392,27 @@ fn kitty_modifier(mods: KeyModifiers) -> u32 {
 }
 
 fn encode_text_input(key: &TerminalKey) -> Option<Vec<u8>> {
-    let ch = match key.code {
-        KeyCode::Char(ch) => ch,
-        _ => return None,
-    };
+    let ch = text_char_for_key(key)?;
+    let mut buf = [0u8; 4];
+    Some(ch.encode_utf8(&mut buf).as_bytes().to_vec())
+}
 
-    if key.modifiers.is_empty() {
-        match key.kind {
-            crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat => {
-                let mut buf = [0u8; 4];
-                return Some(ch.encode_utf8(&mut buf).as_bytes().to_vec());
-            }
-            crossterm::event::KeyEventKind::Release => return Some(Vec::new()),
-        }
-    }
-
-    if key.modifiers != KeyModifiers::SHIFT {
+fn text_char_for_key(key: &TerminalKey) -> Option<char> {
+    if key.kind == crossterm::event::KeyEventKind::Release {
         return None;
     }
 
-    let shifted_ch = shifted_text_char(key, ch)?;
+    let KeyCode::Char(ch) = key.code else {
+        return None;
+    };
 
-    match key.kind {
-        crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat => {
-            let mut buf = [0u8; 4];
-            Some(shifted_ch.encode_utf8(&mut buf).as_bytes().to_vec())
-        }
-        crossterm::event::KeyEventKind::Release => Some(Vec::new()),
+    if key.modifiers.is_empty() {
+        return Some(ch);
     }
+    if key.modifiers == KeyModifiers::SHIFT {
+        return shifted_text_char(key, ch);
+    }
+    None
 }
 
 fn shifted_text_char(key: &TerminalKey, ch: char) -> Option<char> {
@@ -481,7 +513,7 @@ fn encode_legacy_inner(key: TerminalKey) -> Vec<u8> {
                     ']' | '5' => vec![29],
                     '^' | '6' => vec![30],
                     '_' | '/' | '7' | '-' => vec![31],
-                    _ => vec![ch as u8],
+                    _ => ch.to_string().into_bytes(),
                 }
             } else {
                 let ch = if key.modifiers == KeyModifiers::SHIFT {
@@ -552,6 +584,36 @@ mod tests {
     }
 
     #[test]
+    fn kitty_all_keys_does_not_encode_windows_altgr_dead_key_phases() {
+        use crossterm::event::KeyEventKind;
+
+        let key = TerminalKey::new(KeyCode::Char('4'), KeyModifiers::empty()).with_windows_record(
+            crate::input::WindowsKeyRecord {
+                key_down: true,
+                repeat_count: 1,
+                virtual_key_code: 52,
+                virtual_scan_code: 5,
+                unicode: 0,
+                control_key_state: 9,
+            },
+        );
+        for kind in [
+            KeyEventKind::Press,
+            KeyEventKind::Repeat,
+            KeyEventKind::Release,
+        ] {
+            assert!(
+                encode_terminal_key(
+                    key.clone().with_kind(kind),
+                    KeyboardProtocol::Kitty { flags: 31 },
+                )
+                .is_empty(),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
     fn legacy_enter() {
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(encode_key(key, KeyboardProtocol::Legacy), vec![b'\r']);
@@ -567,6 +629,12 @@ mod tests {
     fn legacy_ctrl_slash_aliases_ctrl_underscore() {
         let key = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL);
         assert_eq!(encode_key(key, KeyboardProtocol::Legacy), vec![31]);
+    }
+
+    #[test]
+    fn legacy_ctrl_non_ascii_char_uses_utf8() {
+        let key = KeyEvent::new(KeyCode::Char('ß'), KeyModifiers::CONTROL);
+        assert_eq!(encode_key(key, KeyboardProtocol::Legacy), "ß".as_bytes());
     }
 
     #[test]
@@ -879,6 +947,56 @@ mod tests {
     }
 
     #[test]
+    fn kitty_report_associated_text_embeds_shifted_printables() {
+        let cases = [
+            (
+                TerminalKey::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
+                b"\x1b[97;2;65u".as_slice(),
+            ),
+            (
+                TerminalKey::new(KeyCode::Char('1'), KeyModifiers::SHIFT)
+                    .with_shifted_codepoint('!' as u32),
+                b"\x1b[49;2;33u".as_slice(),
+            ),
+            (
+                TerminalKey::new(KeyCode::Char(':'), KeyModifiers::SHIFT),
+                b"\x1b[58;2;58u".as_slice(),
+            ),
+        ];
+
+        for (key, expected) in cases {
+            assert_eq!(
+                encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 25 }),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn kitty_associated_text_composes_with_alternates_and_events() {
+        for (kind, expected) in [
+            (
+                crossterm::event::KeyEventKind::Press,
+                b"\x1b[97:65;2:1;65u".as_slice(),
+            ),
+            (
+                crossterm::event::KeyEventKind::Repeat,
+                b"\x1b[97:65;2:2;65u".as_slice(),
+            ),
+            (
+                crossterm::event::KeyEventKind::Release,
+                b"\x1b[97:65;2:3u".as_slice(),
+            ),
+        ] {
+            let key = TerminalKey::new(KeyCode::Char('A'), KeyModifiers::SHIFT).with_kind(kind);
+            assert_eq!(
+                encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 31 }),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn kitty_printable_release_is_encoded_without_report_all() {
         let release = KeyEvent::new_with_kind(
             KeyCode::Char('j'),
@@ -887,6 +1005,13 @@ mod tests {
         );
         assert_eq!(
             encode_key(release, KeyboardProtocol::Kitty { flags: 3 }),
+            b"\x1b[106;1:3u"
+        );
+
+        let mut malformed_release = TerminalKey::from(release);
+        malformed_release.generated_text = Some("j".to_owned());
+        assert_eq!(
+            encode_terminal_key(malformed_release, KeyboardProtocol::Kitty { flags: 3 }),
             b"\x1b[106;1:3u"
         );
     }
@@ -1080,6 +1205,19 @@ mod tests {
                 parse_terminal_key_sequence(std::str::from_utf8(&encoded).unwrap()).unwrap();
             assert_terminal_key_eq(parsed, key.code, key.modifiers, key.kind, None);
         }
+    }
+
+    #[test]
+    fn legacy_super_character_preserves_csi_u_chord() {
+        let sequence = "\x1b[99;9u";
+        let key = parse_terminal_key_sequence(sequence).expect("Super+C CSI-u key");
+
+        assert_eq!(key.code, KeyCode::Char('c'));
+        assert_eq!(key.modifiers, KeyModifiers::SUPER);
+        assert_eq!(
+            encode_terminal_key(key, KeyboardProtocol::Legacy),
+            sequence.as_bytes()
+        );
     }
 
     #[test]

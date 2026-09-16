@@ -42,7 +42,7 @@ fn native_resume_socket_claim_is_idempotent_and_rejects_replay_conflicts() {
         })
     };
     // No workspace means the post-claim launch is deliberately rejected. This
-    // exercises the socket contract without opening an external XCSH session.
+    // exercises the socket contract without opening an external xcsh session.
     let first = send_request(
         &socket_path,
         &request("native-first", "continue").to_string(),

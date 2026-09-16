@@ -1,0 +1,35 @@
+{
+  "version": "0.15.7",
+  "protocol": 23,
+  "notes": "### Fixed\n- Preserved legacy Developer ID PKCS#12 compatibility for signed macOS releases.\n- Added signed and notarized macOS installer packages.\n- Made the Windows ConPTY smoke test event-aware.",
+  "assets": {
+    "linux-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-x86_64",
+    "linux-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-aarch64",
+    "macos-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-macos-x86_64",
+    "macos-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-macos-aarch64"
+  },
+  "sha256": {
+    "linux-x86_64": "f327d536f922e1b074f89577ee3946e6032619d839547fab02237ca39d802687",
+    "linux-aarch64": "c777cdfe03db3a9914d3706fcf7d3b42548aaddc0746bb04f93d316c5350b433",
+    "macos-x86_64": "900ac4bac1c66d252372449cae79b834b32f7cf7fcc173b2373b51434a3b3419",
+    "macos-aarch64": "89ce889fa1d6bf043e876c9979086a3cd98d470c83f7a33584dc84c70df0a744"
+  },
+  "releases": {
+    "0.15.7": {
+      "notes": "### Fixed\n- Preserved legacy Developer ID PKCS#12 compatibility for signed macOS releases.\n- Added signed and notarized macOS installer packages.\n- Made the Windows ConPTY smoke test event-aware.",
+      "protocol": 23,
+      "assets": {
+        "linux-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-x86_64",
+        "linux-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-aarch64",
+        "macos-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-macos-x86_64",
+        "macos-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-macos-aarch64"
+      },
+      "sha256": {
+        "linux-x86_64": "f327d536f922e1b074f89577ee3946e6032619d839547fab02237ca39d802687",
+        "linux-aarch64": "c777cdfe03db3a9914d3706fcf7d3b42548aaddc0746bb04f93d316c5350b433",
+        "macos-x86_64": "900ac4bac1c66d252372449cae79b834b32f7cf7fcc173b2373b51434a3b3419",
+        "macos-aarch64": "89ce889fa1d6bf043e876c9979086a3cd98d470c83f7a33584dc84c70df0a744"
+      }
+    }
+  }
+}

@@ -30,13 +30,13 @@ pub struct ExecutionStartParams {
     pub command: ExecutionCommand,
 }
 
-/// Admit an XCSH child for one immutable semantic execution generation.
+/// Admit an xcsh child for one immutable semantic execution generation.
 ///
 /// `execution_id` is owned by the producer's semantic task. Herdr assigns a
 /// different `backend_execution_id` for the visible child it launches.
 ///
 /// `native_launch` is versioned and fully typed. Herdr never accepts a
-/// caller-provided shell command, environment, or opaque XCSH argv here.
+/// caller-provided shell command, environment, or opaque xcsh argv here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExecutionResumeParams {
     pub execution_id: String,
@@ -50,11 +50,11 @@ pub struct ExecutionResumeParams {
     pub label: Option<String>,
 }
 
-/// Version 3 native XCSH launch contract for protocol 23.
+/// Version 3 native xcsh launch contract for protocol 24.
 ///
 /// `session_path` is a canonical absolute JSONL path. `session_header.sha256`
 /// is the SHA-256 of exactly the first JSONL line, including its terminating
-/// LF byte. The header's `id` is XCSH's canonical 16-character lowercase hex
+/// LF byte. The header's `id` is xcsh's canonical 16-character lowercase hex
 /// SessionHeader ID; selector prefixes and paths are never reporter IDs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NativeLaunchV3 {
@@ -64,7 +64,7 @@ pub struct NativeLaunchV3 {
     pub session_dir: String,
     pub session_path: String,
     pub session_header: NativeSessionHeaderBinding,
-    /// Configured, non-secret XCSH model selector. It is not a user identity.
+    /// Configured, non-secret xcsh model selector. It is not a user identity.
     pub model: String,
     pub discovery: NativeDiscoveryPolicy,
     pub tools: NativeToolsPolicy,
@@ -91,14 +91,14 @@ pub enum NativeToolsPolicy {
 }
 
 /// Semantic lifecycle behavior, retained as durable producer contract rather
-/// than translated into an undocumented XCSH command-line flag.
+/// than translated into an undocumented xcsh command-line flag.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeLifecycleMode {
     ManagedTurnV1,
 }
 
-/// Immutable measurement of the XCSH program admitted for a native child.
+/// Immutable measurement of the xcsh program admitted for a native child.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NativeExecutableBinding {
     pub canonical_path: String,
@@ -163,7 +163,7 @@ pub struct ExecutionRecord {
     pub native_producer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_executable: Option<NativeExecutableBinding>,
-    /// Complete protocol-23 typed native launch receipt. Kept alongside the
+    /// Complete protocol-24 typed native launch receipt. Kept alongside the
     /// normalized executable/session fields for compatibility with existing
     /// execution consumers.
     #[serde(default, skip_serializing_if = "Option::is_none")]

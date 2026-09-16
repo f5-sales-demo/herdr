@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Installed-runtime UAT driver for real XCSH semantic-turn acceptance.
+"""Installed-runtime UAT driver for real xcsh semantic-turn acceptance.
 
 Dry-run/preflight validates a signed/immutable artifact binding and refuses to
 launch anything.  Live execution is deliberately unavailable until the
@@ -39,7 +39,7 @@ def prepare_fixture(directory: Path) -> dict[str, str]:
     """Create one owned, random, mode-0600 local oracle fixture.
 
     This is deliberately only fixture provisioning.  It does not create an
-    XCSH backend, report a semantic turn, or constitute installed-UAT proof.
+    xcsh backend, report a semantic turn, or constitute installed-UAT proof.
     """
     directory = directory.resolve()
     directory.mkdir(parents=True, exist_ok=True)
@@ -141,31 +141,31 @@ def validate_xcsh_archive_provenance(runtime: dict[str, Any], artifact: dict[str
     member_digest, executable_digest = runtime.get("xcsh_archive_member_sha256"), runtime.get("xcsh_executable_sha256")
     if (not isinstance(archive_path, str) or not archive_path or not isinstance(member, str) or
             not isinstance(member_digest, str) or len(member_digest) != 64 or member_digest.lower() != executable_digest.lower()):
-        raise PreflightError("XCSH runtime must bind archive path, exact regular member, and matching member/executable hash")
+        raise PreflightError("xcsh runtime must bind archive path, exact regular member, and matching member/executable hash")
     if member.startswith("/") or ".." in Path(member).parts or member != "xcsh":
-        raise PreflightError("XCSH archive member must be the exact safe regular member xcsh")
+        raise PreflightError("xcsh archive member must be the exact safe regular member xcsh")
     if not verify_archive:
         return
     path = Path(archive_path)
     if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest().lower() != artifact["sha256"].lower():
-        raise PreflightError("local XCSH archive does not match the declared published asset digest")
+        raise PreflightError("local xcsh archive does not match the declared published asset digest")
     try:
         with tarfile.open(path, "r:gz") as archive:
             members = archive.getmembers()
             if any(item.issym() or item.islnk() or item.name.startswith("/") or ".." in Path(item.name).parts for item in members):
-                raise PreflightError("XCSH archive contains unsafe link or traversal member")
+                raise PreflightError("xcsh archive contains unsafe link or traversal member")
             matched = [item for item in members if item.name == member]
             if len(matched) != 1 or not matched[0].isreg():
-                raise PreflightError("XCSH archive does not contain exactly one required regular xcsh member")
+                raise PreflightError("xcsh archive does not contain exactly one required regular xcsh member")
             stream = archive.extractfile(matched[0])
             if stream is None:
-                raise PreflightError("XCSH archive member could not be read")
+                raise PreflightError("xcsh archive member could not be read")
             digest = hashlib.sha256()
             while chunk := stream.read(1024 * 1024): digest.update(chunk)
             if digest.hexdigest().lower() != member_digest.lower():
-                raise PreflightError("XCSH archive member hash differs from declared executable provenance")
+                raise PreflightError("xcsh archive member hash differs from declared executable provenance")
     except (tarfile.TarError, OSError) as exc:
-        raise PreflightError(f"XCSH archive provenance could not be verified: {exc}") from exc
+        raise PreflightError(f"xcsh archive provenance could not be verified: {exc}") from exc
 
 
 def preflight(manifest: dict[str, Any], catalog: dict[str, Any], *, probe: bool = False) -> dict[str, Any]:
@@ -205,10 +205,10 @@ def preflight(manifest: dict[str, Any], catalog: dict[str, Any], *, probe: bool 
         raise PreflightError("invalid installed prompt catalog")
     if catalog.get("native_resume_contract") != {
             "execution_resume_schema": "execution.resume/v3",
-            "herdr_protocol_minimum": 23,
+            "herdr_protocol_minimum": 24,
             "required_herdr_capabilities": ["tracked_executions", "agent_turn_journal"],
     }:
-        raise PreflightError("catalog does not bind the protocol-23 workspace-bound native-launch resume contract")
+        raise PreflightError("catalog does not bind the protocol-24 workspace-bound native-launch resume contract")
     names = {case.get("id") for case in scenarios}
     expected = {"success", "failure", "waiting_input", "cancel", "continuation", "reconnect_replay", "generation_supersession", "cleanup", "restart_loss"}
     if names != expected:
@@ -225,7 +225,7 @@ def preflight(manifest: dict[str, Any], catalog: dict[str, Any], *, probe: bool 
         contract = catalog["native_resume_contract"]
         if (int((pong or {}).get("protocol", 0)) < contract["herdr_protocol_minimum"]
                 or any(not capabilities.get(name) for name in contract["required_herdr_capabilities"])):
-            raise PreflightError("installed Herdr lacks protocol-23 workspace-bound typed native launch, tracked_executions, and agent_turn_journal")
+            raise PreflightError("installed Herdr lacks protocol-24 workspace-bound typed native launch, tracked_executions, and agent_turn_journal")
         broker_capabilities = broker.get("capabilities") or {}
         result["probe"] = {"broker": broker.get("status"), "herdr_protocol": pong.get("protocol"),
                            "tracked_executions": True, "agent_turn_journal": True,
@@ -233,12 +233,12 @@ def preflight(manifest: dict[str, Any], catalog: dict[str, Any], *, probe: bool 
         if not broker_capabilities.get(REQUIRED_CAPABILITY):
             raise PreflightError("installed broker lacks required native_xcsh_admit adapter; install the matching manager artifact before live prompt UAT")
         if not broker_capabilities.get("native_turn_consumer") or broker_capabilities.get("native_turn_producer") != "xcsh":
-            raise PreflightError("installed broker does not have the XCSH native-turn consumer enabled with producer=xcsh")
+            raise PreflightError("installed broker does not have the xcsh native-turn consumer enabled with producer=xcsh")
         if not isinstance(broker_capabilities.get("native_turn_cursor"), int):
             raise PreflightError("installed broker did not expose a durable native-turn cursor")
         executable = Path(runtime["xcsh_executable"])
         if not executable.is_file() or hashlib.sha256(executable.read_bytes()).hexdigest() != declared_executable_digest:
-            raise PreflightError("installed XCSH executable does not match the measured manifest hash")
+            raise PreflightError("installed xcsh executable does not match the measured manifest hash")
     return result
 
 
@@ -255,7 +255,7 @@ def require_causal_action(receipt: dict[str, Any], *, kind: str, task: dict[str,
     """Require an observed producer action, never a socket/listing surrogate.
 
     The producer-owned adapter supplies this receipt.  These fields are not
-    XCSH CLI flags and this driver deliberately has no fallback that can
+    xcsh CLI flags and this driver deliberately has no fallback that can
     synthesize them from a manifest, a journal read, or a controller restart.
     """
     effect = receipt.get("effect") if isinstance(receipt, dict) else None
@@ -332,7 +332,7 @@ def assert_controller_identity(receipt: dict[str, Any], task: dict[str, Any]) ->
 
 def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str, timeout: float = 90,
                  controller: Any | None = None) -> dict[str, Any]:
-    """Drive one real installed XCSH prompt through the atomic broker adapter."""
+    """Drive one real installed xcsh prompt through the atomic broker adapter."""
     runtime = manifest["runtime"]
     fixture = validate_fixture(runtime, verify_file=True)
     controlled_cases = {"reconnect_replay", "generation_supersession", "cleanup", "restart_loss"}
@@ -341,7 +341,7 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
     broker_socket, herdr_socket = Path(runtime["broker_socket"]), Path(runtime["herdr_socket"])
     prompt = case["prompt"].replace("{fixture_path}", fixture["path"])
     if controller is None:
-        raise PreflightError("installed execution requires an authenticated controller-owned XCSH session")
+        raise PreflightError("installed execution requires an authenticated controller-owned xcsh session")
     try:
         session_receipt = controller.create_xcsh_session(
             Path(runtime["xcsh_executable"]), runtime["xcsh_executable_sha256"],
@@ -357,7 +357,7 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
                 or not isinstance(executable_sha256, str)
                 or executable != str(manifest_executable)
                 or executable_sha256.lower() != manifest_sha256.lower()):
-            raise PreflightError("controller session receipt does not bind the measured installed XCSH executable")
+            raise PreflightError("controller session receipt does not bind the measured installed xcsh executable")
         model = runtime.get("xcsh_model")
         if not isinstance(model, str) or not model or any(char in model for char in "\r\n\x00"):
             raise PreflightError("manifest must supply a configured nonsecret xcsh_model")
@@ -369,7 +369,7 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
             "lifecycle_mode": "managed_turn_v1",
         }
     except Exception as exc:
-        raise PreflightError(f"controller could not create a measured XCSH session: {exc}") from exc
+        raise PreflightError(f"controller could not create a measured xcsh session: {exc}") from exc
     task = unix_request(broker_socket, "native_xcsh_admit", {
         "target": "xcsh-native-uat", "cwd": runtime.get("cwd", "/isolated/xcsh-native-uat"),
         "priority": "routine", "prompt": case["prompt"], "text": prompt,
@@ -441,8 +441,8 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
             if socket_after != str(herdr_socket):
                 herdr_socket = Path(socket_after) if isinstance(socket_after, str) else herdr_socket
             pong = herdr_request(herdr_socket, "ping", {})
-            if int((pong or {}).get("protocol", 0)) < 23 or not ((pong or {}).get("capabilities") or {}).get("agent_turn_journal"):
-                raise PreflightError("restart controller receipt did not reconnect to protocol-23 workspace-bound native-launch journal runtime")
+            if int((pong or {}).get("protocol", 0)) < 24 or not ((pong or {}).get("capabilities") or {}).get("agent_turn_journal"):
+                raise PreflightError("restart controller receipt did not reconnect to protocol-24 workspace-bound native-launch journal runtime")
         if states == case["expected_states"] and states[-1] == "waiting_input":
             observed = unix_request(broker_socket, "status", {"task_id": task["id"]})["tasks"][0]
             validate_journal(case, records, observed, None, fixture=fixture)
@@ -545,7 +545,7 @@ def main() -> int:
     parser.add_argument("--catalog", type=Path, default=CATALOG)
     parser.add_argument("--probe-installed", action="store_true", help="read-only socket/capability probe")
     parser.add_argument("--execute", action="store_true", help="run only against the approved dedicated installed runtime")
-    parser.add_argument("--prepare-fixture-dir", type=Path, help="create one local fixture; does not run XCSH")
+    parser.add_argument("--prepare-fixture-dir", type=Path, help="create one local fixture; does not run xcsh")
     parser.add_argument("--run-id", help="stable run identity; reuse after an uncertain adapter response")
     args = parser.parse_args()
     try:
