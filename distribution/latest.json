@@ -41,10 +41,10 @@
       "notes": "### Fixed\n- Preserved legacy Developer ID PKCS#12 compatibility for signed macOS releases.\n- Added signed and notarized macOS installer packages.\n- Made the Windows ConPTY smoke test event-aware.",
       "protocol": 23,
       "assets": {
-        "linux-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-x86_64",
-        "linux-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-aarch64",
-        "macos-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-macos-x86_64",
-        "macos-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-macos-aarch64"
+    "linux-x86_64": "https://github.com/f5-sales-demo/herdr/releases/download/v0.15.7/herdr-linux-x86_64",
+    "linux-aarch64": "https://github.com/f5-sales-demo/herdr/releases/download/v0.15.7/herdr-linux-aarch64",
+    "macos-x86_64": "https://github.com/f5-sales-demo/herdr/releases/download/v0.15.7/herdr-macos-x86_64",
+    "macos-aarch64": "https://github.com/f5-sales-demo/herdr/releases/download/v0.15.7/herdr-macos-aarch64"
       },
       "sha256": {
         "linux-x86_64": "f327d536f922e1b074f89577ee3946e6032619d839547fab02237ca39d802687",
