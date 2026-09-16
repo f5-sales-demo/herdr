@@ -2910,6 +2910,11 @@ impl PaneRuntime {
     }
 
     pub fn begin_graceful_release(&self, agent: Agent) {
+        // The reporter has explicitly relinquished lifecycle authority. Keep
+        // the visible identity until the process probe confirms exit, but let
+        // that probe drive the terminal transition immediately.
+        self.full_lifecycle_authority_active
+            .store(false, Ordering::Release);
         if let Ok(mut pending_release) = self.pending_release.lock() {
             *pending_release = Some(PendingAgentRelease {
                 agent,
@@ -5246,6 +5251,22 @@ mod tests {
         )
         .await
         .expect("re-entering active authority should notify detection reset");
+    }
+
+    #[tokio::test]
+    async fn graceful_release_relinquishes_lifecycle_authority_for_process_confirmation() {
+        let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+        runtime.set_full_lifecycle_authority_active(true);
+
+        runtime.begin_graceful_release(Agent::Pi);
+
+        assert!(!runtime
+            .full_lifecycle_authority_active
+            .load(Ordering::Acquire));
+        assert_eq!(
+            active_pending_release(&runtime.pending_release, std::time::Instant::now()),
+            Some(Agent::Pi)
+        );
     }
 
     #[cfg(unix)]
