@@ -26,7 +26,9 @@ try {
 } finally {
     $ErrorActionPreference = $previousErrorActionPreference
 }
-if ($previewExitCode -eq 0 -or ($previewOutput -join "`n") -notlike "*maintained fork currently supports only stable*") {
+$previewText = $previewOutput | Out-String
+$previewOutput | ForEach-Object { Write-Host $_ }
+if ($previewExitCode -eq 0 -or $previewText -notmatch "maintained fork\s+currently supports\s+only stable") {
     throw "The Windows ARM64 installer did not fail closed for the disabled preview channel."
 }
 

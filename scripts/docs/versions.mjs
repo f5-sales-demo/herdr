@@ -160,11 +160,13 @@ export async function checkVersions({ requireLatestMatch = true } = {}) {
       if (storedCommit !== entry.commit) {
         throw new Error(`docs version ${entry.version} commit ${entry.commit} is unavailable`);
       }
-      const taggedCommit = resolveCommit(git, entry.tag);
-      if (entry.version === manifest.current && requireLatestMatch && taggedCommit !== entry.commit) {
-        throw new Error(
-          `docs version ${entry.version} tag ${entry.tag} moved from ${entry.commit} to ${taggedCommit}`,
-        );
+      if (entry.version === manifest.current && requireLatestMatch) {
+        const taggedCommit = resolveCommit(git, entry.tag);
+        if (taggedCommit !== entry.commit) {
+          throw new Error(
+            `docs version ${entry.version} tag ${entry.tag} moved from ${entry.commit} to ${taggedCommit}`,
+          );
+        }
       }
     }
     if (!['website/src/content/docs', 'docs/next/website/src/content/docs'].includes(entry.source)) {
