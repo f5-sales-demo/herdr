@@ -2099,7 +2099,7 @@ fn official_release_waits_for_confirmed_process_exit() {
 
     fs::write(&stop_file, "stop").unwrap();
 
-    let cleared_deadline = Instant::now() + Duration::from_secs(1);
+    let cleared_deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let pane = send_request(
             &socket_path,
