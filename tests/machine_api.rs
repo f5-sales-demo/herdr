@@ -381,23 +381,80 @@ fn machine_api_recovers_a_stale_path_before_sending_a_mutation() {
 }
 
 #[test]
+fn machine_execution_commands_use_protocol_preflight_and_remote_routing() {
+    for (args, expected_method) in [
+        (vec!["execution", "get", "backend"], "execution.get"),
+        (vec!["execution", "list"], "execution.list"),
+        (vec!["execution", "wait", "0"], "execution.wait"),
+        (vec!["execution", "cancel", "backend"], "execution.cancel"),
+        (
+            vec!["execution", "start", "job", "--cwd", "/tmp", "--", "true"],
+            "execution.start",
+        ),
+        (
+            vec![
+                "execution",
+                "resume",
+                "semantic",
+                "7",
+                "--session",
+                "0123abcd4567ef89",
+                "--session-dir",
+                "/tmp/sessions",
+                "--session-path",
+                "/tmp/sessions/session.jsonl",
+                "--session-header-sha256",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "--xcsh",
+                "/opt/xcsh/bin/xcsh",
+                "--model",
+                "openai/gpt-5",
+                "--cwd",
+                "/tmp",
+                "--text",
+                "continue",
+            ],
+            "execution.resume",
+        ),
+    ] {
+        let harness = Harness::new();
+        let server = harness.serve(json!({"result":{"type":"ok"}}), harness.protocol);
+        let mut command = harness.command(&["--machine", "mac"]);
+        success(command.args(args).output().unwrap());
+        let request = server.join().unwrap();
+        assert_eq!(request["method"], expected_method);
+        if expected_method == "execution.resume" {
+            assert_eq!(
+                request["params"]["native_launch"]["xcsh_executable"],
+                "/opt/xcsh/bin/xcsh"
+            );
+            assert_eq!(request["params"]["generation"], 7);
+        }
+        harness.assert_local_untouched();
+    }
+}
+
+#[test]
 fn machine_api_never_replays_a_mutation_when_its_response_is_lost() {
-    let harness = Harness::new();
-    harness.warm_metadata();
-    let before = harness.ssh_calls();
-    let server = harness.serve(Value::Null, harness.protocol);
-    let output = harness
-        .command(&["--machine", "mac", "pane", "close", "w4:p1"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert_eq!(server.join().unwrap()["method"], "pane.close");
-    assert_eq!(
-        harness.ssh_calls() - before,
-        2,
-        "mutation must not trigger rediscovery or replay"
-    );
-    harness.assert_local_untouched();
+    for (args, expected_method) in [
+        (vec!["pane", "close", "w4:p1"], "pane.close"),
+        (vec!["execution", "cancel", "backend"], "execution.cancel"),
+    ] {
+        let harness = Harness::new();
+        harness.warm_metadata();
+        let before = harness.ssh_calls();
+        let server = harness.serve(Value::Null, harness.protocol);
+        let mut command = harness.command(&["--machine", "mac"]);
+        let output = command.args(args).output().unwrap();
+        assert!(!output.status.success());
+        assert_eq!(server.join().unwrap()["method"], expected_method);
+        assert_eq!(
+            harness.ssh_calls() - before,
+            2,
+            "mutation must not trigger rediscovery or replay"
+        );
+        harness.assert_local_untouched();
+    }
 }
 
 #[test]
@@ -423,6 +480,41 @@ fn machine_api_transient_connection_failure_keeps_working_metadata() {
         1,
         "transient failure must not discard metadata"
     );
+}
+
+#[test]
+fn machine_execution_recovers_a_stale_path_before_sending_a_mutation() {
+    let harness = Harness::new();
+    harness.warm_metadata();
+    fs::remove_file(harness.root.join("remote bin/herdr")).unwrap();
+    fs::create_dir_all(harness.root.join(".local/bin")).unwrap();
+    std::os::unix::fs::symlink(
+        env!("CARGO_BIN_EXE_herdr"),
+        harness.root.join(".local/bin/herdr"),
+    )
+    .unwrap();
+    let before = harness.ssh_calls();
+    let server = harness.serve(json!({"result":{"type":"ok"}}), harness.protocol);
+    success(
+        harness
+            .command(&["--machine", "mac", "execution", "cancel", "backend"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(server.join().unwrap()["method"], "execution.cancel");
+    assert_eq!(
+        harness.ssh_calls() - before,
+        5,
+        "one failed ping followed by fresh discovery and one command"
+    );
+    let before = harness.ssh_calls();
+    harness.warm_metadata();
+    assert_eq!(
+        harness.ssh_calls() - before,
+        1,
+        "recovered path must be saved"
+    );
+    harness.assert_local_untouched();
 }
 
 #[test]
