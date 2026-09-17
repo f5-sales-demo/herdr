@@ -37,6 +37,17 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertEqual(release_level(messages), "minor")
         self.assertEqual(bump("0.15.8", "minor"), "0.16.0")
 
+    def test_post_merge_fork_adaptation_plans_v0_16_1(self) -> None:
+        messages = [
+            "test: characterize post-ab15 upstream behavior",
+            "merge: synchronize upstream through e7e3dfa",
+            "fix: adapt upstream remote metadata caching for xcsh",
+            "ci(release): pin manifest compatibility to the release tag",
+        ]
+        level = release_level(messages)
+        self.assertEqual(level, "patch")
+        self.assertEqual(bump("0.16.0", level), "0.16.1")
+
     def test_breaking_change_is_a_major_release(self) -> None:
         self.assertEqual(release_level(["feat(api)!: replace protocol"]), "major")
         self.assertEqual(release_level(["feat: replace protocol\n\nBREAKING CHANGE: old clients stop working"]), "major")
