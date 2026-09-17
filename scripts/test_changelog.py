@@ -103,6 +103,19 @@ class ChangelogScriptTests(unittest.TestCase):
         self.assertEqual(manifest["protocol"], read_protocol_version())
         self.assertEqual(manifest["notes"], "### Fixed\n- One")
 
+    def test_build_latest_json_uses_selected_release_endpoint_generation(self) -> None:
+        manifest = json.loads(
+            build_latest_json(
+                "0.1.1",
+                "Release notes",
+                release_assets("0.1.1"),
+                release_sha256(),
+                endpoint_generation=7,
+            )
+        )
+        self.assertEqual(manifest["endpoint_generation"], 7)
+        self.assertEqual(manifest["releases"]["0.1.1"]["endpoint_generation"], 7)
+
     def test_build_latest_json_embeds_notes_and_release_assets(self) -> None:
         manifest = json.loads(
             build_latest_json(
@@ -355,7 +368,7 @@ class ChangelogScriptTests(unittest.TestCase):
             },
         )
 
-    def test_manifest_from_release_payload_uses_explicit_protocol(self) -> None:
+    def test_manifest_from_release_payload_uses_explicit_compatibility_versions(self) -> None:
         manifest = manifest_from_release_payload(
             {
                 "tagName": "v0.1.1",
@@ -366,9 +379,11 @@ class ChangelogScriptTests(unittest.TestCase):
             },
             "0.1.1",
             protocol=42,
+            endpoint_generation=7,
         )
 
         self.assertEqual(manifest["protocol"], 42)
+        self.assertEqual(manifest["endpoint_generation"], 7)
 
     def test_manifest_from_release_payload_rejects_missing_digest(self) -> None:
         assets = release_assets_with_digests()

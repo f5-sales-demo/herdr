@@ -131,6 +131,18 @@ class DownstreamReleaseWorkflowTests(unittest.TestCase):
             r"git push origin HEAD:build-xcsh",
         )
 
+    def test_manifest_compatibility_is_pinned_to_the_immutable_release_tag(self) -> None:
+        self.assertIn(
+            'git show "v${VERSION}:src/protocol/wire.rs"', self.workflow
+        )
+        self.assertIn(
+            'git show "v${VERSION}:src/protocol/endpoint.rs"', self.workflow
+        )
+        self.assertEqual(self.workflow.count('--protocol "$protocol"'), 2)
+        self.assertEqual(
+            self.workflow.count('--endpoint-generation "$endpoint_generation"'), 2
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

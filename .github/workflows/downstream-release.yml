@@ -653,11 +653,14 @@ jobs:
         run: |
           set -euo pipefail
           protocol="$(git show "v${VERSION}:src/protocol/wire.rs" | sed -n 's/^pub const PROTOCOL_VERSION: u32 = \([0-9][0-9]*\);/\1/p')"
+          endpoint_generation="$(git show "v${VERSION}:src/protocol/endpoint.rs" | sed -n 's/^pub const ENDPOINT_PROTOCOL_GENERATION: u32 = \([0-9][0-9]*\);/\1/p')"
           test -n "$protocol"
+          test -n "$endpoint_generation"
           python3 scripts/changelog.py sync-latest-json \
             --version "$VERSION" \
             --repo "$GITHUB_REPOSITORY" \
             --protocol "$protocol" \
+            --endpoint-generation "$endpoint_generation" \
             --output distribution/latest.json
           node scripts/docs/versions.mjs publish "v${VERSION}"
           node scripts/docs/versions.mjs check
@@ -666,6 +669,7 @@ jobs:
             --version "$VERSION" \
             --repo "$GITHUB_REPOSITORY" \
             --protocol "$protocol" \
+            --endpoint-generation "$endpoint_generation" \
             --output distribution/latest.json \
             --live-url "file://$GITHUB_WORKSPACE/distribution/latest.json"
 
