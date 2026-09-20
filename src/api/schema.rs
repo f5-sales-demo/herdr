@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+pub mod agent_interactions;
 pub mod agent_turns;
 pub mod agents;
 pub mod commands;
@@ -16,6 +17,7 @@ pub mod tabs;
 pub mod workspaces;
 pub mod worktrees;
 
+pub use agent_interactions::*;
 pub use agent_turns::*;
 pub use agents::*;
 pub use commands::*;
@@ -254,6 +256,20 @@ pub enum Method {
     ExecutionWait(ExecutionWaitParams),
     #[serde(rename = "execution.cancel")]
     ExecutionCancel(ExecutionTarget),
+    #[serde(rename = "agent.interaction.report")]
+    AgentInteractionReport(InteractionReportParams),
+    #[serde(rename = "agent.interaction.read")]
+    AgentInteractionRead(InteractionTarget),
+    #[serde(rename = "agent.interaction.list")]
+    AgentInteractionList(InteractionListParams),
+    #[serde(rename = "agent.interaction.wait")]
+    AgentInteractionWait(InteractionWaitParams),
+    #[serde(rename = "agent.interaction.respond")]
+    AgentInteractionRespond(InteractionRespondParams),
+    #[serde(rename = "agent.interaction.delivery.get")]
+    AgentInteractionDeliveryGet(InteractionDeliveryTarget),
+    #[serde(rename = "agent.interaction.delivery.ack")]
+    AgentInteractionDeliveryAck(InteractionAckParams),
     #[serde(rename = "agent.turn.report")]
     AgentTurnReport(AgentTurnReportParams),
     #[serde(rename = "agent.turn.action.get")]

@@ -972,6 +972,66 @@ impl ExecutionManager {
     /// Native children report their semantic id from immutable environment,
     /// while Herdr owns a separate backend child id. Resolve and validate the
     /// durable binding instead of trusting reporter-provided provenance.
+    /// Keep active-generation authorization and interaction mutation in one lock scope.
+    pub(crate) fn with_interaction_owner<T>(
+        &self,
+        owner: &crate::api::schema::InteractionOwner,
+        capability: Option<&str>,
+        producer_action: bool,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| "execution state lock poisoned")?;
+        let record = state
+            .records
+            .iter()
+            .find(|r| {
+                r.execution_id == owner.execution_id
+                    || r.semantic_execution_id.as_deref() == Some(owner.execution_id.as_str())
+                        && r.generation == Some(owner.generation)
+            })
+            .ok_or("interaction_execution_not_found")?;
+        if !matches!(
+            record.state,
+            ExecutionState::Starting | ExecutionState::Running
+        ) || record.pane_id.as_deref() != Some(owner.pane_id.as_str())
+        {
+            return Err("interaction_owner_lost".into());
+        }
+        if let Some(semantic) = &record.semantic_execution_id {
+            if record.generation != Some(owner.generation)
+                || state.native_reservations.get(semantic) != Some(&owner.generation)
+            {
+                return Err("interaction_stale_generation".into());
+            }
+            let registered = record
+                .native_registration
+                .as_ref()
+                .ok_or("interaction_native_not_registered")?;
+            if registered.journaled_at_unix_ms.is_none()
+                || registered.producer != owner.producer
+                || registered.session_id != owner.session_id
+                || registered.generation != owner.generation
+                || registered.pane_id != owner.pane_id
+            {
+                return Err("interaction_provenance_mismatch".into());
+            }
+            if producer_action {
+                let capability = capability.ok_or("interaction_native_capability_missing")?;
+                if state.native_capability_verifiers.get(&record.execution_id)
+                    != Some(&sha256_hex(capability))
+                {
+                    return Err("interaction_native_capability_mismatch".into());
+                }
+            }
+        } else if owner.generation != 0 {
+            return Err("interaction_stale_generation".into());
+        }
+        action()
+    }
     pub(crate) fn resolve_agent_turn_execution(
         &self,
         semantic_or_backend_id: &str,
@@ -1125,12 +1185,14 @@ impl ExecutionManager {
 pub(crate) struct SharedRuntimeState {
     pub(crate) executions: ExecutionManager,
     pub(crate) agent_turns: crate::agent_turn::AgentTurnManager,
+    pub(crate) interactions: crate::agent_interaction::InteractionManager,
 }
 
 impl SharedRuntimeState {
     pub(crate) fn load() -> Self {
         Self {
             executions: ExecutionManager::load(),
+            interactions: crate::agent_interaction::InteractionManager::load(),
             agent_turns: crate::agent_turn::AgentTurnManager::load(),
         }
     }
@@ -1140,6 +1202,7 @@ impl SharedRuntimeState {
         let root = crate::session::data_dir();
         Self {
             executions: ExecutionManager::load_at_for_handoff(root.join("executions.json")),
+            interactions: crate::agent_interaction::InteractionManager::load(),
             agent_turns: crate::agent_turn::AgentTurnManager::load_at_for_handoff(
                 root.join("agent-turns.json"),
             ),
@@ -1151,6 +1214,10 @@ impl SharedRuntimeState {
         let root = std::env::temp_dir().join(format!("herdr-runtime-{}", uuid::Uuid::new_v4()));
         Self {
             executions: ExecutionManager::load_at(root.join("executions.json")),
+            interactions: crate::agent_interaction::InteractionManager::load_at(
+                root.join("agent-interactions.json"),
+            )
+            .expect("isolated interaction journal"),
             agent_turns: crate::agent_turn::AgentTurnManager::load_at(
                 root.join("agent-turns.json"),
             ),

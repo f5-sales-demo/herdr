@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 24,
+  "protocol": 25,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -2583,6 +2583,215 @@
           },
           "required": [
             "target"
+          ],
+          "type": "object"
+        },
+        "InteractionAckParams": {
+          "properties": {
+            "accepted": {
+              "type": "boolean"
+            },
+            "producer": {
+              "$ref": "#/schemas/request/$defs/InteractionDeliveryTarget"
+            },
+            "request_id": {
+              "type": "string"
+            },
+            "response_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "producer",
+            "request_id",
+            "response_id",
+            "accepted"
+          ],
+          "type": "object"
+        },
+        "InteractionDeliveryTarget": {
+          "properties": {
+            "native_capability": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "writeOnly": true
+            },
+            "owner": {
+              "$ref": "#/schemas/request/$defs/InteractionOwner"
+            }
+          },
+          "required": [
+            "owner"
+          ],
+          "type": "object"
+        },
+        "InteractionKind": {
+          "enum": [
+            "waiting",
+            "async",
+            "plan_decision"
+          ],
+          "type": "string"
+        },
+        "InteractionListParams": {
+          "properties": {
+            "after_revision": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "InteractionOwner": {
+          "additionalProperties": false,
+          "properties": {
+            "execution_id": {
+              "type": "string"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "producer": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "execution_id",
+            "pane_id",
+            "producer",
+            "session_id",
+            "generation"
+          ],
+          "type": "object"
+        },
+        "InteractionReportParams": {
+          "properties": {
+            "event_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "item_id": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/schemas/request/$defs/InteractionKind"
+            },
+            "native_capability": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "writeOnly": true
+            },
+            "payload": {
+              "description": "Codex payload, unchanged. Never include responses or local drafts here."
+            },
+            "question_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "state": {
+              "$ref": "#/schemas/request/$defs/InteractionState"
+            },
+            "target": {
+              "$ref": "#/schemas/request/$defs/InteractionTarget"
+            },
+            "thread_id": {
+              "type": "string"
+            },
+            "turn_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "thread_id",
+            "turn_id",
+            "item_id",
+            "question_ids",
+            "event_revision",
+            "kind",
+            "payload",
+            "state"
+          ],
+          "type": "object"
+        },
+        "InteractionRespondParams": {
+          "properties": {
+            "answer": true,
+            "response_id": {
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/schemas/request/$defs/InteractionTarget"
+            }
+          },
+          "required": [
+            "target",
+            "response_id",
+            "answer"
+          ],
+          "type": "object"
+        },
+        "InteractionState": {
+          "enum": [
+            "pending",
+            "answered",
+            "cancelled",
+            "interrupted",
+            "dismissed",
+            "expired",
+            "superseded",
+            "owner_lost"
+          ],
+          "type": "string"
+        },
+        "InteractionTarget": {
+          "properties": {
+            "owner": {
+              "$ref": "#/schemas/request/$defs/InteractionOwner"
+            },
+            "request_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "owner",
+            "request_id"
+          ],
+          "type": "object"
+        },
+        "InteractionWaitParams": {
+          "properties": {
+            "after_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "timeout_ms": {
+              "default": 30000,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "after_revision"
           ],
           "type": "object"
         },
@@ -6782,6 +6991,118 @@
         {
           "properties": {
             "method": {
+              "const": "agent.interaction.report",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/InteractionReportParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.interaction.read",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/InteractionTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.interaction.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/InteractionListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.interaction.wait",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/InteractionWaitParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.interaction.respond",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/InteractionRespondParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.interaction.delivery.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/InteractionDeliveryTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.interaction.delivery.ack",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/InteractionAckParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.turn.report",
               "type": "string"
             },
@@ -8914,6 +9235,193 @@
           ],
           "type": "object"
         },
+        "InteractionDelivery": {
+          "properties": {
+            "answer": {
+              "description": "Private producer response, never included in records, events or the journal."
+            },
+            "receipt": {
+              "$ref": "#/schemas/success_response/$defs/InteractionReceipt"
+            }
+          },
+          "required": [
+            "receipt",
+            "answer"
+          ],
+          "type": "object"
+        },
+        "InteractionDeliveryState": {
+          "enum": [
+            "queued",
+            "accepted",
+            "rejected",
+            "owner_lost"
+          ],
+          "type": "string"
+        },
+        "InteractionKind": {
+          "enum": [
+            "waiting",
+            "async",
+            "plan_decision"
+          ],
+          "type": "string"
+        },
+        "InteractionOwner": {
+          "additionalProperties": false,
+          "properties": {
+            "execution_id": {
+              "type": "string"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "producer": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "execution_id",
+            "pane_id",
+            "producer",
+            "session_id",
+            "generation"
+          ],
+          "type": "object"
+        },
+        "InteractionReceipt": {
+          "properties": {
+            "response_id": {
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "$ref": "#/schemas/success_response/$defs/InteractionDeliveryState"
+            },
+            "target": {
+              "$ref": "#/schemas/success_response/$defs/InteractionTarget"
+            }
+          },
+          "required": [
+            "target",
+            "response_id",
+            "state",
+            "revision"
+          ],
+          "type": "object"
+        },
+        "InteractionRecord": {
+          "properties": {
+            "report": {
+              "$ref": "#/schemas/success_response/$defs/InteractionReportParams"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "report",
+            "revision"
+          ],
+          "type": "object"
+        },
+        "InteractionReportParams": {
+          "properties": {
+            "event_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "item_id": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/schemas/success_response/$defs/InteractionKind"
+            },
+            "native_capability": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "writeOnly": true
+            },
+            "payload": {
+              "description": "Codex payload, unchanged. Never include responses or local drafts here."
+            },
+            "question_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "state": {
+              "$ref": "#/schemas/success_response/$defs/InteractionState"
+            },
+            "target": {
+              "$ref": "#/schemas/success_response/$defs/InteractionTarget"
+            },
+            "thread_id": {
+              "type": "string"
+            },
+            "turn_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "thread_id",
+            "turn_id",
+            "item_id",
+            "question_ids",
+            "event_revision",
+            "kind",
+            "payload",
+            "state"
+          ],
+          "type": "object"
+        },
+        "InteractionState": {
+          "enum": [
+            "pending",
+            "answered",
+            "cancelled",
+            "interrupted",
+            "dismissed",
+            "expired",
+            "superseded",
+            "owner_lost"
+          ],
+          "type": "string"
+        },
+        "InteractionTarget": {
+          "properties": {
+            "owner": {
+              "$ref": "#/schemas/success_response/$defs/InteractionOwner"
+            },
+            "request_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "owner",
+            "request_id"
+          ],
+          "type": "object"
+        },
         "LayoutDescription": {
           "properties": {
             "focused_pane_id": {
@@ -10602,6 +11110,89 @@
           "oneOf": [
             {
               "properties": {
+                "interaction": {
+                  "$ref": "#/schemas/success_response/$defs/InteractionRecord"
+                },
+                "type": {
+                  "const": "agent_interaction",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "interaction"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "deliveries": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/InteractionReceipt"
+                  },
+                  "type": "array"
+                },
+                "interactions": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/InteractionRecord"
+                  },
+                  "type": "array"
+                },
+                "revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "agent_interaction_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "revision",
+                "interactions",
+                "deliveries"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "receipt": {
+                  "$ref": "#/schemas/success_response/$defs/InteractionReceipt"
+                },
+                "type": {
+                  "const": "agent_interaction_receipt",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "receipt"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "deliveries": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/InteractionDelivery"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "agent_interaction_deliveries",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "deliveries"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "admitted": {
                   "type": "boolean"
                 },
@@ -12093,6 +12684,15 @@
         },
         "ServerCapabilities": {
           "properties": {
+            "agent_interactions": {
+              "description": "Version of the independent observation and producer-acknowledged interaction API.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "agent_turn_journal": {
               "default": false,
               "description": "Whether semantic agent-turn reporting and replay are available.",

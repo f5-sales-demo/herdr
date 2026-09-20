@@ -730,6 +730,7 @@ fn success_response_round_trips() {
                 health_check: true,
                 tracked_executions: true,
                 agent_turn_journal: true,
+                agent_interactions: Some(1),
             }),
         },
     };
