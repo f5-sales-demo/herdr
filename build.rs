@@ -121,6 +121,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=HERDR_BUILD_ID");
     println!("cargo:rerun-if-env-changed=HERDR_BUILD_COMMIT");
     println!("cargo:rerun-if-env-changed=ZIG");
+    println!("cargo:rerun-if-env-changed=PATH");
     println!("cargo:rerun-if-env-changed=HOME");
     println!("cargo:rerun-if-env-changed=USERPROFILE");
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_WINDOWS_LIBC");
