@@ -14,6 +14,8 @@ test:
 # Run repository maintenance contract tests
 maintenance-test:
     {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_downstream_release_plan scripts.test_downstream_release_workflow scripts.test_hermes_integration_asset scripts.test_label_next_release_workflow scripts.test_package_windows_conpty scripts.test_preview scripts.test_render_downstream_homebrew_formula scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross
+    rustc --edition 2024 --test build.rs -o target/herdr-build-toolchain-test
+    target/herdr-build-toolchain-test
 
 # Run one nextest filter, e.g. `just test-one codex_stale_working`
 test-one filter:
