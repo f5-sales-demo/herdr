@@ -44,6 +44,20 @@ pub struct ErrorBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseResult {
+    AgentInteraction {
+        interaction: super::InteractionRecord,
+    },
+    AgentInteractionList {
+        revision: u64,
+        interactions: Vec<super::InteractionRecord>,
+        deliveries: Vec<super::InteractionReceipt>,
+    },
+    AgentInteractionReceipt {
+        receipt: super::InteractionReceipt,
+    },
+    AgentInteractionDeliveries {
+        deliveries: Vec<super::InteractionDelivery>,
+    },
     AgentTurn {
         turn: AgentTurnRecord,
         admitted: bool,

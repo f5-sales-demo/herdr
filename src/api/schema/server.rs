@@ -33,4 +33,7 @@ pub struct ServerCapabilities {
     /// Whether semantic agent-turn reporting and replay are available.
     #[serde(default)]
     pub agent_turn_journal: bool,
+    /// Version of the independent observation and producer-acknowledged interaction API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_interactions: Option<u32>,
 }

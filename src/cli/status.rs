@@ -424,6 +424,7 @@ mod tests {
                 health_check: true,
                 tracked_executions: true,
                 agent_turn_journal: true,
+                agent_interactions: Some(1),
             }),
         }
     }

@@ -1050,7 +1050,10 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     );
     assert_eq!(created["result"]["type"], "workspace_created");
     assert!(wait_until(
-        Duration::from_secs(10),
+        // The full nextest suite runs several PTY/server integration tests in
+        // parallel. Allow the local server enough time to win that scheduling
+        // contention after three deliberately forced remote reconnects.
+        Duration::from_secs(30),
         Duration::from_millis(20),
         || screen_text().contains("local-online")
     ));

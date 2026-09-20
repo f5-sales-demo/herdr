@@ -12,6 +12,7 @@ const NESTED_HERDR_MESSAGES: [&str; 6] = [
 ];
 
 mod agent_admission;
+mod agent_interaction;
 mod agent_resume;
 mod agent_turn;
 mod agent_view_eval;

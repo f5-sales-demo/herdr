@@ -80,6 +80,7 @@ fn default_capabilities() -> Option<ServerCapabilities> {
         health_check: true,
         tracked_executions: true,
         agent_turn_journal: true,
+        agent_interactions: Some(1),
     })
 }
 
@@ -256,6 +257,39 @@ fn handle_connection_with_stop(
             }
             result
         }
+        Method::AgentInteractionWait(params) => {
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_millis(params.timeout_ms.min(30_000));
+            let response = loop {
+                if should_stop_connection(&mut stream, running)? {
+                    break None;
+                }
+                if let Err(error) = runtime_state
+                    .interactions
+                    .reconcile(&runtime_state.executions)
+                {
+                    break Some(encode_runtime_error(request_id.clone(), &error));
+                }
+                match runtime_state.interactions.list(params.after_revision) {
+                    Ok((revision, interactions, deliveries))
+                        if revision > params.after_revision
+                            || std::time::Instant::now() >= deadline =>
+                    {
+                        break Some(encode_runtime_response(
+                            request_id.clone(),
+                            ResponseResult::AgentInteractionList {
+                                revision,
+                                interactions,
+                                deliveries,
+                            },
+                        ))
+                    }
+                    Err(error) => break Some(encode_runtime_error(request_id.clone(), &error)),
+                    _ => std::thread::sleep(std::time::Duration::from_millis(20)),
+                }
+            };
+            finish_wait_response(&mut stream, response, &request_id, method, changes_ui)
+        }
         Method::EventsWait(params) => {
             let response = wait_for_event(
                 request_id.clone(),
@@ -427,6 +461,68 @@ fn handle_request(
                     .wait_since(params.after_revision, params.timeout_ms),
             },
         ),
+
+        Method::AgentInteractionReport(params) => match runtime_state
+            .interactions
+            .report(params, &runtime_state.executions)
+        {
+            Ok(interaction) => encode_runtime_response(
+                request.id,
+                ResponseResult::AgentInteraction { interaction },
+            ),
+            Err(error) => encode_runtime_error(request.id, &error),
+        },
+        Method::AgentInteractionRead(target) => match runtime_state
+            .interactions
+            .reconcile(&runtime_state.executions)
+            .and_then(|()| {
+                runtime_state
+                    .interactions
+                    .read(&target)
+                    .ok_or("interaction_not_found".into())
+            }) {
+            Ok(interaction) => encode_runtime_response(
+                request.id,
+                ResponseResult::AgentInteraction { interaction },
+            ),
+            Err(error) => encode_runtime_error(request.id, &error),
+        },
+        Method::AgentInteractionList(params) => {
+            interaction_list_response(request.id, runtime_state, params.after_revision)
+        }
+        Method::AgentInteractionWait(_) => {
+            encode_runtime_error(request.id, "interaction_wait_requires_connection")
+        }
+        Method::AgentInteractionRespond(params) => match runtime_state
+            .interactions
+            .respond(params, &runtime_state.executions)
+        {
+            Ok(receipt) => encode_runtime_response(
+                request.id,
+                ResponseResult::AgentInteractionReceipt { receipt },
+            ),
+            Err(error) => encode_runtime_error(request.id, &error),
+        },
+        Method::AgentInteractionDeliveryGet(params) => match runtime_state
+            .interactions
+            .deliveries(&params, &runtime_state.executions)
+        {
+            Ok(deliveries) => encode_runtime_response(
+                request.id,
+                ResponseResult::AgentInteractionDeliveries { deliveries },
+            ),
+            Err(error) => encode_runtime_error(request.id, &error),
+        },
+        Method::AgentInteractionDeliveryAck(params) => match runtime_state
+            .interactions
+            .ack(&params, &runtime_state.executions)
+        {
+            Ok(receipt) => encode_runtime_response(
+                request.id,
+                ResponseResult::AgentInteractionReceipt { receipt },
+            ),
+            Err(error) => encode_runtime_error(request.id, &error),
+        },
         Method::AgentTurnReport(params) => match runtime_state
             .agent_turns
             .report(params, &runtime_state.executions)
@@ -479,6 +575,27 @@ fn handle_request(
             },
         ),
         _ => dispatch_to_app(request, api_tx, None, response_write_complete, None, None),
+    }
+}
+
+fn interaction_list_response(
+    id: String,
+    runtime: &crate::execution::SharedRuntimeState,
+    after: u64,
+) -> String {
+    if let Err(error) = runtime.interactions.reconcile(&runtime.executions) {
+        return encode_runtime_error(id, &error);
+    }
+    match runtime.interactions.list(after) {
+        Ok((revision, interactions, deliveries)) => encode_runtime_response(
+            id,
+            ResponseResult::AgentInteractionList {
+                revision,
+                interactions,
+                deliveries,
+            },
+        ),
+        Err(error) => encode_runtime_error(id, &error),
     }
 }
 
@@ -596,6 +713,13 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::ExecutionList(_) => "execution.list",
         Method::ExecutionWait(_) => "execution.wait",
         Method::ExecutionCancel(_) => "execution.cancel",
+        Method::AgentInteractionReport(_) => "agent.interaction.report",
+        Method::AgentInteractionRead(_) => "agent.interaction.read",
+        Method::AgentInteractionList(_) => "agent.interaction.list",
+        Method::AgentInteractionWait(_) => "agent.interaction.wait",
+        Method::AgentInteractionRespond(_) => "agent.interaction.respond",
+        Method::AgentInteractionDeliveryGet(_) => "agent.interaction.delivery.get",
+        Method::AgentInteractionDeliveryAck(_) => "agent.interaction.delivery.ack",
         Method::AgentTurnReport(_) => "agent.turn.report",
         Method::AgentTurnActionGet(_) => "agent.turn.action.get",
         Method::AgentTurnActionAck(_) => "agent.turn.action.ack",
@@ -1081,6 +1205,11 @@ fn error_response_json(id: String, code: &str, message: String) -> String {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::api::schema::{
+        ExecutionCommand, ExecutionStartParams, InteractionAckParams, InteractionDeliveryTarget,
+        InteractionKind, InteractionOwner, InteractionReportParams, InteractionRespondParams,
+        InteractionState, InteractionTarget,
+    };
     use interprocess::local_socket::traits::Listener as _;
     use std::collections::HashMap;
     use std::io::{BufRead, BufReader};
@@ -1279,6 +1408,7 @@ mod tests {
                 health_check: true,
                 tracked_executions: true,
                 agent_turn_journal: true,
+                agent_interactions: Some(1),
             }),
             None,
             None,
@@ -1288,6 +1418,120 @@ mod tests {
         let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed.id, "req_1");
         assert!(matches!(parsed.result, ResponseResult::Pong { .. }));
+    }
+
+    #[test]
+    fn interaction_api_keeps_delivery_queued_until_producer_acknowledges_it() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let runtime = crate::execution::SharedRuntimeState::isolated();
+        runtime
+            .executions
+            .admit_visible(&ExecutionStartParams {
+                execution_id: "execution".into(),
+                cwd: std::env::temp_dir().to_string_lossy().into(),
+                workspace_id: None,
+                label: None,
+                command: ExecutionCommand::Argv {
+                    argv: vec!["true".into()],
+                },
+            })
+            .unwrap();
+        runtime
+            .executions
+            .attach_visible("execution", 1, "pane".into(), "tab".into(), None)
+            .unwrap();
+        let owner = InteractionOwner {
+            execution_id: "execution".into(),
+            pane_id: "pane".into(),
+            producer: "xcsh".into(),
+            session_id: "session".into(),
+            generation: 0,
+        };
+        let target = InteractionTarget {
+            owner: owner.clone(),
+            request_id: "request".into(),
+        };
+        let invoke = |id: &str, method| {
+            serde_json::from_str::<serde_json::Value>(&handle_request(
+                Request {
+                    id: id.into(),
+                    method,
+                },
+                &tx,
+                None,
+                None,
+                None,
+                &runtime,
+            ))
+            .unwrap()
+        };
+
+        let report = invoke(
+            "report",
+            Method::AgentInteractionReport(InteractionReportParams {
+                target: target.clone(),
+                thread_id: "thread".into(),
+                turn_id: "turn".into(),
+                item_id: "item".into(),
+                question_ids: vec!["question".into()],
+                event_revision: 1,
+                kind: InteractionKind::Async,
+                payload: serde_json::json!({
+                    "id": "item",
+                    "type": "agentMessage",
+                    "text": "Where?",
+                    "phase": "final_answer",
+                    "delivery": "async",
+                    "questions": [{"title":"Where?"}]
+                }),
+                state: InteractionState::Pending,
+                native_capability: None,
+            }),
+        );
+        assert_eq!(report["result"]["type"], "agent_interaction");
+        let queued = invoke(
+            "respond",
+            Method::AgentInteractionRespond(InteractionRespondParams {
+                target: target.clone(),
+                response_id: "response".into(),
+                answer: serde_json::json!("Canada"),
+            }),
+        );
+        assert_eq!(queued["result"]["receipt"]["state"], "queued");
+        let before_ack = invoke(
+            "read-before-ack",
+            Method::AgentInteractionRead(target.clone()),
+        );
+        assert_eq!(
+            before_ack["result"]["interaction"]["report"]["state"],
+            "pending"
+        );
+        let deliveries = invoke(
+            "deliveries",
+            Method::AgentInteractionDeliveryGet(InteractionDeliveryTarget {
+                owner: owner.clone(),
+                native_capability: None,
+            }),
+        );
+        assert_eq!(deliveries["result"]["deliveries"][0]["answer"], "Canada");
+        let accepted = invoke(
+            "ack",
+            Method::AgentInteractionDeliveryAck(InteractionAckParams {
+                producer: InteractionDeliveryTarget {
+                    owner,
+                    native_capability: None,
+                },
+                request_id: "request".into(),
+                response_id: "response".into(),
+                accepted: true,
+            }),
+        );
+        assert_eq!(accepted["result"]["receipt"]["state"], "accepted");
+        let after_ack = invoke("read-after-ack", Method::AgentInteractionRead(target));
+        assert_eq!(
+            after_ack["result"]["interaction"]["report"]["state"],
+            "answered"
+        );
     }
 
     #[test]
