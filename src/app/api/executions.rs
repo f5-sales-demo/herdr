@@ -253,6 +253,14 @@ impl App {
             }
         };
         let (rows, cols) = self.state.estimate_pane_size();
+        let Some(producer_capability) = manager.native_capability(&params.execution_id) else {
+            return self.fail_visible_execution(
+                id,
+                &params.execution_id,
+                "execution_capability_missing",
+                "execution is missing its private producer capability",
+            );
+        };
         let result = self
             .state
             .workspaces
@@ -264,7 +272,11 @@ impl App {
                     cols,
                     PathBuf::from(&params.cwd),
                     &argv,
-                    vec![("HERDR_EXECUTION_ID".into(), params.execution_id.clone())],
+                    vec![
+                        ("HERDR_EXECUTION_ID".into(), params.execution_id.clone()),
+                        ("HERDR_EXECUTION_GENERATION".into(), "0".into()),
+                        ("HERDR_INTERACTION_CAPABILITY".into(), producer_capability),
+                    ],
                     self.state.pane_scrollback_limit_bytes,
                     self.state.host_terminal_theme,
                     self.state.host_terminal_appearance,

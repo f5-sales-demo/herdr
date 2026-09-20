@@ -49,6 +49,8 @@ pub enum ResponseResult {
     },
     AgentInteractionList {
         revision: u64,
+        /// True when the requested cursor predates retained history and this is a replacement snapshot.
+        reset: bool,
         interactions: Vec<super::InteractionRecord>,
         deliveries: Vec<super::InteractionReceipt>,
     },

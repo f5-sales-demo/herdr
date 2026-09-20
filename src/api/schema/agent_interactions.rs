@@ -45,6 +45,7 @@ pub struct InteractionReportParams {
     /// Codex payload, unchanged. Never include responses or local drafts here.
     pub payload: serde_json::Value,
     pub state: InteractionState,
+    /// Private per-execution producer capability. Accepted on requests only and never journaled.
     #[serde(default, skip_serializing)]
     pub native_capability: Option<String>,
 }
@@ -77,6 +78,7 @@ pub struct InteractionRespondParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct InteractionDeliveryTarget {
     pub owner: InteractionOwner,
+    /// Private per-execution producer capability. Accepted on requests only and never returned.
     #[serde(default, skip_serializing)]
     pub native_capability: Option<String>,
 }

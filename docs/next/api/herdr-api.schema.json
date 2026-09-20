@@ -2612,6 +2612,7 @@
         "InteractionDeliveryTarget": {
           "properties": {
             "native_capability": {
+              "description": "Private per-execution producer capability. Accepted on requests only and never returned.",
               "type": [
                 "string",
                 "null"
@@ -2690,6 +2691,7 @@
               "$ref": "#/schemas/request/$defs/InteractionKind"
             },
             "native_capability": {
+              "description": "Private per-execution producer capability. Accepted on requests only and never journaled.",
               "type": [
                 "string",
                 "null"
@@ -9353,6 +9355,7 @@
               "$ref": "#/schemas/success_response/$defs/InteractionKind"
             },
             "native_capability": {
+              "description": "Private per-execution producer capability. Accepted on requests only and never journaled.",
               "type": [
                 "string",
                 "null"
@@ -11138,6 +11141,10 @@
                   },
                   "type": "array"
                 },
+                "reset": {
+                  "description": "True when the requested cursor predates retained history and this is a replacement snapshot.",
+                  "type": "boolean"
+                },
                 "revision": {
                   "format": "uint64",
                   "minimum": 0,
@@ -11151,6 +11158,7 @@
               "required": [
                 "type",
                 "revision",
+                "reset",
                 "interactions",
                 "deliveries"
               ],

@@ -271,7 +271,7 @@ fn handle_connection_with_stop(
                     break Some(encode_runtime_error(request_id.clone(), &error));
                 }
                 match runtime_state.interactions.list(params.after_revision) {
-                    Ok((revision, interactions, deliveries))
+                    Ok((revision, reset, interactions, deliveries))
                         if revision > params.after_revision
                             || std::time::Instant::now() >= deadline =>
                     {
@@ -279,6 +279,7 @@ fn handle_connection_with_stop(
                             request_id.clone(),
                             ResponseResult::AgentInteractionList {
                                 revision,
+                                reset,
                                 interactions,
                                 deliveries,
                             },
@@ -587,10 +588,11 @@ fn interaction_list_response(
         return encode_runtime_error(id, &error);
     }
     match runtime.interactions.list(after) {
-        Ok((revision, interactions, deliveries)) => encode_runtime_response(
+        Ok((revision, reset, interactions, deliveries)) => encode_runtime_response(
             id,
             ResponseResult::AgentInteractionList {
                 revision,
+                reset,
                 interactions,
                 deliveries,
             },
@@ -1451,6 +1453,10 @@ mod tests {
             owner: owner.clone(),
             request_id: "request".into(),
         };
+        let producer_capability = runtime
+            .executions
+            .native_capability("execution")
+            .expect("ordinary execution capability");
         let invoke = |id: &str, method| {
             serde_json::from_str::<serde_json::Value>(&handle_request(
                 Request {
@@ -1485,7 +1491,7 @@ mod tests {
                     "questions": [{"title":"Where?"}]
                 }),
                 state: InteractionState::Pending,
-                native_capability: None,
+                native_capability: Some(producer_capability.clone()),
             }),
         );
         assert_eq!(report["result"]["type"], "agent_interaction");
@@ -1494,7 +1500,7 @@ mod tests {
             Method::AgentInteractionRespond(InteractionRespondParams {
                 target: target.clone(),
                 response_id: "response".into(),
-                answer: serde_json::json!("Canada"),
+                answer: serde_json::json!({"questionId":"question","answer":"Canada"}),
             }),
         );
         assert_eq!(queued["result"]["receipt"]["state"], "queued");
@@ -1510,16 +1516,19 @@ mod tests {
             "deliveries",
             Method::AgentInteractionDeliveryGet(InteractionDeliveryTarget {
                 owner: owner.clone(),
-                native_capability: None,
+                native_capability: Some(producer_capability.clone()),
             }),
         );
-        assert_eq!(deliveries["result"]["deliveries"][0]["answer"], "Canada");
+        assert_eq!(
+            deliveries["result"]["deliveries"][0]["answer"],
+            serde_json::json!({"questionId":"question","answer":"Canada"})
+        );
         let accepted = invoke(
             "ack",
             Method::AgentInteractionDeliveryAck(InteractionAckParams {
                 producer: InteractionDeliveryTarget {
                     owner,
-                    native_capability: None,
+                    native_capability: Some(producer_capability),
                 },
                 request_id: "request".into(),
                 response_id: "response".into(),

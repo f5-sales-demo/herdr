@@ -5,6 +5,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+const MAX_RECORDS: usize = 4096;
+const MAX_RECEIPTS: usize = 8192;
+
 #[derive(Clone)]
 pub(crate) struct InteractionManager(Arc<Inner>);
 struct Inner {
@@ -15,6 +18,8 @@ struct Inner {
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 struct State {
     revision: u64,
+    #[serde(default)]
+    reset_before_revision: u64,
     records: Vec<InteractionRecord>,
     receipts: Vec<InteractionReceipt>,
     #[serde(skip)]
@@ -57,6 +62,7 @@ impl InteractionManager {
                 receipt.state = InteractionDeliveryState::OwnerLost;
             }
         }
+        enforce_retention(&mut state)?;
         let manager = Self(Arc::new(Inner {
             path,
             state: Mutex::new(state),
@@ -124,6 +130,7 @@ impl InteractionManager {
             &params.target.owner,
             params.native_capability.as_deref(),
             true,
+            true,
             || self.report_validated(params.clone()),
         )
     }
@@ -154,7 +161,7 @@ impl InteractionManager {
                 if expected != params {
                     return Err("interaction_identity_or_payload_changed".into());
                 }
-            } else if params.state != InteractionState::Pending || state.records.len() >= 4096 {
+            } else if params.state != InteractionState::Pending {
                 return Err("interaction_initial_state_or_capacity".into());
             }
             state.revision += 1;
@@ -178,6 +185,7 @@ impl InteractionManager {
                     }
                 }
             }
+            enforce_retention(state)?;
             Ok(record)
         })
     }
@@ -198,11 +206,10 @@ impl InteractionManager {
             .map(|r| r.report.target.clone())
             .collect();
         for target in candidates {
-            if executions
-                .with_interaction_owner(&target.owner, None, false, || Ok(()))
-                .is_ok()
-            {
-                continue;
+            match executions.with_interaction_owner(&target.owner, None, false, false, || Ok(())) {
+                Ok(()) => continue,
+                Err(error) if owner_is_lost(&error) => {}
+                Err(error) => return Err(error),
             }
             self.mutate(|state| {
                 if let Some(record) = state.records.iter_mut().find(|r| {
@@ -240,7 +247,7 @@ impl InteractionManager {
     pub(crate) fn list(
         &self,
         after: u64,
-    ) -> Result<(u64, Vec<InteractionRecord>, Vec<InteractionReceipt>), String> {
+    ) -> Result<(u64, bool, Vec<InteractionRecord>, Vec<InteractionReceipt>), String> {
         self.available()?;
         let state = self
             .0
@@ -250,18 +257,20 @@ impl InteractionManager {
         if after > state.revision {
             return Err("interaction_invalid_revision".into());
         }
+        let reset = after < state.reset_before_revision;
         Ok((
             state.revision,
+            reset,
             state
                 .records
                 .iter()
-                .filter(|r| r.revision > after)
+                .filter(|r| reset || r.revision > after)
                 .cloned()
                 .collect(),
             state
                 .receipts
                 .iter()
-                .filter(|r| r.revision > after)
+                .filter(|r| reset || r.revision > after)
                 .cloned()
                 .collect(),
         ))
@@ -271,7 +280,7 @@ impl InteractionManager {
         params: InteractionRespondParams,
         executions: &crate::execution::ExecutionManager,
     ) -> Result<InteractionReceipt, String> {
-        executions.with_interaction_owner(&params.target.owner, None, false, || {
+        executions.with_interaction_owner(&params.target.owner, None, false, false, || {
             self.respond_validated(params.clone())
         })
     }
@@ -294,8 +303,11 @@ impl InteractionManager {
                 .iter()
                 .find(|r| r.response_id == params.response_id)
             {
-                return if receipt.target == params.target
-                    && state.answers.get(&params.response_id) == Some(&params.answer)
+                if receipt.target != params.target {
+                    return Err("interaction_response_id_reused".into());
+                }
+                return if receipt.state != InteractionDeliveryState::Queued
+                    || state.answers.get(&params.response_id) == Some(&params.answer)
                 {
                     Ok(receipt.clone())
                 } else {
@@ -310,9 +322,7 @@ impl InteractionManager {
             if record.report.state != InteractionState::Pending {
                 return Err("interaction_resolved".into());
             }
-            if state.receipts.len() >= 8192 {
-                return Err("interaction_delivery_capacity".into());
-            }
+            validate_answer(&record.report, &params.answer)?;
             if state
                 .receipts
                 .iter()
@@ -331,6 +341,7 @@ impl InteractionManager {
                 .answers
                 .insert(receipt.response_id.clone(), params.answer);
             state.receipts.push(receipt.clone());
+            enforce_retention(state)?;
             Ok(receipt)
         })
     }
@@ -343,6 +354,7 @@ impl InteractionManager {
             &params.owner,
             params.native_capability.as_deref(),
             true,
+            false,
             || {
                 self.available()?;
                 let state = self
@@ -379,6 +391,7 @@ impl InteractionManager {
             &params.producer.owner,
             params.producer.native_capability.as_deref(),
             true,
+            false,
             || self.ack_validated(params),
         )
     }
@@ -424,9 +437,56 @@ impl InteractionManager {
                 record.revision = state.revision;
                 record.report.state = InteractionState::Answered;
             }
+            state.answers.remove(&result.response_id);
+            enforce_retention(state)?;
             Ok(result)
         })
     }
+}
+fn enforce_retention(state: &mut State) -> Result<(), String> {
+    enforce_retention_with_limits(state, MAX_RECORDS, MAX_RECEIPTS)
+}
+fn enforce_retention_with_limits(
+    state: &mut State,
+    record_limit: usize,
+    receipt_limit: usize,
+) -> Result<(), String> {
+    while state.records.len() > record_limit {
+        let Some((index, revision)) = state
+            .records
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| record.report.state != InteractionState::Pending)
+            .min_by_key(|(_, record)| record.revision)
+            .map(|(index, record)| (index, record.revision))
+        else {
+            return Err("interaction_record_capacity".into());
+        };
+        state.records.remove(index);
+        state.reset_before_revision = state.reset_before_revision.max(revision);
+    }
+    while state.receipts.len() > receipt_limit {
+        let Some((index, revision)) = state
+            .receipts
+            .iter()
+            .enumerate()
+            .filter(|(_, receipt)| receipt.state != InteractionDeliveryState::Queued)
+            .min_by_key(|(_, receipt)| receipt.revision)
+            .map(|(index, receipt)| (index, receipt.revision))
+        else {
+            return Err("interaction_receipt_capacity".into());
+        };
+        let removed = state.receipts.remove(index);
+        state.answers.remove(&removed.response_id);
+        state.reset_before_revision = state.reset_before_revision.max(revision);
+    }
+    Ok(())
+}
+fn owner_is_lost(error: &str) -> bool {
+    matches!(
+        error,
+        "interaction_execution_not_found" | "interaction_owner_lost"
+    )
 }
 fn valid_id(value: &str) -> Result<(), String> {
     if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
@@ -448,7 +508,18 @@ fn validate_report(params: &InteractionReportParams) -> Result<(), String> {
     ] {
         valid_id(value)?;
     }
-    if params.event_revision == 0 || params.question_ids.len() > 32 {
+    if params.event_revision == 0
+        || params.question_ids.len() > 32
+        || params
+            .question_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != params.question_ids.len()
+        || (params.kind == InteractionKind::Waiting
+            && !(1..=3).contains(&params.question_ids.len()))
+        || (params.kind == InteractionKind::PlanDecision && !params.question_ids.is_empty())
+    {
         return Err("interaction_invalid_revision_or_questions".into());
     }
     for value in &params.question_ids {
@@ -498,7 +569,7 @@ fn validate_report(params: &InteractionReportParams) -> Result<(), String> {
                 if question
                     .get(text_key)
                     .and_then(serde_json::Value::as_str)
-                    .is_none_or(str::is_empty)
+                    .is_none_or(|value| value.trim().is_empty() || value.len() > 16_384)
                 {
                     return Err("interaction_invalid_question_text".into());
                 }
@@ -511,19 +582,35 @@ fn validate_report(params: &InteractionReportParams) -> Result<(), String> {
                         || question
                             .get("header")
                             .and_then(serde_json::Value::as_str)
-                            .is_none()
+                            .is_none_or(|value| {
+                                value.trim().is_empty() || value.chars().count() > 12
+                            })
+                        || !question
+                            .get("isOther")
+                            .is_some_and(serde_json::Value::is_boolean)
+                        || !question
+                            .get("isSecret")
+                            .is_some_and(serde_json::Value::is_boolean)
                     {
                         return Err("interaction_invalid_question_identity".into());
                     }
                 }
                 if let Some(options) = question.get("options").filter(|value| !value.is_null()) {
                     let options = options.as_array().ok_or("interaction_invalid_options")?;
-                    if options.is_empty() {
+                    if options.is_empty()
+                        || (params.kind == InteractionKind::Waiting
+                            && !(2..=3).contains(&options.len()))
+                    {
                         return Err("interaction_invalid_options".into());
                     }
+                    let mut option_values = std::collections::BTreeSet::new();
                     for option in options {
                         if params.kind == InteractionKind::Async {
-                            if !option.is_string() {
+                            let value = option
+                                .as_str()
+                                .filter(|value| !value.trim().is_empty() && value.len() <= 4096)
+                                .ok_or("interaction_invalid_option")?;
+                            if !option_values.insert(value) {
                                 return Err("interaction_invalid_option".into());
                             }
                         } else {
@@ -532,9 +619,22 @@ fn validate_report(params: &InteractionReportParams) -> Result<(), String> {
                                 .keys()
                                 .any(|key| !["label", "description"].contains(&key.as_str()))
                                 || !["label", "description"].iter().all(|key| {
-                                    option.get(*key).is_some_and(serde_json::Value::is_string)
+                                    option
+                                        .get(*key)
+                                        .and_then(serde_json::Value::as_str)
+                                        .is_some_and(|value| {
+                                            !value.trim().is_empty() && value.len() <= 4096
+                                        })
                                 })
                             {
+                                return Err("interaction_invalid_option".into());
+                            }
+                            if !option_values.insert(
+                                option
+                                    .get("label")
+                                    .and_then(serde_json::Value::as_str)
+                                    .expect("validated label"),
+                            ) {
                                 return Err("interaction_invalid_option".into());
                             }
                         }
@@ -545,10 +645,10 @@ fn validate_report(params: &InteractionReportParams) -> Result<(), String> {
                 if payload
                     .get("isBlocking")
                     .and_then(serde_json::Value::as_bool)
-                    .is_none()
+                    != Some(true)
                     || !payload
                         .get("autoResolutionMs")
-                        .is_some_and(|value| value.is_null() || value.as_u64().is_some())
+                        .is_some_and(serde_json::Value::is_null)
                 {
                     return Err("interaction_invalid_waiting_payload".into());
                 }
@@ -560,6 +660,41 @@ fn validate_report(params: &InteractionReportParams) -> Result<(), String> {
             {
                 return Err("interaction_invalid_async_payload".into());
             }
+            if params.kind == InteractionKind::Async {
+                let questions = payload["questions"]
+                    .as_array()
+                    .expect("validated questions");
+                let expected = questions
+                    .iter()
+                    .map(|question| {
+                        let question = question.as_object().expect("validated question");
+                        std::iter::once(
+                            question["title"]
+                                .as_str()
+                                .expect("validated title")
+                                .to_string(),
+                        )
+                        .chain(
+                            question
+                                .get("options")
+                                .and_then(serde_json::Value::as_array)
+                                .into_iter()
+                                .flatten()
+                                .map(|option| {
+                                    format!("- {}", option.as_str().expect("validated option"))
+                                }),
+                        )
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                if payload.get("text").and_then(serde_json::Value::as_str)
+                    != Some(expected.as_str())
+                {
+                    return Err("interaction_async_text_mismatch".into());
+                }
+            }
         }
         InteractionKind::PlanDecision => {
             if payload.get("id").and_then(serde_json::Value::as_str)
@@ -569,13 +704,96 @@ fn validate_report(params: &InteractionReportParams) -> Result<(), String> {
                 || payload
                     .get("revision")
                     .and_then(serde_json::Value::as_u64)
-                    .is_none()
-                || !payload
+                    .is_none_or(|revision| revision == 0)
+                || payload
                     .get("markdown")
-                    .is_some_and(serde_json::Value::is_string)
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(|markdown| markdown.trim().is_empty())
                 || payload.get("status").and_then(serde_json::Value::as_str) != Some("pending")
             {
                 return Err("interaction_invalid_plan".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_answer(
+    report: &InteractionReportParams,
+    answer: &serde_json::Value,
+) -> Result<(), String> {
+    match report.kind {
+        InteractionKind::Async => {
+            let object = answer
+                .as_object()
+                .ok_or("interaction_invalid_async_answer")?;
+            if object.len() != 2
+                || object
+                    .keys()
+                    .any(|key| !["questionId", "answer"].contains(&key.as_str()))
+                || object
+                    .get("questionId")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(|id| !report.question_ids.iter().any(|candidate| candidate == id))
+                || object
+                    .get("answer")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err("interaction_invalid_async_answer".into());
+            }
+        }
+        InteractionKind::PlanDecision => {
+            if !matches!(answer.as_str(), Some("implement" | "fresh" | "stay")) {
+                return Err("interaction_invalid_plan_answer".into());
+            }
+        }
+        InteractionKind::Waiting => {
+            let answers = answer
+                .as_object()
+                .filter(|object| object.len() == 1)
+                .and_then(|object| object.get("answers"))
+                .and_then(serde_json::Value::as_object)
+                .ok_or("interaction_invalid_waiting_answer")?;
+            let questions = report.payload["questions"]
+                .as_array()
+                .expect("validated waiting questions");
+            if answers.len() != report.question_ids.len() {
+                return Err("interaction_invalid_waiting_answer".into());
+            }
+            for (index, id) in report.question_ids.iter().enumerate() {
+                let entries = answers
+                    .get(id)
+                    .and_then(serde_json::Value::as_object)
+                    .filter(|entry| entry.len() == 1)
+                    .and_then(|entry| entry.get("answers"))
+                    .and_then(serde_json::Value::as_array)
+                    .filter(|entries| {
+                        entries.len() <= 2 && entries.iter().all(serde_json::Value::is_string)
+                    })
+                    .ok_or("interaction_invalid_waiting_answer")?;
+                if entries.is_empty() {
+                    continue;
+                }
+                let question = questions[index]
+                    .as_object()
+                    .expect("validated waiting question");
+                let labels = question["options"]
+                    .as_array()
+                    .expect("validated waiting options")
+                    .iter()
+                    .map(|option| option["label"].as_str().expect("validated label"))
+                    .collect::<Vec<_>>();
+                let first = entries[0].as_str().expect("validated answer");
+                let selected = labels.contains(&first);
+                let note_valid = entries
+                    .get(1)
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(|note| note.starts_with("user_note: "));
+                let freeform = question["isOther"].as_bool() == Some(true) && entries.len() == 1;
+                if (!selected && !freeform) || (selected && !note_valid) {
+                    return Err("interaction_invalid_waiting_answer".into());
+                }
             }
         }
     }
@@ -627,7 +845,7 @@ mod tests {
         let response = InteractionRespondParams {
             target: request.target.clone(),
             response_id: "reply".into(),
-            answer: serde_json::json!("secret answer"),
+            answer: serde_json::json!({"questionId":"question","answer":"secret answer"}),
         };
         assert_eq!(
             manager.respond_validated(response.clone()).unwrap().state,
@@ -658,6 +876,24 @@ mod tests {
             InteractionDeliveryState::Accepted
         );
         assert_eq!(
+            manager
+                .respond_validated(InteractionRespondParams {
+                    target: request.target.clone(),
+                    response_id: "reply".into(),
+                    answer: serde_json::json!({"questionId":"question","answer":"not retained"}),
+                })
+                .unwrap()
+                .state,
+            InteractionDeliveryState::Accepted
+        );
+        assert!(!manager
+            .0
+            .state
+            .lock()
+            .unwrap()
+            .answers
+            .contains_key("reply"));
+        assert_eq!(
             manager.read(&request.target).unwrap().report.state,
             InteractionState::Answered
         );
@@ -665,6 +901,35 @@ mod tests {
             manager.ack_validated(&ack).unwrap().state,
             InteractionDeliveryState::Accepted
         );
+        std::fs::remove_file(file).unwrap();
+    }
+
+    #[test]
+    fn rejected_acknowledgement_erases_the_private_answer() {
+        let file = path();
+        let manager = InteractionManager::load_at(file.clone()).unwrap();
+        let request = report();
+        manager.report_validated(request.clone()).unwrap();
+        manager
+            .respond_validated(InteractionRespondParams {
+                target: request.target.clone(),
+                response_id: "rejected".into(),
+                answer: serde_json::json!({"questionId":"question","answer":"secret"}),
+            })
+            .unwrap();
+        manager
+            .ack_validated(&InteractionAckParams {
+                producer: InteractionDeliveryTarget {
+                    owner: request.target.owner,
+                    native_capability: None,
+                },
+                request_id: request.target.request_id,
+                response_id: "rejected".into(),
+                accepted: false,
+            })
+            .unwrap();
+        assert!(manager.0.state.lock().unwrap().answers.is_empty());
+        assert!(!std::fs::read_to_string(&file).unwrap().contains("secret"));
         std::fs::remove_file(file).unwrap();
     }
     #[test]
@@ -677,7 +942,7 @@ mod tests {
             .respond_validated(InteractionRespondParams {
                 target: request.target.clone(),
                 response_id: "reply".into(),
-                answer: serde_json::json!("private"),
+                answer: serde_json::json!({"questionId":"question","answer":"private"}),
             })
             .unwrap();
         let restarted = InteractionManager::load_at(file.clone()).unwrap();
@@ -728,6 +993,7 @@ mod tests {
         let manager = InteractionManager::load_at(root.join("interactions.json")).unwrap();
         let mut request = report();
         request.target.owner.generation = 0;
+        request.native_capability = executions.native_capability("e");
         manager.report(request.clone(), &executions).unwrap();
         let mut wrong = request.target.clone();
         wrong.owner.generation = 1;
@@ -759,6 +1025,43 @@ mod tests {
             .is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn ordinary_producer_mutations_require_the_execution_capability() {
+        let root = path();
+        std::fs::create_dir_all(&root).unwrap();
+        let executions = crate::execution::ExecutionManager::load_at(root.join("executions.json"));
+        executions
+            .admit_visible(&ExecutionStartParams {
+                execution_id: "e".into(),
+                cwd: std::env::temp_dir().to_string_lossy().into(),
+                workspace_id: None,
+                label: None,
+                command: ExecutionCommand::Argv {
+                    argv: vec!["true".into()],
+                },
+            })
+            .unwrap();
+        executions
+            .attach_visible("e", 1, "p".into(), "tab".into(), None)
+            .unwrap();
+        let manager = InteractionManager::load_at(root.join("interactions.json")).unwrap();
+        let mut request = report();
+        request.target.owner.generation = 0;
+        assert!(executions.native_capability("e").is_some());
+        assert_eq!(
+            manager.report(request.clone(), &executions).unwrap_err(),
+            "interaction_producer_capability_missing"
+        );
+        request.native_capability = Some("wrong".into());
+        assert_eq!(
+            manager.report(request.clone(), &executions).unwrap_err(),
+            "interaction_producer_capability_mismatch"
+        );
+        request.native_capability = executions.native_capability("e");
+        manager.report(request, &executions).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn journal_payload_cannot_contain_answers_or_local_drafts() {
         let mut request = report();
@@ -768,12 +1071,64 @@ mod tests {
     }
 
     #[test]
+    fn only_absent_or_stopped_executions_are_classified_as_owner_loss() {
+        assert!(owner_is_lost("interaction_execution_not_found"));
+        assert!(owner_is_lost("interaction_owner_lost"));
+        for error in [
+            "interaction_stale_generation",
+            "interaction_provenance_mismatch",
+            "interaction_producer_capability_missing",
+            "interaction_producer_capability_mismatch",
+            "execution state lock poisoned",
+            "disk full",
+        ] {
+            assert!(!owner_is_lost(error), "{error}");
+        }
+    }
+
+    #[test]
+    fn bounded_history_returns_an_explicit_reset_snapshot_to_stale_consumers() {
+        let file = path();
+        let manager = InteractionManager::load_at(file.clone()).unwrap();
+        let mut first = report();
+        first.state = InteractionState::Answered;
+        let mut second = first.clone();
+        second.target.request_id = "q2".into();
+        second.item_id = "item2".into();
+        second.payload["id"] = serde_json::json!("item2");
+        let mut state = manager.0.state.lock().unwrap();
+        state.revision = 2;
+        state.records = vec![
+            InteractionRecord {
+                report: first,
+                revision: 1,
+            },
+            InteractionRecord {
+                report: second.clone(),
+                revision: 2,
+            },
+        ];
+        enforce_retention_with_limits(&mut state, 1, 1).unwrap();
+        drop(state);
+        let (revision, reset, records, receipts) = manager.list(0).unwrap();
+        assert_eq!(revision, 2);
+        assert!(reset);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].report.target, second.target);
+        assert!(receipts.is_empty());
+        let (_, reset, records, _) = manager.list(1).unwrap();
+        assert!(!reset);
+        assert_eq!(records.len(), 1);
+        std::fs::remove_file(file).unwrap();
+    }
+
+    #[test]
     fn payload_identity_and_fixed_fields_are_validated() {
         let mut request = report();
         request.payload = serde_json::json!({
             "id": "item",
             "type": "agentMessage",
-            "text": "Where?",
+            "text": "Where?\n- Canada",
             "phase": "final_answer",
             "delivery": "async",
             "questions": [{"title": "Where?", "options": ["Canada"]}]
@@ -784,5 +1139,68 @@ mod tests {
             validate_report(&request),
             Err("interaction_invalid_async_payload".into())
         );
+    }
+
+    #[test]
+    fn waiting_async_and_plan_payloads_reject_malformed_contracts() {
+        let mut waiting = report();
+        waiting.kind = InteractionKind::Waiting;
+        waiting.payload = serde_json::json!({
+            "questions": [{
+                "id": "question",
+                "header": "Region",
+                "question": "Where?",
+                "options": [
+                    {"label":"Canada (Recommended)","description":"Use Canada."},
+                    {"label":"US","description":"Use the US."}
+                ],
+                "isOther": true,
+                "isSecret": false
+            }],
+            "isBlocking": true,
+            "autoResolutionMs": null
+        });
+        assert!(validate_report(&waiting).is_ok());
+        waiting.payload["autoResolutionMs"] = serde_json::json!(1000);
+        assert_eq!(
+            validate_report(&waiting),
+            Err("interaction_invalid_waiting_payload".into())
+        );
+
+        let mut asynchronous = report();
+        asynchronous.question_ids = vec!["question".into(), "question".into()];
+        asynchronous.payload["questions"] = serde_json::json!([
+            {"title":"One"}, {"title":"Two"}
+        ]);
+        asynchronous.payload["text"] = serde_json::json!("One\n\nTwo");
+        assert_eq!(
+            validate_report(&asynchronous),
+            Err("interaction_invalid_revision_or_questions".into())
+        );
+
+        let mut plan = report();
+        plan.kind = InteractionKind::PlanDecision;
+        plan.question_ids.clear();
+        plan.target.request_id = "plan".into();
+        plan.item_id = "plan-item".into();
+        plan.payload = serde_json::json!({
+            "id":"plan",
+            "itemId":"plan-item",
+            "revision":1,
+            "markdown":"# Plan",
+            "status":"pending"
+        });
+        assert!(validate_report(&plan).is_ok());
+        assert!(validate_answer(&plan, &serde_json::json!("implement")).is_ok());
+        assert_eq!(
+            validate_answer(&plan, &serde_json::json!("later")),
+            Err("interaction_invalid_plan_answer".into())
+        );
+        assert!(validate_answer(
+            &report(),
+            &serde_json::json!({"questionId":"question","answer":"Canada"})
+        )
+        .is_ok());
+        assert!(validate_answer(&report(), &serde_json::json!("Canada")).is_err());
     }
 }

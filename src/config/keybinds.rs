@@ -1260,6 +1260,12 @@ pub(crate) fn parse_key_combo(s: &str) -> Option<KeyCombo> {
         }
         "tab" => KeyCode::Tab,
         "backspace" | "bs" => KeyCode::Backspace,
+        "delete" | "del" => KeyCode::Delete,
+        "insert" | "ins" => KeyCode::Insert,
+        "home" => KeyCode::Home,
+        "end" => KeyCode::End,
+        "pageup" | "page_up" | "page-up" => KeyCode::PageUp,
+        "pagedown" | "page_down" | "page-down" => KeyCode::PageDown,
         "left" => KeyCode::Left,
         "right" => KeyCode::Right,
         "up" => KeyCode::Up,
