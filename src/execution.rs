@@ -49,7 +49,16 @@ struct State {
     #[serde(default)]
     native_capability_verifiers: BTreeMap<String, String>,
     #[serde(default)]
+    interaction_producers: BTreeMap<String, InteractionProducerBinding>,
+    #[serde(default)]
     native_actions: BTreeMap<String, AgentTurnActionRecord>,
+}
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct InteractionProducerBinding {
+    pane_id: String,
+    producer: String,
+    session_id: String,
+    generation: u64,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ExecutionTombstone {
@@ -156,6 +165,16 @@ impl ExecutionManager {
             return Err("execution_expired: execution id was previously admitted but its record expired; use a new id".into());
         }
         state.revision += 1;
+        let producer_capability = uuid::Uuid::new_v4().simple().to_string();
+        state.native_capability_verifiers.insert(
+            params.execution_id.clone(),
+            sha256_hex(&producer_capability),
+        );
+        self.0
+            .native_capabilities
+            .lock()
+            .map_err(|_| "native capability lock poisoned")?
+            .insert(params.execution_id.clone(), producer_capability);
         let record = ExecutionRecord {
             execution_id: params.execution_id.clone(),
             workspace_id: params.workspace_id.clone(),
@@ -978,9 +997,10 @@ impl ExecutionManager {
         owner: &crate::api::schema::InteractionOwner,
         capability: Option<&str>,
         producer_action: bool,
+        register_producer: bool,
         action: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
-        let state = self
+        let mut state = self
             .0
             .state
             .lock()
@@ -994,6 +1014,8 @@ impl ExecutionManager {
                         && r.generation == Some(owner.generation)
             })
             .ok_or("interaction_execution_not_found")?;
+        let record_execution_id = record.execution_id.clone();
+        let native_execution = record.semantic_execution_id.is_some();
         if !matches!(
             record.state,
             ExecutionState::Starting | ExecutionState::Running
@@ -1020,15 +1042,44 @@ impl ExecutionManager {
                 return Err("interaction_provenance_mismatch".into());
             }
             if producer_action {
-                let capability = capability.ok_or("interaction_native_capability_missing")?;
+                let capability = capability.ok_or("interaction_producer_capability_missing")?;
                 if state.native_capability_verifiers.get(&record.execution_id)
                     != Some(&sha256_hex(capability))
                 {
-                    return Err("interaction_native_capability_mismatch".into());
+                    return Err("interaction_producer_capability_mismatch".into());
                 }
             }
         } else if owner.generation != 0 {
             return Err("interaction_stale_generation".into());
+        }
+        if producer_action && !native_execution {
+            let capability = capability.ok_or("interaction_producer_capability_missing")?;
+            if state.native_capability_verifiers.get(&record_execution_id)
+                != Some(&sha256_hex(capability))
+            {
+                return Err("interaction_producer_capability_mismatch".into());
+            }
+            let binding = InteractionProducerBinding {
+                pane_id: owner.pane_id.clone(),
+                producer: owner.producer.clone(),
+                session_id: owner.session_id.clone(),
+                generation: owner.generation,
+            };
+            match state.interaction_producers.get(&record_execution_id) {
+                Some(existing) if existing != &binding => {
+                    return Err("interaction_provenance_mismatch".into())
+                }
+                None if !register_producer => {
+                    return Err("interaction_producer_not_registered".into())
+                }
+                None => {
+                    state
+                        .interaction_producers
+                        .insert(record_execution_id, binding);
+                    self.persist_locked(&state)?;
+                }
+                Some(_) => {}
+            }
         }
         action()
     }
@@ -1120,6 +1171,13 @@ impl ExecutionManager {
                 break;
             };
             let record = state.records.remove(index);
+            state.interaction_producers.remove(&record.execution_id);
+            state
+                .native_capability_verifiers
+                .remove(&record.execution_id);
+            if let Ok(mut capabilities) = self.0.native_capabilities.lock() {
+                capabilities.remove(&record.execution_id);
+            }
             expired_filter_insert(&mut state.expired_id_filter, &record.execution_id);
             state.tombstones.push(ExecutionTombstone {
                 execution_id: record.execution_id,
@@ -2249,6 +2307,7 @@ mod tests {
         let state = State {
             revision: 1,
             native_capability_verifiers: BTreeMap::new(),
+            interaction_producers: BTreeMap::new(),
             native_actions: BTreeMap::new(),
             records: vec![ExecutionRecord {
                 execution_id: "old".into(),
