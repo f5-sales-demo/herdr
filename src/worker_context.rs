@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -46,6 +47,7 @@ pub(crate) struct WorkerContextState {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg(unix)]
 pub(crate) struct WorkerContextHandoffState {
     pub(crate) state: WorkerContextState,
     pub(crate) pane_verifiers: Vec<(u32, String)>,
@@ -132,6 +134,7 @@ impl WorkerContextState {
         self.leases.retain(|grant| grant.pane_id != pane_id.raw());
     }
 
+    #[cfg(unix)]
     pub(crate) fn retain_live(&mut self, mut is_live: impl FnMut(PaneId) -> bool) {
         self.pairings
             .retain(|grant| is_live(PaneId::from_raw(grant.pane_id)));
@@ -139,6 +142,7 @@ impl WorkerContextState {
             .retain(|grant| is_live(PaneId::from_raw(grant.pane_id)));
     }
 
+    #[cfg(unix)]
     pub(crate) fn rebind_panes(&mut self, aliases: &HashMap<u32, PaneId>) {
         for grant in self.pairings.iter_mut().chain(self.leases.iter_mut()) {
             if let Some(pane_id) = aliases.get(&grant.pane_id) {
@@ -213,6 +217,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pane_rebind_and_revoke_follow_internal_identity() {
         let old = PaneId::from_raw(7);
         let moved = PaneId::from_raw(12);
@@ -260,6 +265,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn retain_live_removes_all_grants_for_closed_panes() {
         let live = PaneId::from_raw(1);
         let closed = PaneId::from_raw(2);
