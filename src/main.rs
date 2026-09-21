@@ -63,6 +63,7 @@ mod terminal_notify;
 mod terminal_theme;
 mod ui;
 mod update;
+mod worker_context;
 mod workspace;
 mod worktree;
 

@@ -15,7 +15,7 @@ test "${HERDR_ENV:-}" = 1
 
 If the check fails, this process is not a Herdr-managed pane. Do not inspect or control the focused Herdr session from outside this process. In particular, an isolated tool runner or IDE extension worker may lack the variable while the human still has an active Herdr session, so do not infer that the human session is absent.
 
-Do not set `HERDR_ENV` globally. An externally owned launcher can receive scoped context only through a one-time capability issued by a managed pane: `herdr context issue`, then `herdr context exec <capability> -- <command>` at that launch boundary.
+Do not set `HERDR_ENV` globally. Pair an externally owned launcher explicitly: run `herdr context issue` in the target pane, claim that JSON payload once with `herdr context claim --consumer-id <id>` over stdin, and keep the returned renewable lease in secret storage. Before every worker launch, resolve the lease over stdin with `herdr context resolve --endpoint <path> --consumer-id <id>` and use only the returned allowlisted environment. Revoke it with `herdr context revoke` when disconnecting.
 
 When the check passes, the `herdr` binary in `PATH` talks to the current session. Use it to inspect neighboring work, create terminal layout, start agents and commands, read output, and wait for state changes.
 

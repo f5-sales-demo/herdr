@@ -537,7 +537,11 @@ fn restore_tab(
                     std::time::Instant::now(),
                 );
             }
-            panes.insert(*id, PaneState::new(terminal_id));
+            panes.insert(
+                *id,
+                PaneState::new(terminal_id)
+                    .with_context_capability_verifier(launch_env.context_capability_verifier()),
+            );
             terminals.push(terminal);
             continue;
         }
@@ -636,7 +640,15 @@ fn restore_tab(
                         std::time::Instant::now(),
                     );
                 }
-                panes.insert(*id, PaneState::new(terminal_id.clone()));
+                let verifier = if was_imported {
+                    None
+                } else {
+                    launch_env.context_capability_verifier()
+                };
+                panes.insert(
+                    *id,
+                    PaneState::new(terminal_id.clone()).with_context_capability_verifier(verifier),
+                );
                 terminal_runtimes.insert(terminal_id, runtime);
                 terminals.push(terminal);
             }

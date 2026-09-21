@@ -8,6 +8,10 @@ impl App {
     }
 
     pub(crate) fn close_removed_linked_worktree_workspace(&mut self, ws_idx: usize) {
+        let pane_ids = self.state.pane_ids_for_workspace(ws_idx);
+        for pane_id in pane_ids {
+            self.worker_context.revoke_pane(pane_id);
+        }
         let removed_workspace_was_active = self.state.active == Some(ws_idx);
         let parent_key = self
             .state

@@ -731,6 +731,8 @@ fn success_response_round_trips() {
                 tracked_executions: true,
                 agent_turn_journal: true,
                 agent_interactions: Some(1),
+                worker_context_handoff: Some(1),
+                xcsh_semantic_tracking: Some(1),
             }),
         },
     };

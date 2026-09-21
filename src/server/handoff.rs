@@ -47,6 +47,9 @@ pub(crate) struct HandoffManifest {
     /// Absent from manifests written before this field existed.
     #[serde(default)]
     pub api_window_title: Option<String>,
+    /// Ephemeral worker bindings survive only an in-place live handoff.
+    #[serde(default)]
+    pub worker_context: crate::worker_context::WorkerContextHandoffState,
 }
 
 #[cfg(unix)]
@@ -307,6 +310,7 @@ pub(crate) fn manifest_for(
     expected_protocol: Option<u32>,
     expected_version: Option<String>,
     api_window_title: Option<String>,
+    worker_context: crate::worker_context::WorkerContextHandoffState,
 ) -> HandoffManifest {
     HandoffManifest {
         version: HANDOFF_VERSION,
@@ -317,6 +321,7 @@ pub(crate) fn manifest_for(
         snapshot,
         panes,
         api_window_title,
+        worker_context,
     }
 }
 
@@ -549,6 +554,7 @@ mod tests {
             None,
             None,
             Some("deploying".to_string()),
+            Default::default(),
         );
 
         assert_eq!(manifest.api_window_title.as_deref(), Some("deploying"));
@@ -562,16 +568,47 @@ mod tests {
             None,
             None,
             Some("deploying".to_string()),
+            Default::default(),
         );
         let mut value = serde_json::to_value(&manifest).expect("manifest should serialize");
         value
             .as_object_mut()
             .expect("manifest should be a json object")
             .remove("api_window_title");
+        value
+            .as_object_mut()
+            .expect("manifest should be a json object")
+            .remove("worker_context");
 
         let older: HandoffManifest =
             serde_json::from_value(value).expect("an older manifest should still load");
 
         assert!(older.api_window_title.is_none());
+        assert_eq!(
+            older.worker_context,
+            crate::worker_context::WorkerContextHandoffState::default()
+        );
+    }
+
+    #[test]
+    fn a_handoff_carries_ephemeral_worker_context() {
+        let mut state = crate::worker_context::WorkerContextState::default();
+        let _pairing = state.issue(crate::layout::PaneId::from_raw(7));
+        let worker_context = crate::worker_context::WorkerContextHandoffState {
+            state,
+            pane_verifiers: vec![(7, "verifier".into())],
+        };
+        let manifest = manifest_for(
+            empty_snapshot(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            worker_context.clone(),
+        );
+        let serialized = serde_json::to_vec(&manifest).expect("serialize handoff");
+        let restored: HandoffManifest =
+            serde_json::from_slice(&serialized).expect("deserialize handoff");
+        assert_eq!(restored.worker_context, worker_context);
     }
 }

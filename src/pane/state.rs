@@ -10,6 +10,8 @@ pub struct PaneState {
     pub seen: bool,
     /// Whether unmodified right-click gestures should be forwarded to the pane application.
     pub right_click_passthrough: bool,
+    /// SHA-256 verifier for the root context capability injected into this pane.
+    pub(crate) context_capability_verifier: Option<String>,
 }
 
 impl PaneState {
@@ -18,6 +20,12 @@ impl PaneState {
             attached_terminal_id,
             seen: true,
             right_click_passthrough: false,
+            context_capability_verifier: None,
         }
+    }
+
+    pub(crate) fn with_context_capability_verifier(mut self, verifier: Option<String>) -> Self {
+        self.context_capability_verifier = verifier;
+        self
     }
 }

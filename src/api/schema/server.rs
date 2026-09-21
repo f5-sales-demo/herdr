@@ -36,4 +36,10 @@ pub struct ServerCapabilities {
     /// Version of the independent observation and producer-acknowledged interaction API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_interactions: Option<u32>,
+    /// Version of the external worker context pairing and renewable lease API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_context_handoff: Option<u32>,
+    /// Version of the semantic xcsh execution reporting contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xcsh_semantic_tracking: Option<u32>,
 }

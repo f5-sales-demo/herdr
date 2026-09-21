@@ -280,6 +280,8 @@ struct ServerCapabilitiesJson {
     endpoint_protocol_generation: Option<u32>,
     surface_interest: bool,
     health_check: bool,
+    worker_context_handoff: Option<u32>,
+    xcsh_semantic_tracking: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -325,6 +327,8 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
                     endpoint_protocol_generation: capabilities.endpoint_protocol_generation,
                     surface_interest: capabilities.surface_interest,
                     health_check: capabilities.health_check,
+                    worker_context_handoff: capabilities.worker_context_handoff,
+                    xcsh_semantic_tracking: capabilities.xcsh_semantic_tracking,
                 }),
             compatible: protocol.map(|value| value == crate::protocol::PROTOCOL_VERSION),
             endpoint_compatible: capabilities.as_ref().and_then(|capabilities| {
@@ -425,6 +429,8 @@ mod tests {
                 tracked_executions: true,
                 agent_turn_journal: true,
                 agent_interactions: Some(1),
+                worker_context_handoff: Some(1),
+                xcsh_semantic_tracking: Some(1),
             }),
         }
     }

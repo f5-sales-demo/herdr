@@ -336,6 +336,14 @@ impl App {
                 )
             })
             .collect::<Vec<_>>();
+        let closed_panes = close_indices
+            .iter()
+            .flat_map(|index| self.state.workspaces[*index].tabs.iter())
+            .flat_map(|tab| tab.layout.pane_ids())
+            .collect::<Vec<_>>();
+        for pane_id in closed_panes {
+            self.worker_context.revoke_pane(pane_id);
+        }
         self.state.selected = index;
         self.state.close_selected_workspace();
         self.shutdown_detached_terminal_runtimes();
