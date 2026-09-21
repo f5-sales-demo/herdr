@@ -760,6 +760,7 @@ fn main() -> io::Result<()> {
                 "status",
                 "config",
                 "channel",
+                "context",
                 "machine",
                 "workspace",
                 "worktree",

@@ -13,7 +13,9 @@ Before issuing any control command, verify that this agent is running inside a H
 test "${HERDR_ENV:-}" = 1
 ```
 
-If the check fails, say that you are not running inside Herdr and stop. Do not inspect or control the focused Herdr session from outside Herdr.
+If the check fails, this process is not a Herdr-managed pane. Do not inspect or control the focused Herdr session from outside this process. In particular, an isolated tool runner or IDE extension worker may lack the variable while the human still has an active Herdr session, so do not infer that the human session is absent.
+
+Do not set `HERDR_ENV` globally. An externally owned launcher can receive scoped context only through a one-time capability issued by a managed pane: `herdr context issue`, then `herdr context exec <capability> -- <command>` at that launch boundary.
 
 When the check passes, the `herdr` binary in `PATH` talks to the current session. Use it to inspect neighboring work, create terminal layout, start agents and commands, read output, and wait for state changes.
 
