@@ -232,6 +232,7 @@ impl App {
         else {
             return false;
         };
+        let context_capability_verifier = launch_env.context_capability_verifier();
 
         let runtime = match crate::terminal::TerminalRuntime::spawn(
             pane_id,
@@ -278,6 +279,11 @@ impl App {
         }
 
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        if let Some((ws_idx, _)) = self.find_pane(pane_id) {
+            if let Some(pane) = self.state.workspaces[ws_idx].pane_state_mut(pane_id) {
+                pane.context_capability_verifier = context_capability_verifier;
+            }
+        }
         if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
             terminal.pending_agent_resume_plan = None;
             terminal.respawn_shell_on_exit = false;

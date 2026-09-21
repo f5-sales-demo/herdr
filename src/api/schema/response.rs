@@ -20,6 +20,7 @@ use super::plugins::{
 use super::server::ServerCapabilities;
 use super::session::SessionSnapshot;
 use super::tabs::TabInfo;
+use super::worker_context::{WorkerContext, WorkerContextPane};
 use super::workspaces::WorkspaceInfo;
 use super::worktrees::{WorktreeInfo, WorktreeSourceInfo};
 
@@ -86,6 +87,20 @@ pub enum ResponseResult {
         protocol: u32,
         #[serde(default)]
         capabilities: Option<ServerCapabilities>,
+    },
+    WorkerContextPairing {
+        pairing_token: String,
+        pane: WorkerContextPane,
+    },
+    WorkerContextLease {
+        lease: String,
+        pane: WorkerContextPane,
+    },
+    WorkerContext {
+        context: WorkerContext,
+    },
+    WorkerContextRevoked {
+        revoked: bool,
     },
     SessionSnapshot {
         snapshot: Box<SessionSnapshot>,

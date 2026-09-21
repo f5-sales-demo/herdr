@@ -27,6 +27,7 @@ mod terminal_targets;
 mod terminal_titles;
 mod theme_sync;
 mod window_title;
+mod worker_context;
 mod worktrees;
 
 use std::collections::HashMap;
@@ -108,6 +109,7 @@ pub struct App {
     /// Prompt payloads retained by the server until admission releases them.
     pub(crate) queued_agent_prompts: HashMap<String, crate::api::schema::AgentPromptParams>,
     pub(crate) next_agent_admission_id: u64,
+    pub(crate) worker_context: crate::worker_context::WorkerContextState,
     pub(crate) pane_graphics: pane_graphics::Runtime,
     pub(crate) pane_graphics_files: Arc<crate::pane_graphics_files::FileStore>,
     pub(crate) direct_graphics_available: bool,
@@ -613,6 +615,7 @@ impl App {
             ),
             queued_agent_prompts: HashMap::new(),
             next_agent_admission_id: 1,
+            worker_context: crate::worker_context::WorkerContextState::default(),
             pane_graphics: pane_graphics::Runtime::default(),
             pane_graphics_files: Arc::new(crate::pane_graphics_files::FileStore::default()),
             direct_graphics_available: false,

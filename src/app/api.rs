@@ -285,6 +285,7 @@ impl App {
         };
 
         if let AppEvent::PaneDied { pane_id, .. } = &ev {
+            self.worker_context.revoke_pane(*pane_id);
             if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
                 if let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) {
                     self.emit_event(crate::api::schema::EventEnvelope {
@@ -627,6 +628,7 @@ impl App {
         let Some(launch_env) = self.pane_launch_env(ws_idx, pane_id, Vec::new()) else {
             return false;
         };
+        let context_capability_verifier = launch_env.context_capability_verifier();
         let runtime = match crate::terminal::TerminalRuntime::spawn(
             pane_id,
             rows,
@@ -654,6 +656,9 @@ impl App {
         };
 
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        if let Some(pane) = self.state.workspaces[ws_idx].pane_state_mut(pane_id) {
+            pane.context_capability_verifier = context_capability_verifier;
+        }
         if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
             terminal.clear_agent_runtime_identity_after_respawn();
         }
@@ -1021,6 +1026,18 @@ impl App {
                             .collect(),
                     },
                 }
+            }
+            Method::WorkerContextIssue(params) => {
+                return self.handle_worker_context_issue(request.id, params);
+            }
+            Method::WorkerContextClaim(params) => {
+                return self.handle_worker_context_claim(request.id, params);
+            }
+            Method::WorkerContextResolve(params) => {
+                return self.handle_worker_context_resolve(request.id, params);
+            }
+            Method::WorkerContextRevoke(params) => {
+                return self.handle_worker_context_revoke(request.id, params);
             }
             Method::NotificationShow(params) => {
                 return self.handle_notification_show(request.id, params);

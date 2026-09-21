@@ -181,7 +181,11 @@ impl Tab {
             None => TerminalState::new(terminal_id.clone(), initial_cwd),
         };
         let mut panes = HashMap::new();
-        panes.insert(root_id, PaneState::new(terminal_id));
+        panes.insert(
+            root_id,
+            PaneState::new(terminal_id)
+                .with_context_capability_verifier(launch_env.context_capability_verifier()),
+        );
 
         Ok((
             Self {
@@ -414,7 +418,11 @@ impl Tab {
         if focus_new_pane {
             self.layout.focus_pane(new_id);
         }
-        self.panes.insert(new_id, PaneState::new(terminal_id));
+        self.panes.insert(
+            new_id,
+            PaneState::new(terminal_id)
+                .with_context_capability_verifier(launch_env.context_capability_verifier()),
+        );
         self.zoomed = false;
         Ok(NewPane {
             pane_id: new_id,

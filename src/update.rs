@@ -2847,6 +2847,8 @@ mod tests {
                 tracked_executions: true,
                 agent_turn_journal: true,
                 agent_interactions: Some(1),
+                worker_context_handoff: Some(1),
+                xcsh_semantic_tracking: Some(1),
             }),
         };
         let missing_baseline = crate::api::RuntimeStatus {
@@ -2924,6 +2926,8 @@ mod tests {
                     tracked_executions: true,
                     agent_turn_journal: true,
                     agent_interactions: Some(1),
+                    worker_context_handoff: Some(1),
+                    xcsh_semantic_tracking: Some(1),
                 }),
             },
         };
@@ -3185,6 +3189,8 @@ mod tests {
                     tracked_executions: true,
                     agent_turn_journal: true,
                     agent_interactions: Some(1),
+                    worker_context_handoff: Some(1),
+                    xcsh_semantic_tracking: Some(1),
                 }),
             },
         };

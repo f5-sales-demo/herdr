@@ -63,6 +63,7 @@ mod terminal_notify;
 mod terminal_theme;
 mod ui;
 mod update;
+mod worker_context;
 mod workspace;
 mod worktree;
 
@@ -760,6 +761,7 @@ fn main() -> io::Result<()> {
                 "status",
                 "config",
                 "channel",
+                "context",
                 "machine",
                 "workspace",
                 "worktree",

@@ -14,6 +14,7 @@ pub mod response;
 pub mod server;
 pub mod session;
 pub mod tabs;
+pub mod worker_context;
 pub mod workspaces;
 pub mod worktrees;
 
@@ -31,6 +32,7 @@ pub use response::*;
 pub use server::*;
 pub use session::*;
 pub use tabs::*;
+pub use worker_context::*;
 pub use workspaces::*;
 pub use worktrees::*;
 
@@ -63,6 +65,14 @@ pub enum Method {
     ServerAgentManifests(EmptyParams),
     #[serde(rename = "server.reload_agent_manifests")]
     ServerReloadAgentManifests(EmptyParams),
+    #[serde(rename = "worker_context.issue")]
+    WorkerContextIssue(WorkerContextIssueParams),
+    #[serde(rename = "worker_context.claim")]
+    WorkerContextClaim(WorkerContextClaimParams),
+    #[serde(rename = "worker_context.resolve")]
+    WorkerContextResolve(WorkerContextLeaseParams),
+    #[serde(rename = "worker_context.revoke")]
+    WorkerContextRevoke(WorkerContextLeaseParams),
     #[serde(rename = "notification.show")]
     NotificationShow(NotificationShowParams),
     #[serde(rename = "product_announcement.dismiss")]

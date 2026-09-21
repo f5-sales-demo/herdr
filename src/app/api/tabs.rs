@@ -244,6 +244,9 @@ impl App {
                     "closing this tab would close a worktree group",
                 );
             }
+            for pane_id in &pane_ids {
+                self.worker_context.revoke_pane(*pane_id);
+            }
             self.cancel_agent_admission_for_panes(&admission_pane_ids);
             let workspace = self.workspace_info(ws_idx);
             self.state.selected = ws_idx;
@@ -268,6 +271,9 @@ impl App {
         }
 
         self.cancel_agent_admission_for_panes(&admission_pane_ids);
+        for pane_id in &pane_ids {
+            self.worker_context.revoke_pane(*pane_id);
+        }
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return tab_not_found(id, &target.tab_id);
         };

@@ -50,7 +50,9 @@ Homebrew, mise, and Nix installs, verification, and manual downloads: https://he
 
 ## First-run walkthrough
 
-Check your environment first. If `HERDR_ENV=1` is set, you are already running inside a Herdr pane. The human is already attached, so skip step 1 and never tell them to run `herdr` from your pane; Herdr blocks nested launches by design. Start with step 2, and consider the skill file below.
+Check your environment first. If `HERDR_ENV=1` is set, you are already running inside a Herdr pane. The human is already attached, so skip step 1 and never tell them to run `herdr` from your pane; Herdr blocks nested launches by design. Start with step 2, and consider the skill file below. An isolated tool runner or extension worker can lack that variable even while the human has an active Herdr session; its absence is not evidence that the human session is absent.
+
+For an externally owned worker (for example, an IDE extension host), do not set `HERDR_ENV` globally. Run `herdr context issue` in the target pane and paste that one-time JSON payload into the launcher. The launcher claims it once, stores the renewable lease in secret storage, resolves fresh allowlisted pane context before every worker launch, and revokes the lease on explicit disconnect.
 
 Walk the human through this sequence:
 

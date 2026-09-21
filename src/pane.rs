@@ -103,6 +103,7 @@ fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
 pub(crate) struct PaneLaunchEnv {
     extra: Vec<(String, String)>,
     identity: PaneLaunchIdentity,
+    context_capability: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -122,6 +123,7 @@ impl PaneLaunchEnv {
         Self {
             extra,
             identity: PaneLaunchIdentity::Inherit,
+            context_capability: None,
         }
     }
 
@@ -136,12 +138,20 @@ impl PaneLaunchEnv {
             tab_id,
             pane_id,
         };
+        self.context_capability = Some(crate::worker_context::new_secret());
         self
     }
 
     pub(crate) fn without_pane_identity(mut self) -> Self {
         self.identity = PaneLaunchIdentity::OmitPane;
+        self.context_capability = None;
         self
+    }
+
+    pub(crate) fn context_capability_verifier(&self) -> Option<String> {
+        self.context_capability
+            .as_deref()
+            .map(crate::worker_context::verifier)
     }
 }
 
@@ -153,6 +163,9 @@ fn apply_pane_launch_env(cmd: &mut CommandBuilder, launch_env: &PaneLaunchEnv) {
     for (key, value) in &launch_env.extra {
         cmd.env(key, value);
     }
+    // Only Herdr can mint this capability. Never inherit it or allow an
+    // extra environment entry to attach it to an unmanaged process.
+    cmd.env_remove(crate::worker_context::CAPABILITY_ENV_VAR);
     cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
     crate::integration::apply_pane_base_env(cmd);
     crate::platform::apply_pane_runtime_marker(cmd);
@@ -166,6 +179,9 @@ fn apply_pane_launch_env(cmd: &mut CommandBuilder, launch_env: &PaneLaunchEnv) {
             cmd.env(crate::integration::HERDR_WORKSPACE_ID_ENV_VAR, workspace_id);
             cmd.env(crate::integration::HERDR_TAB_ID_ENV_VAR, tab_id);
             cmd.env(crate::integration::HERDR_PANE_ID_ENV_VAR, pane_id);
+            if let Some(capability) = &launch_env.context_capability {
+                cmd.env(crate::worker_context::CAPABILITY_ENV_VAR, capability);
+            }
         }
         PaneLaunchIdentity::OmitPane => {
             cmd.env_remove(crate::integration::HERDR_PANE_ID_ENV_VAR);
@@ -3691,6 +3707,40 @@ mod tests {
         apply_pane_launch_env(&mut cmd, &PaneLaunchEnv::default());
 
         assert!(cmd.get_env("OMPCODE").is_none());
+    }
+
+    #[test]
+    fn pane_launch_env_does_not_accept_an_extra_context_capability() {
+        let mut cmd = CommandBuilder::new("shell");
+        let launch_env = PaneLaunchEnv::from_extra(vec![(
+            crate::worker_context::CAPABILITY_ENV_VAR.into(),
+            "attacker-controlled".into(),
+        )]);
+
+        apply_pane_launch_env(&mut cmd, &launch_env);
+
+        assert!(cmd
+            .get_env(crate::worker_context::CAPABILITY_ENV_VAR)
+            .is_none());
+    }
+
+    #[test]
+    fn managed_pane_capability_overrides_extra_environment() {
+        let mut cmd = CommandBuilder::new("shell");
+        let launch_env = PaneLaunchEnv::from_extra(vec![(
+            crate::worker_context::CAPABILITY_ENV_VAR.into(),
+            "attacker-controlled".into(),
+        )])
+        .with_identity("w1".into(), "w1:t1".into(), "w1:p1".into());
+        let expected = launch_env.context_capability.as_deref();
+
+        apply_pane_launch_env(&mut cmd, &launch_env);
+
+        assert_eq!(
+            cmd.get_env(crate::worker_context::CAPABILITY_ENV_VAR)
+                .and_then(std::ffi::OsStr::to_str),
+            expected
+        );
     }
 
     #[test]

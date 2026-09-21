@@ -81,6 +81,8 @@ fn default_capabilities() -> Option<ServerCapabilities> {
         tracked_executions: true,
         agent_turn_journal: true,
         agent_interactions: Some(1),
+        worker_context_handoff: Some(1),
+        xcsh_semantic_tracking: Some(1),
     })
 }
 
@@ -621,6 +623,10 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::ServerReloadConfig(_) => "server.reload_config",
         Method::ServerAgentManifests(_) => "server.agent_manifests",
         Method::ServerReloadAgentManifests(_) => "server.reload_agent_manifests",
+        Method::WorkerContextIssue(_) => "worker_context.issue",
+        Method::WorkerContextClaim(_) => "worker_context.claim",
+        Method::WorkerContextResolve(_) => "worker_context.resolve",
+        Method::WorkerContextRevoke(_) => "worker_context.revoke",
         Method::NotificationShow(_) => "notification.show",
         Method::ProductAnnouncementDismiss(_) => "product_announcement.dismiss",
         Method::ReleaseNotesDismiss(_) => "release_notes.dismiss",
@@ -1411,6 +1417,8 @@ mod tests {
                 tracked_executions: true,
                 agent_turn_journal: true,
                 agent_interactions: Some(1),
+                worker_context_handoff: Some(1),
+                xcsh_semantic_tracking: Some(1),
             }),
             None,
             None,

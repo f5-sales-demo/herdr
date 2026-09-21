@@ -5155,6 +5155,51 @@
           ],
           "type": "string"
         },
+        "WorkerContextClaimParams": {
+          "properties": {
+            "consumer_id": {
+              "type": "string"
+            },
+            "pairing_token": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pairing_token",
+            "consumer_id"
+          ],
+          "type": "object"
+        },
+        "WorkerContextIssueParams": {
+          "properties": {
+            "context_capability": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "context_capability"
+          ],
+          "type": "object"
+        },
+        "WorkerContextLeaseParams": {
+          "properties": {
+            "consumer_id": {
+              "type": "string"
+            },
+            "lease": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "lease",
+            "consumer_id"
+          ],
+          "type": "object"
+        },
         "WorkspaceCloseParams": {
           "properties": {
             "close_group": {
@@ -5558,6 +5603,70 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "worker_context.issue",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkerContextIssueParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "worker_context.claim",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkerContextClaimParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "worker_context.resolve",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkerContextLeaseParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "worker_context.revoke",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkerContextLeaseParams"
             }
           },
           "required": [
@@ -11351,6 +11460,78 @@
             },
             {
               "properties": {
+                "pairing_token": {
+                  "type": "string"
+                },
+                "pane": {
+                  "$ref": "#/schemas/success_response/$defs/WorkerContextPane"
+                },
+                "type": {
+                  "const": "worker_context_pairing",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pairing_token",
+                "pane"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "lease": {
+                  "type": "string"
+                },
+                "pane": {
+                  "$ref": "#/schemas/success_response/$defs/WorkerContextPane"
+                },
+                "type": {
+                  "const": "worker_context_lease",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "lease",
+                "pane"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "context": {
+                  "$ref": "#/schemas/success_response/$defs/WorkerContext"
+                },
+                "type": {
+                  "const": "worker_context",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "context"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "revoked": {
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "worker_context_revoked",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "revoked"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "snapshot": {
                   "$ref": "#/schemas/success_response/$defs/SessionSnapshot"
                 },
@@ -12736,10 +12917,47 @@
               "default": false,
               "description": "Whether durable execution lifecycle methods are available.",
               "type": "boolean"
+            },
+            "worker_context_handoff": {
+              "description": "Version of the external worker context pairing and renewable lease API.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "xcsh_semantic_tracking": {
+              "description": "Version of the semantic xcsh execution reporting contract.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "required": [
             "live_handoff"
+          ],
+          "type": "object"
+        },
+        "ServerWorkerContextCapabilities": {
+          "properties": {
+            "worker_context_handoff": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "xcsh_semantic_tracking": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "worker_context_handoff",
+            "xcsh_semantic_tracking"
           ],
           "type": "object"
         },
@@ -12856,6 +13074,47 @@
             "focused",
             "pane_count",
             "agent_status"
+          ],
+          "type": "object"
+        },
+        "WorkerContext": {
+          "properties": {
+            "capabilities": {
+              "$ref": "#/schemas/success_response/$defs/ServerWorkerContextCapabilities"
+            },
+            "environment": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "pane": {
+              "$ref": "#/schemas/success_response/$defs/WorkerContextPane"
+            }
+          },
+          "required": [
+            "capabilities",
+            "pane",
+            "environment"
+          ],
+          "type": "object"
+        },
+        "WorkerContextPane": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "tab_id",
+            "pane_id"
           ],
           "type": "object"
         },
