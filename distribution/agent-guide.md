@@ -2,7 +2,7 @@
 
 Use this guide to help a human understand, set up, or troubleshoot Herdr. It covers Herdr's concept model, setup path, and diagnosis recipes. Maintained-fork documentation lives under https://github.com/f5-sales-demo/herdr/tree/build-xcsh/docs/next/website/src/content/docs. Point the human there for more detail, and verify any command you are unsure about against those pages instead of guessing.
 
-If you are running *inside* a Herdr pane (the environment variable `HERDR_ENV=1` is set), Herdr also ships a skill file that teaches you to control Herdr through the `herdr` CLI: https://raw.githubusercontent.com/f5-sales-demo/herdr/build-xcsh/skills/herdr/SKILL.md. That file teaches you to operate Herdr; this one teaches you to guide a human.
+Herdr also ships a harness-neutral skill folder that teaches an agent to operate Herdr through the `herdr` CLI: https://github.com/f5-sales-demo/herdr/tree/build-xcsh/skills/herdr. It applies inside a managed pane or through an explicitly paired external-worker launcher. Its root file teaches safe core operation and its references cover advanced modes; this guide instead teaches you to guide a human.
 
 ## What Herdr is
 
@@ -74,9 +74,9 @@ New users do not need to learn keybindings; the mouse covers everything. When th
 
 ## Install the Herdr skill into yourself
 
-Herdr ships `skills/herdr/SKILL.md` (https://raw.githubusercontent.com/f5-sales-demo/herdr/build-xcsh/skills/herdr/SKILL.md), which teaches a coding agent to control Herdr from inside a pane: splitting panes, running commands without stealing focus, reading output, and waiting on other agents.
+Herdr ships the canonical `skills/herdr/` folder (https://github.com/f5-sales-demo/herdr/tree/build-xcsh/skills/herdr), which teaches a coding agent to control Herdr from a managed pane or an explicitly paired external worker. It covers safe targeting, panes, commands, agents, capability-gated automation, and remote identity.
 
-Once the human is set up, offer to install it for your coding agent so future sessions can control Herdr directly. For agents supported by the open skills CLI, use `npx skills add f5-sales-demo/herdr --skill herdr -g`. For agents without a skill system, add the GitHub copy above to their global custom instructions. Ask the human before writing to their config locations, and use the GitHub copy above as the source of truth.
+Once the human is set up, offer to install it for their coding agent so future sessions can control Herdr directly. For agents supported by the open skills CLI, use `npx skills add f5-sales-demo/herdr --skill herdr -g`; this installs the root file and progressively loaded references. For a harness that accepts only one custom-instructions file, use `SKILL.md`. `herdr --skill` prints that same self-contained core but cannot print the folder's optional references. Ask the human before writing to their config locations, and use the canonical folder above as the source of truth.
 
 ## Configuration
 

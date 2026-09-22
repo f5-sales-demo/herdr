@@ -1,67 +1,66 @@
 ---
-title: Agent skill file
-description: Install Herdr instructions for Claude Code or another coding agent.
+title: Agent skill folder
+description: Install Herdr operating instructions for a coding agent or external worker.
 ---
 
-Herdr ships a reusable agent skill file at [`skills/herdr/SKILL.md`](https://github.com/f5-sales-demo/herdr/blob/build-xcsh/skills/herdr/SKILL.md).
+Herdr ships a reusable, harness-neutral skill folder at [`skills/herdr/`](https://github.com/f5-sales-demo/herdr/tree/build-xcsh/skills/herdr).
 
-Install that file into any coding agent that supports reusable skills or custom instructions. The skill teaches the agent how to control Herdr from inside a Herdr pane.
+Install the whole folder when your coding agent supports skills. Its concise `SKILL.md` contains the independently useful core, while `references/` progressively supplies advanced agent, automation, external-worker, remote, and persistence guidance.
 
 Herdr also serves a separate guide at [`herdr.dev/agent-guide.md`](https://herdr.dev/agent-guide.md) for a different job: an agent helping a human learn, set up, or troubleshoot Herdr. The skill is for an agent operating Herdr; the guide is for an agent teaching a human.
 
 ## What the skill does
 
-The skill tells an agent to use the `herdr` CLI when `HERDR_ENV=1` is set. That means the agent is running inside a Herdr-managed pane and can safely talk to the local Herdr socket.
+The skill authorizes control in two explicit contexts:
 
-With the skill installed, an agent can:
+- an agent running in a Herdr-managed pane with `HERDR_ENV=1`;
+- an external worker whose launcher was explicitly paired to a selected pane and resolves a renewable lease for each launch.
 
-- inspect workspaces, tabs, panes, and neighboring agents
-- split panes and run commands without stealing focus
-- read pane output and recent logs
-- wait for servers, tests, or another agent to finish
-- start helper agents in sibling panes
+An unpaired process must not search for sockets, inject `HERDR_ENV`, or infer ownership from its working directory. The absence of `HERDR_ENV` in an isolated worker does not prove that the human has no Herdr session.
 
-The skill is a Markdown instruction file for agents. If Herdr is already installed, run `herdr --skill` to print the release-matched copy bundled with that binary.
+With the skill installed, an agent can inspect and operate Herdr topology, run and observe commands, coordinate recognized agents, target saved machines safely, and use capability-gated durable execution or interaction contracts.
+
+The skill is Markdown instructions, not an application or service. If Herdr is already installed, `herdr --skill` prints the release-matched self-contained core bundled with that binary. A single-file command cannot include the folder's optional reference files; install the repository folder for progressive disclosure.
 
 ## Install it
 
-Install the skill with `npx skills`:
+Install the skill folder with `npx skills`:
 
 ```bash
 npx skills add f5-sales-demo/herdr --skill herdr -g
 ```
 
-If you installed the skill while it lived at the repository root, rerun this add command once instead of using `skills update`. The add command replaces the oversized copy and records the new location.
+If you installed the skill while it lived at the repository root, rerun this add command once instead of using `skills update`. The add command replaces the oversized copy and records the canonical folder location.
 
 The `-g` flag installs it globally for supported agents. Omit `-g` to install it into the current project.
 
-Use the repository copy as the manual fallback and source of truth:
+Use the canonical repository folder as the manual source of truth:
 
 ```text
-https://github.com/f5-sales-demo/herdr/blob/build-xcsh/skills/herdr/SKILL.md
+https://github.com/f5-sales-demo/herdr/tree/build-xcsh/skills/herdr
 ```
 
-For agents with a skill system, install that file as a skill named `herdr`. For agents without a skill system, paste the file into the agent's project or user instructions.
+For another harness with a compatible skill system, install that folder as a skill named `herdr`. For a harness that accepts only one custom-instructions file, use `SKILL.md`; its core remains complete without the optional references.
 
 After installation, start the agent inside Herdr:
 
 ```bash
 herdr
-claude
+<your-agent-command>
 ```
 
-Or use any other coding agent in a Herdr pane so `HERDR_ENV=1` is available to the agent process.
+The installed binary's `agent` and `integration` discovery commands determine supported kinds and behavior. Codex, Claude Code, OpenCode, and xcsh are examples, not assumptions.
 
 ## Safety rule
 
-The skill starts with one guardrail: if `HERDR_ENV=1` is not set, the agent should stop and say it is not running inside a Herdr-managed pane.
+The skill requires either inherited managed-pane context or explicit external-worker pairing. If neither exists, the agent stops live control without claiming that the user's Herdr session is absent.
 
-This prevents an agent outside Herdr from trying to control a session it does not own.
+The skill also keeps focus, ownership, opaque ID, destructive-operation, update-consent, capability-negotiation, and private-answer boundaries in the root file so they remain present in `herdr --skill` output.
 
 ## Agent-facing reference
 
-The full command guide lives in the skill file itself. It covers pane IDs, `pane split`, `pane run`, `pane read`, `pane wait-output`, `agent wait`, workspace and tab commands, and coordination recipes.
+Browse the canonical skill folder here:
 
-Read the source file here:
+[Open `skills/herdr/` on GitHub →](https://github.com/f5-sales-demo/herdr/tree/build-xcsh/skills/herdr)
 
-[Open `SKILL.md` on GitHub →](https://github.com/f5-sales-demo/herdr/blob/build-xcsh/skills/herdr/SKILL.md)
+Use `SKILL.md` for core operation. Load only the relevant file under `references/` when the task needs advanced lifecycle, automation, pairing, remote, or persistence behavior.

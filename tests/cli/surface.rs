@@ -274,6 +274,30 @@ fn help_commands_exit_successfully() {
 }
 
 #[test]
+fn skill_flag_prints_the_self_contained_core() {
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .arg("--skill")
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("HERDR_CLIENT_SOCKET_PATH")
+        .env_remove("HERDR_ENV")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(stdout, include_str!("../../skills/herdr/SKILL.md"));
+    for expected in [
+        "## Establish control authority",
+        "herdr execution",
+        "Treat a missing name as unsupported",
+        "Treat `unknown`, terminal text, a shell prompt, process exit, output drainage",
+    ] {
+        assert!(stdout.contains(expected), "missing {expected:?}");
+    }
+    assert!(!stdout.contains("# Durable automation and native interactions"));
+}
+
+#[test]
 fn root_and_command_group_help_point_agents_to_plain_text_docs() {
     for args in [&["--help"][..], &["agent", "--help"][..]] {
         let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
