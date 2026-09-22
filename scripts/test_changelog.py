@@ -116,6 +116,18 @@ class ChangelogScriptTests(unittest.TestCase):
         self.assertEqual(manifest["endpoint_generation"], 7)
         self.assertEqual(manifest["releases"]["0.1.1"]["endpoint_generation"], 7)
 
+    def test_archived_release_pins_previous_latest_asset_urls(self) -> None:
+        archived = archived_releases_from_current_manifest(
+            {
+                "version": "0.1.1",
+                "notes": "Release notes",
+                "assets": latest_release_assets(),
+                "sha256": release_sha256(),
+            }
+        )
+
+        self.assertEqual(archived["0.1.1"]["assets"], release_assets("0.1.1"))
+
     def test_build_latest_json_embeds_notes_and_release_assets(self) -> None:
         manifest = json.loads(
             build_latest_json(

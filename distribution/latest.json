@@ -42,11 +42,11 @@
       "protocol": 24,
       "endpoint_generation": 1,
       "assets": {
-        "linux-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-x86_64",
-        "linux-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-aarch64",
-        "macos-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-macos-x86_64",
-        "macos-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-macos-aarch64",
-        "windows-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-windows-x86_64.zip"
+        "linux-x86_64": "https://github.com/f5-sales-demo/herdr/releases/download/v0.16.1/herdr-linux-x86_64",
+        "linux-aarch64": "https://github.com/f5-sales-demo/herdr/releases/download/v0.16.1/herdr-linux-aarch64",
+        "macos-x86_64": "https://github.com/f5-sales-demo/herdr/releases/download/v0.16.1/herdr-macos-x86_64",
+        "macos-aarch64": "https://github.com/f5-sales-demo/herdr/releases/download/v0.16.1/herdr-macos-aarch64",
+        "windows-x86_64": "https://github.com/f5-sales-demo/herdr/releases/download/v0.16.1/herdr-windows-x86_64.zip"
       },
       "sha256": {
         "linux-x86_64": "e73b6c16c9ae36848e0d3047e016202cafc8213a89acbc38d58c7e2e3ed4d3c7",
