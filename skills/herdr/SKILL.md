@@ -111,7 +111,7 @@ herdr agent prompt reviewer "Review the current diff and report actionable findi
 
 `agent start` does not create layout. It succeeds only after the expected agent is detected and ready; a blocked startup remains inspectable but is not ready for prompts.
 
-`agent prompt` submits text and encoded Enter as one ordered operation. With `--wait`, it requires observed `working` or `blocked` activity and then waits for `idle`, `done`, or `blocked`. It tracks lifecycle state, not a unique semantic turn. A timeout or `agent_prompt_stalled` does not prove the prompt was undelivered, so inspect before retrying. A blocked target rejects prompts; read the visible question and obtain the user's decision before answering it.
+`agent prompt` submits text and encoded Enter as one ordered operation. When admission starts from a non-working state, `--wait` requires fresh `working` or `blocked` activity before waiting for `idle`, `done`, or `blocked`. If the agent is already working, no fresh admission signal is required and completion of that active turn can satisfy the wait. It tracks lifecycle state, not a unique semantic turn. A timeout or `agent_prompt_stalled` does not prove the prompt was undelivered, so inspect before retrying. A blocked target rejects prompts; read the visible question and obtain the user's decision before answering it.
 
 ```bash
 herdr agent get reviewer

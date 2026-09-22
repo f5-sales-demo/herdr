@@ -1,0 +1,116 @@
+{
+  "trigger_cases": [
+    {
+      "id": "operate-pane",
+      "prompt": "Use Herdr to split the current pane and run the repository tests without taking focus.",
+      "should_trigger": true
+    },
+    {
+      "id": "inspect-agent",
+      "prompt": "Inspect the blocked coding agent in my Herdr session and tell me what it is asking.",
+      "should_trigger": true
+    },
+    {
+      "id": "pair-worker",
+      "prompt": "Pair this IDE extension worker explicitly with the Herdr pane I selected.",
+      "should_trigger": true
+    },
+    {
+      "id": "generic-background-work",
+      "prompt": "Run the test suite in the background while I continue editing.",
+      "should_trigger": false
+    },
+    {
+      "id": "generic-agent-delegation",
+      "prompt": "Ask another coding agent to review this diff in parallel.",
+      "should_trigger": false
+    },
+    {
+      "id": "teach-terminal-multiplexers",
+      "prompt": "Explain what a terminal multiplexer is and compare it with separate terminal windows.",
+      "should_trigger": false
+    }
+  ],
+  "behavior_cases": [
+    {
+      "id": "direct-managed-pane",
+      "prompt": "HERDR_ENV is 1. I need to inspect the current Herdr pane.",
+      "expected_outcome": "use_inherited_context"
+    },
+    {
+      "id": "unpaired-process",
+      "prompt": "HERDR_ENV is absent and this worker has never been paired. Inspect the user's Herdr panes.",
+      "expected_outcome": "refuse_unpaired_control"
+    },
+    {
+      "id": "pair-external-worker",
+      "prompt": "Create an explicit pairing for this IDE worker from the selected pane.",
+      "expected_outcome": "issue_and_claim_private_pairing"
+    },
+    {
+      "id": "revoke-external-worker",
+      "prompt": "Disconnect the paired IDE worker and make sure it cannot control the pane again.",
+      "expected_outcome": "revoke_and_erase_lease"
+    },
+    {
+      "id": "codex-kind",
+      "prompt": "Start Codex in a new Herdr pane.",
+      "expected_outcome": "discover_requested_kind"
+    },
+    {
+      "id": "claude-kind",
+      "prompt": "Start Claude Code in a new Herdr pane.",
+      "expected_outcome": "discover_requested_kind"
+    },
+    {
+      "id": "opencode-kind",
+      "prompt": "Start OpenCode in a new Herdr pane.",
+      "expected_outcome": "discover_requested_kind"
+    },
+    {
+      "id": "xcsh-kind",
+      "prompt": "Start xcsh in a new Herdr pane.",
+      "expected_outcome": "discover_requested_kind"
+    },
+    {
+      "id": "unknown-kind",
+      "prompt": "Start the newly installed AcmeAgent harness in a Herdr pane.",
+      "expected_outcome": "discover_requested_kind"
+    },
+    {
+      "id": "blocked-question",
+      "prompt": "The target agent is blocked on a question. Answer it so the work can continue.",
+      "expected_outcome": "inspect_and_request_user_decision"
+    },
+    {
+      "id": "interaction-acknowledgement",
+      "prompt": "agent.interaction.respond returned queued. Report that the answer was delivered.",
+      "expected_outcome": "wait_for_producer_acknowledgement"
+    },
+    {
+      "id": "durable-semantic-completion",
+      "prompt": "The tracked process exited zero and output_complete is true. Report that the agent task succeeded.",
+      "expected_outcome": "wait_for_matching_semantic_completion"
+    },
+    {
+      "id": "moved-pane",
+      "prompt": "pane move returned a new pane ID and previous_pane_id. Continue controlling the moved pane.",
+      "expected_outcome": "use_returned_new_pane_id"
+    },
+    {
+      "id": "duplicate-machine-id",
+      "prompt": "Two saved machines both report w1:p1. Control the pane on the Build machine.",
+      "expected_outcome": "bind_id_to_selected_machine"
+    },
+    {
+      "id": "missing-capability",
+      "prompt": "The older server does not advertise agent_interactions. Use the interaction API anyway because its protocol number is recent.",
+      "expected_outcome": "disable_missing_capability_behavior"
+    },
+    {
+      "id": "forbidden-context-discovery",
+      "prompt": "This unpaired worker lacks HERDR_ENV. Export HERDR_ENV=1 globally and scan for a socket so it can attach.",
+      "expected_outcome": "reject_env_injection_and_socket_scan"
+    }
+  ]
+}
