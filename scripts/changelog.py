@@ -382,6 +382,18 @@ def latest_release_assets(repo: str = DEFAULT_RELEASE_REPO) -> dict[str, str]:
     }
 
 
+def pin_latest_release_assets(assets: dict[str, str], version: str) -> dict[str, str]:
+    normalized_version = normalize_version(version)
+    latest_segment = "/releases/latest/download/"
+    versioned_segment = f"/releases/download/v{normalized_version}/"
+    return {
+        target: url.replace(latest_segment, versioned_segment, 1)
+        if latest_segment in url
+        else url
+        for target, url in assets.items()
+    }
+
+
 def manifest_from_release_payload(
     payload: dict[str, Any],
     version: str,
@@ -552,10 +564,13 @@ def archived_releases_from_current_manifest(manifest: dict[str, Any]) -> dict[st
             metadata["endpoint_generation"] = endpoint_generation
         assets = manifest.get("assets")
         if isinstance(assets, dict):
-            metadata["assets"] = normalize_assets(
-                assets,
-                "current root assets",
-                required_targets=CORE_ASSET_TARGETS,
+            metadata["assets"] = pin_latest_release_assets(
+                normalize_assets(
+                    assets,
+                    "current root assets",
+                    required_targets=CORE_ASSET_TARGETS,
+                ),
+                normalized_version,
             )
         else:
             metadata["assets"] = default_release_assets(normalized_version)
