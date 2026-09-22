@@ -21,7 +21,17 @@ def read(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
+def package_entries(output: str) -> set[str]:
+    return {line.replace("\\", "/") for line in output.splitlines()}
+
+
 class AgentSkillTests(unittest.TestCase):
+    def test_package_entries_normalize_windows_separators(self) -> None:
+        self.assertEqual(
+            package_entries("skills\\herdr\\SKILL.md\nskills/herdr/references/agents.md\n"),
+            {"skills/herdr/SKILL.md", "skills/herdr/references/agents.md"},
+        )
+
     def test_every_local_reference_exists(self) -> None:
         text = SKILL.read_text(encoding="utf-8")
         links = set(re.findall(r"\[[^]]+\]\(([^)]+\.md)\)", text))
@@ -39,7 +49,7 @@ class AgentSkillTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        packaged = set(package.stdout.splitlines())
+        packaged = package_entries(package.stdout)
 
         self.assertTrue(expected <= packaged, sorted(expected - packaged))
         self.assertIn('"skills/herdr/**/*"', read("Cargo.toml"))
