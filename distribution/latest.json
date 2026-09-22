@@ -1,8 +1,8 @@
 {
-  "version": "0.16.1",
-  "protocol": 24,
+  "version": "0.17.0",
+  "protocol": 25,
   "endpoint_generation": 1,
-  "notes": "## What's Changed\n* fix(release): emit portable Windows checksum lines by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/95\n* ci: route compatible work to shared runners by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/98\n* fix: synchronize upstream through e7e3dfa by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/100\n\n\n**Full Changelog**: https://github.com/f5-sales-demo/herdr/compare/v0.16.0...v0.16.1",
+  "notes": "## What's Changed\n* feat: add Codex interaction delivery by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/102\n* fix: harden agent interaction protocol by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/106\n* fix(context): add renewable external worker leases by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/108\n\n\n**Full Changelog**: https://github.com/f5-sales-demo/herdr/compare/v0.16.1...v0.17.0",
   "assets": {
     "linux-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-x86_64",
     "linux-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-aarch64",
@@ -11,13 +11,32 @@
     "windows-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-windows-x86_64.zip"
   },
   "sha256": {
-    "linux-x86_64": "e73b6c16c9ae36848e0d3047e016202cafc8213a89acbc38d58c7e2e3ed4d3c7",
-    "linux-aarch64": "a41bf1b7a02dd5d46aae622edfb6435a7109762e80436263687835562244dfb5",
-    "macos-x86_64": "814117efc0a06074b20ec2a966f8df90421d4d1db045b0727ea12f35fe46a104",
-    "macos-aarch64": "04db973fa25bd188fad4e94da4de867cbf2d4d272970f2a517f8c04b9b7a06af",
-    "windows-x86_64": "ba9882b4abcecafedce1276dad25ab8848238075913db120597ce753edde425a"
+    "linux-x86_64": "65b111c151b3aa975e22dc4d183e731027cadf77190fad224ad5f9f3e5f04675",
+    "linux-aarch64": "368b39be6e736070eff359f4e6a7c6db555cae4e038d46075b7aa275827005b6",
+    "macos-x86_64": "fe1000b628a70439d8bae943cda8bb34a4df08ef381a68088a2da6b931015ed3",
+    "macos-aarch64": "5f9f9e52db19755e85635f79e7bf328cfd823a872cea366f8a381b3a98081a7b",
+    "windows-x86_64": "30d90eee0b48c8ad8380d2938a5fdd6c876237e931c25ca923f0904e24a1b50c"
   },
   "releases": {
+    "0.17.0": {
+      "notes": "## What's Changed\n* feat: add Codex interaction delivery by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/102\n* fix: harden agent interaction protocol by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/106\n* fix(context): add renewable external worker leases by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/108\n\n\n**Full Changelog**: https://github.com/f5-sales-demo/herdr/compare/v0.16.1...v0.17.0",
+      "protocol": 25,
+      "endpoint_generation": 1,
+      "assets": {
+        "linux-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-x86_64",
+        "linux-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-aarch64",
+        "macos-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-macos-x86_64",
+        "macos-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-macos-aarch64",
+        "windows-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-windows-x86_64.zip"
+      },
+      "sha256": {
+        "linux-x86_64": "65b111c151b3aa975e22dc4d183e731027cadf77190fad224ad5f9f3e5f04675",
+        "linux-aarch64": "368b39be6e736070eff359f4e6a7c6db555cae4e038d46075b7aa275827005b6",
+        "macos-x86_64": "fe1000b628a70439d8bae943cda8bb34a4df08ef381a68088a2da6b931015ed3",
+        "macos-aarch64": "5f9f9e52db19755e85635f79e7bf328cfd823a872cea366f8a381b3a98081a7b",
+        "windows-x86_64": "30d90eee0b48c8ad8380d2938a5fdd6c876237e931c25ca923f0904e24a1b50c"
+      }
+    },
     "0.16.1": {
       "notes": "## What's Changed\n* fix(release): emit portable Windows checksum lines by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/95\n* ci: route compatible work to shared runners by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/98\n* fix: synchronize upstream through e7e3dfa by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/100\n\n\n**Full Changelog**: https://github.com/f5-sales-demo/herdr/compare/v0.16.0...v0.16.1",
       "protocol": 24,
