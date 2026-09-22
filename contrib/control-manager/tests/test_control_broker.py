@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from control_broker import Broker, OUTBOX_LEASE_SECONDS, StateDB, completion_presentation
+from control_broker import Broker, OUTBOX_LEASE_SECONDS, StateDB, completion_presentation, measure_native_launch
 
 
 class FakeHerdr:
@@ -46,7 +46,7 @@ class FakeHerdr:
             execution = {"execution_id": backend, "backend_execution_id": backend,
                          "semantic_execution_id": semantic, "generation": generation,
                          "native_producer": "xcsh", "producer_session_id": launch["session_header"]["id"], "workspace_id": wid,
-                         "cwd": params["cwd"], "command": {"mode": "argv", "argv": [launch["xcsh_executable"]] + ([] if launch["interactive"] else ["--mode", "json"]) + ["--session-dir", launch["session_dir"], "--resume", launch["session_path"], "--model", launch["model"], "--tools", "read", "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty"] + ([] if launch["interactive"] else ["--print"]) + [params["text"]]},
+                         "cwd": params["cwd"], "command": {"mode": "argv", "argv": [launch["xcsh_executable"]] + ([] if launch["interactive"] else ["--mode", "json"]) + ["--session-dir", launch["session_dir"], "--resume", launch["session_path"], "--model", launch["model"], "--tools", "read,request_user_input,request_user_input_async", "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty"] + ([] if launch["interactive"] else ["--print"]) + [params["text"]]},
                          "native_executable": {"canonical_path": launch["xcsh_executable"],
                                                "sha256": hashlib.sha256(Path(launch["xcsh_executable"]).read_bytes()).hexdigest()},
                          "native_launch": launch,
@@ -89,7 +89,7 @@ class FakeHerdr:
                 execution.update(state="cancelled", signal_name="Interrupt", output_complete=True)
             return {"execution": execution, "admitted": False}
         if method == "ping":
-            return {"protocol": 24, "capabilities": {"tracked_executions": True, "agent_turn_journal": True}}
+            return {"protocol": 26, "capabilities": {"tracked_executions": True, "agent_turn_journal": True}}
         if method == "agent.turn.list":
             since = params.get("since_revision", 0)
             # Synthetic component model of PR49's cross-ledger settlement:
@@ -651,15 +651,15 @@ class StateTests(unittest.TestCase):
             session_dir = Path(raw) / "sessions"; session_dir.mkdir()
             session_path = session_dir / "0123abcd4567ef89.jsonl"
             first_line = b'{"type":"session","id":"0123abcd4567ef89"}\n'; session_path.write_bytes(first_line)
-            launch = {"version":3,"xcsh_executable":executable,"session_dir":str(session_dir),"session_path":str(session_path),"session_header":{"id":"0123abcd4567ef89","sha256":hashlib.sha256(first_line).hexdigest()},"model":"test/model","discovery":"reduced-v1","tools":"read","interactive":False,"lifecycle_mode":"managed_turn_v1"}
+            launch = {"version":4,"xcsh_executable":executable,"session_dir":str(session_dir),"session_path":str(session_path),"session_header":{"id":"0123abcd4567ef89","sha256":hashlib.sha256(first_line).hexdigest()},"model":"test/model","discovery":"reduced-v1","tools":"read_interactions","interactive":False,"lifecycle_mode":"managed_turn_v1"}
             request = {"execution_id": task["id"], "generation": 0, "native_launch": launch, "workspace_id": "w1", "cwd": raw, "text": "x", "xcsh_executable_sha256": executable_sha256}
             encoded = json.dumps(request, sort_keys=True, separators=(",", ":"))
             db.claim_native_generation(task["id"], generation=0, session_id=launch["session_header"]["id"], workspace_id="w1", request_sha256=hashlib.sha256(encoded.encode()).hexdigest(), request_json=encoded)
-            argv = [executable,"--mode","json","--session-dir",str(session_dir),"--resume",str(session_path),"--model","test/model","--tools","read","--no-mcp","--no-lsp","--no-memories","--no-skills","--no-rules","--no-pty","--print","x"]
+            argv = [executable,"--mode","json","--session-dir",str(session_dir),"--resume",str(session_path),"--model","test/model","--tools","read,request_user_input,request_user_input_async","--no-mcp","--no-lsp","--no-memories","--no-skills","--no-rules","--no-pty","--print","x"]
             receipt = {"execution_id": "backend-1", "backend_execution_id": "backend-1", "semantic_execution_id": task["id"], "generation": 0, "native_producer": "xcsh", "producer_session_id": launch["session_header"]["id"], "workspace_id": "w1", "cwd": raw, "native_launch": launch, "command": {"mode": "argv", "argv": argv}, "native_executable": {"canonical_path": executable, "sha256": executable_sha256}, "injected_env": {"HERDR_EXECUTION_ID": task["id"], "HERDR_EXECUTION_GENERATION": "0"}, "tab_id": "tab-1", "pane_id": "pane-1"}
             # Released protocol 22 omitted workspace_id even though the
             # manager had already claimed it. Keep that precise receipt shape
-            # rejected; protocol 24 must carry the field rather than weaken
+            # rejected; protocol 26 must carry the field rather than weaken
             # the immutable workspace comparison.
             released_receipt = receipt.copy()
             del released_receipt["workspace_id"]
@@ -787,10 +787,10 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.session_dir.mkdir()
         self.session_path = self.session_dir / "0123abcd4567ef89.jsonl"
         self.session_path.write_bytes(b'{"type":"session","id":"0123abcd4567ef89"}\n')
-        self.native_launch = {"version": 3, "xcsh_executable": self.xcsh_executable,
+        self.native_launch = {"version": 4, "xcsh_executable": self.xcsh_executable,
             "session_dir": str(self.session_dir.resolve()), "session_path": str(self.session_path.resolve()),
             "session_header": {"id": "0123abcd4567ef89", "sha256": hashlib.sha256(self.session_path.read_bytes()).hexdigest()},
-            "model": "test/model", "discovery": "reduced-v1", "tools": "read", "interactive": False,
+            "model": "test/model", "discovery": "reduced-v1", "tools": "read_interactions", "interactive": False,
             "lifecycle_mode": "managed_turn_v1"}
 
     async def asyncTearDown(self):
@@ -818,6 +818,30 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
             "session_id": self.native_launch["session_header"]["id"], "native_launch": self.native_launch,
             "xcsh_executable_sha256": self.xcsh_executable_sha256,
         })
+
+    async def test_protocol25_is_rejected_before_native_v4_admission(self):
+        original = self.broker.herdr.request
+
+        async def protocol25(method, params=None, timeout=65):
+            if method == "ping":
+                return {"protocol": 25, "capabilities": {"tracked_executions": True, "agent_turn_journal": True}}
+            return await original(method, params, timeout)
+
+        self.broker.herdr.request = protocol25
+        try:
+            with self.assertRaisesRegex(ValueError, "protocol-26"):
+                await self.broker._require_native_xcsh_resume_contract()
+        finally:
+            self.broker.herdr.request = original
+
+    def test_native_launch_v4_accepts_only_the_interaction_policy(self):
+        launch = self.native_launch | {"version": 4, "tools": "read_interactions"}
+        measured = measure_native_launch(launch, expected_executable_sha256=self.xcsh_executable_sha256)
+        self.assertEqual(measured["version"], 4)
+        self.assertEqual(measured["tools"], "read_interactions")
+        for forbidden in ("write", "shell", "network", "mcp", "credentials"):
+            with self.assertRaisesRegex(ValueError, "tools"):
+                measure_native_launch(launch | {"tools": forbidden}, expected_executable_sha256=self.xcsh_executable_sha256)
 
     async def test_routine_completion_is_automatically_dispatched_to_manager(self):
         self.broker.config_path.write_text(json.dumps({
@@ -1091,31 +1115,31 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
                 "native_launch": self.native_launch | {"xcsh_executable": "xcsh"}, "xcsh_executable_sha256": self.xcsh_executable_sha256,
             })
 
-    async def test_native_launch_v3_rejects_changed_or_noncanonical_header_provenance(self):
-        """Synthetic component fixture for the v3 session receipt boundary."""
+    async def test_native_launch_v4_rejects_changed_or_noncanonical_header_provenance(self):
+        """Synthetic component fixture for the v4 session receipt boundary."""
         workspace = await self.configure_control_workspace()
-        base = {"target": "xcsh-v3-header", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
+        base = {"target": "xcsh-v4-header", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
                 "text": "safe", "session_id": self.native_launch["session_header"]["id"],
                 "workspace_id": workspace["workspace"]["workspace_id"],
                 "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m", "xcsh_model": "test/model"},
-                "xcsh_executable_sha256": self.xcsh_executable_sha256, "idempotency_key": "v3-header"}
+                "xcsh_executable_sha256": self.xcsh_executable_sha256, "idempotency_key": "v4-header"}
         with self.assertRaisesRegex(ValueError, "session_header"):
             await self.broker.native_xcsh_admit(base | {"native_launch": self.native_launch | {
                 "session_header": self.native_launch["session_header"] | {"sha256": "0" * 64}}})
         with self.assertRaisesRegex(ValueError, "already be canonical"):
-            await self.broker.native_xcsh_admit(base | {"idempotency_key": "v3-path", "native_launch": self.native_launch | {
+            await self.broker.native_xcsh_admit(base | {"idempotency_key": "v4-path", "native_launch": self.native_launch | {
                 "session_path": str(self.session_path.parent / "../sessions" / self.session_path.name)}})
         self.assertFalse(any(row["work_kind"] == "xcsh" for row in self.broker.db.list_tasks()))
 
-    async def test_native_launch_v3_sends_only_typed_request_and_exact_backend_argv(self):
-        """Synthetic component fixture for protocol-24 request/receipt equivalence."""
+    async def test_native_launch_v4_sends_only_typed_request_and_exact_backend_argv(self):
+        """Synthetic component fixture for protocol-26 request/receipt equivalence."""
         workspace = await self.configure_control_workspace()
         task = await self.admit_native_xcsh({
-            "target": "xcsh-v3-argv", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
+            "target": "xcsh-v4-argv", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
             "text": "semantic text", "session_id": self.native_launch["session_header"]["id"],
             "workspace_id": workspace["workspace"]["workspace_id"],
             "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m", "xcsh_model": "test/model"},
-            "idempotency_key": "v3-argv",
+            "idempotency_key": "v4-argv",
         })
         request = next(params for method, params in self.broker.herdr.calls if method == "execution.resume")
         self.assertEqual(set(request), {"execution_id", "generation", "native_launch", "text", "cwd", "workspace_id"})
@@ -1124,19 +1148,19 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         execution = self.broker.herdr.executions[task["backend_execution_id"]]
         self.assertEqual(execution["command"]["argv"], [self.xcsh_executable, "--mode", "json", "--session-dir",
             self.native_launch["session_dir"], "--resume", self.native_launch["session_path"], "--model", "test/model",
-            "--tools", "read", "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty", "--print", "semantic text"])
+            "--tools", "read,request_user_input,request_user_input_async", "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty", "--print", "semantic text"])
         interactive_launch = self.native_launch | {"interactive": True}
         interactive = await self.broker.native_xcsh_admit({
-            "target": "xcsh-v3-interactive", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
+            "target": "xcsh-v4-interactive", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
             "text": "interactive semantic text", "session_id": interactive_launch["session_header"]["id"],
             "workspace_id": workspace["workspace"]["workspace_id"], "native_launch": interactive_launch,
             "xcsh_executable_sha256": self.xcsh_executable_sha256,
             "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m", "xcsh_model": "test/model"},
-            "idempotency_key": "v3-interactive-argv",
+            "idempotency_key": "v4-interactive-argv",
         })
         interactive_argv = self.broker.herdr.executions[interactive["backend_execution_id"]]["command"]["argv"]
         self.assertEqual(interactive_argv, [self.xcsh_executable, "--session-dir", self.native_launch["session_dir"],
-            "--resume", self.native_launch["session_path"], "--model", "test/model", "--tools", "read",
+            "--resume", self.native_launch["session_path"], "--model", "test/model", "--tools", "read,request_user_input,request_user_input_async",
             "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty",
             "interactive semantic text"])
         self.assertNotIn("--mode", interactive_argv)
@@ -1167,7 +1191,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
                           if tab["workspace_id"] == foreign_id}, foreign_tabs_before)
 
     async def test_native_launch_model_matches_backend_utf8_and_control_boundary_preclaim(self):
-        """Synthetic component fixture for the protocol-24 model contract."""
+        """Synthetic component fixture for the protocol-26 model contract."""
         workspace = await self.configure_control_workspace()
         base = {"target": "xcsh-model", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
                 "text": "safe", "session_id": self.native_launch["session_header"]["id"],
@@ -1215,7 +1239,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
 
         self.broker.herdr.request = protocol23
         try:
-            with self.assertRaisesRegex(ValueError, "protocol-24 workspace-bound"):
+            with self.assertRaisesRegex(ValueError, "protocol-26 interaction-capable"):
                 await self.admit_native_xcsh({
                     "target": "xcsh-protocol", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
                     "text": "safe", "session_id": "session-protocol", "workspace_id": workspace["workspace"]["workspace_id"],
@@ -1227,7 +1251,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(row["work_kind"] == "xcsh" for row in self.broker.db.list_tasks()))
 
     async def test_native_xcsh_rejects_wrong_returned_executable_binding(self):
-        """A protocol-24 receipt may not substitute an executable after claim."""
+        """A protocol-26 receipt may not substitute an executable after claim."""
         workspace = await self.configure_control_workspace()
         original = self.broker.herdr.request
 
@@ -1254,7 +1278,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(binding["backend_execution_id"])
 
     async def test_native_xcsh_rejects_wrong_returned_launch_receipt(self):
-        """Synthetic component fixture: a receipt cannot substitute v3 provenance."""
+        """Synthetic component fixture: a receipt cannot substitute v4 provenance."""
         workspace = await self.configure_control_workspace()
         original = self.broker.herdr.request
 
@@ -1503,7 +1527,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.broker.db.task(task["id"])["state"], "cancelled")
 
     async def test_xcsh_cancel_receipt_requires_exact_cooperative_generation_binding(self):
-        """Synthetic component fixture for protocol-24 cancel receipt validation."""
+        """Synthetic component fixture for protocol-26 cancel receipt validation."""
         workspace = await self.configure_control_workspace()
         task = await self.admit_native_xcsh({
             "target": "xcsh-cancel-binding", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
@@ -2366,7 +2390,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         request = {"execution_id": task["id"], "generation": 0, "native_launch": self.native_launch, "workspace_id": "w1", "cwd": str(self.root), "text": "native", "xcsh_executable_sha256": executable_sha256}
         encoded = json.dumps(request, sort_keys=True, separators=(",", ":"))
         self.broker.db.claim_native_generation(task["id"], generation=0, session_id=self.native_launch["session_header"]["id"], workspace_id="w1", request_sha256=hashlib.sha256(encoded.encode()).hexdigest(), request_json=encoded)
-        argv = [executable,"--mode","json","--session-dir",self.native_launch["session_dir"],"--resume",self.native_launch["session_path"],"--model",self.native_launch["model"],"--tools","read","--no-mcp","--no-lsp","--no-memories","--no-skills","--no-rules","--no-pty","--print","native"]
+        argv = [executable,"--mode","json","--session-dir",self.native_launch["session_dir"],"--resume",self.native_launch["session_path"],"--model",self.native_launch["model"],"--tools","read,request_user_input,request_user_input_async","--no-mcp","--no-lsp","--no-memories","--no-skills","--no-rules","--no-pty","--print","native"]
         self.broker.db.admit_native_generation(task["id"], 0, {"execution_id": "backend-journal", "backend_execution_id": "backend-journal", "semantic_execution_id": task["id"], "generation": 0, "native_producer": "xcsh", "producer_session_id": self.native_launch["session_header"]["id"], "workspace_id": "w1", "cwd": str(self.root), "native_launch": self.native_launch, "command": {"mode": "argv", "argv": argv}, "native_executable": {"canonical_path": executable, "sha256": executable_sha256}, "injected_env": {"HERDR_EXECUTION_ID": task["id"], "HERDR_EXECUTION_GENERATION": "0"}, "tab_id": "w1:t1", "pane_id": "w1:p1"})
         self.broker.db.create_feature({"feature_id": "journal-feature", "target": "journal-feature", "cwd": str(self.root),
                                        "title": "Journal", "scope": "end_to_end", "required_stages": ["implementation", "tests"],

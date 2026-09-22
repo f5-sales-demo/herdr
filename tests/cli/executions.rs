@@ -12,7 +12,7 @@ fn native_launch(base: &Path, executable: &Path, session_id: &str) -> serde_json
     );
     fs::write(&session_path, &header).unwrap();
     serde_json::json!({
-        "version": 3,
+        "version": 4,
         "xcsh_executable": executable.canonicalize().unwrap(),
         "session_dir": session_dir.canonicalize().unwrap(),
         "session_path": session_path.canonicalize().unwrap(),
@@ -167,7 +167,7 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
         execution["native_executable"]["canonical_path"],
         fixture.canonicalize().unwrap().to_string_lossy().as_ref()
     );
-    assert_eq!(execution["native_launch"]["version"], 3);
+    assert_eq!(execution["native_launch"]["version"], 4);
     assert_eq!(
         execution["native_launch"]["session_header"]["id"],
         "0123abcd4567ef89"

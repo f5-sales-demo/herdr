@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::api::schema::{
     AgentTurnActionAckParams, AgentTurnActionRecord, AgentTurnActionState, AgentTurnActionTarget,
     ExecutionCommand, ExecutionRecord, ExecutionResumeParams, ExecutionStartParams, ExecutionState,
-    NativeExecutableBinding, NativeLaunchV3, NativeProducerRegistration,
+    NativeExecutableBinding, NativeLaunchV4, NativeProducerRegistration,
     NativeSessionHeaderBinding,
 };
 
@@ -1408,9 +1408,9 @@ fn validate_resume(p: &ExecutionResumeParams) -> Result<(), String> {
     if p.text.is_empty() || p.text.len() > 65_536 {
         return Err("invalid_execution_resume".into());
     }
-    if p.native_launch.version != 3 {
+    if p.native_launch.version != 4 {
         return Err(
-            "invalid_native_launch: execution.resume requires native_launch version 3".into(),
+            "invalid_native_launch: execution.resume requires native_launch version 4".into(),
         );
     }
     if !is_canonical_xcsh_session_id(&p.native_launch.session_header.id) {
@@ -1439,7 +1439,7 @@ fn validate_resume(p: &ExecutionResumeParams) -> Result<(), String> {
 /// the first line's original bytes including the LF separator; this makes the
 /// durable receipt unambiguous and catches a header rewrite before launch.
 pub(crate) fn measure_xcsh_session_header(
-    launch: &NativeLaunchV3,
+    launch: &NativeLaunchV4,
 ) -> Result<NativeSessionHeaderBinding, String> {
     let requested = Path::new(&launch.session_path);
     if !requested.is_absolute() {
@@ -1603,19 +1603,25 @@ fn is_canonical_xcsh_session_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
-/// The complete supported xcsh argv derived from protocol-24's typed launch.
+/// The complete supported xcsh argv derived from protocol-26's typed launch.
 /// No caller-controlled argv or environment reaches the child. `managed_turn_v1`
 /// is a durable Herdr/producer lifecycle contract, not an undocumented xcsh
 /// command-line option.
 fn native_xcsh_argv(
     executable: &NativeExecutableBinding,
-    launch: &NativeLaunchV3,
+    launch: &NativeLaunchV4,
     text: &str,
 ) -> Result<Vec<String>, String> {
     let mut argv = vec![executable.canonical_path.clone()];
     if !launch.interactive {
         argv.extend(["--mode".into(), "json".into()]);
     }
+    let tools = match launch.tools {
+        crate::api::schema::NativeToolsPolicy::Read => "read",
+        crate::api::schema::NativeToolsPolicy::ReadInteractions => {
+            "read,request_user_input,request_user_input_async"
+        }
+    };
     argv.extend([
         "--session-dir".into(),
         launch.session_dir.clone(),
@@ -1624,7 +1630,7 @@ fn native_xcsh_argv(
         "--model".into(),
         launch.model.clone(),
         "--tools".into(),
-        "read".into(),
+        tools.into(),
         "--no-mcp".into(),
         "--no-lsp".into(),
         "--no-memories".into(),
@@ -1696,8 +1702,8 @@ mod tests {
         ExecutionResumeParams {
             execution_id: "semantic-task".into(),
             generation,
-            native_launch: NativeLaunchV3 {
-                version: 3,
+            native_launch: NativeLaunchV4 {
+                version: 4,
                 xcsh_executable: std::env::current_exe()
                     .expect("test executable path")
                     .to_string_lossy()
@@ -1823,6 +1829,34 @@ mod tests {
     }
 
     #[test]
+    fn interaction_policy_derives_only_the_three_approved_tools() {
+        let mut params = resume_params(1);
+        params.native_launch.tools = serde_json::from_value(serde_json::json!("read_interactions"))
+            .expect("read_interactions policy");
+        let binding = measure_xcsh_executable(&params.native_launch.xcsh_executable).unwrap();
+        let argv = native_xcsh_argv(&binding, &params.native_launch, &params.text).unwrap();
+        let tools = argv
+            .windows(2)
+            .find(|pair| pair[0] == "--tools")
+            .map(|pair| pair[1].as_str());
+        assert_eq!(
+            tools,
+            Some("read,request_user_input,request_user_input_async")
+        );
+        for forbidden in [
+            "bash",
+            "write",
+            "edit",
+            "apply_patch",
+            "web_search",
+            "mcp",
+            "credential",
+        ] {
+            assert!(!argv.iter().any(|argument| argument == forbidden));
+        }
+    }
+
+    #[test]
     fn native_executable_binding_detects_prelaunch_mutation() {
         let path = copied_test_executable("native-binding-mutation");
         let binding = measure_xcsh_executable(path.to_str().expect("utf8 path")).unwrap();
@@ -1862,6 +1896,15 @@ mod tests {
             .unwrap_err()
             .contains("safe integer"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn native_resume_rejects_pre_v4_launches() {
+        let mut params = resume_params(1);
+        params.native_launch.version = 3;
+        assert!(validate_resume(&params)
+            .unwrap_err()
+            .contains("requires native_launch version 4"));
     }
 
     #[test]

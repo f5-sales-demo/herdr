@@ -34,12 +34,12 @@ the canonical 16-hex xcsh session identity. The historical PR44 follow-on
 contract was protocol 21: `execution.resume` required an absolute
 `xcsh_executable`, and each receipt carried
 `native_executable.canonical_path` and SHA-256. The current unreleased
-protocol-24 source contract supersedes that request with the closed
-`native_launch` v3 value: canonical executable/session directory/session file,
+protocol-26 source contract supersedes that request with the closed
+`native_launch` v4 value: canonical executable/session directory/session file,
 the SHA-256 of the first raw JSONL header line including its LF, a configured
-nonsecret model selector, `reduced-v1` discovery, read-only tools, interactive
+nonsecret model selector, `reduced-v1` discovery, interaction-only read tools, interactive
 mode, and `managed_turn_v1`. The manager gates new native admissions on
-advertised protocol >=24 plus existing `tracked_executions` and
+advertised protocol >=26 plus existing `tracked_executions` and
 `agent_turn_journal`, measures the executable and header before every
 effect/replay, and validates the complete returned launch, binding, exact argv,
 environment, generation, workspace/tab/pane, and producer session provenance.

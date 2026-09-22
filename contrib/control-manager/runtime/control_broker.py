@@ -313,7 +313,7 @@ def native_model_selector(raw: Any, field: str) -> str:
 
 
 def measure_native_launch(raw: Any, *, expected_executable_sha256: str | None = None) -> dict[str, Any]:
-    """Validate and independently measure the protocol-24 ``native_launch`` v3.
+    """Validate and independently measure the protocol-26 ``native_launch`` v4.
 
     The launch is a closed typed value, not a transport for arbitrary xcsh
     argv, environment, identity, or secrets.  Its session header hash covers
@@ -325,9 +325,9 @@ def measure_native_launch(raw: Any, *, expected_executable_sha256: str | None = 
     allowed = {"version", "xcsh_executable", "session_dir", "session_path", "session_header",
                "model", "discovery", "tools", "interactive", "lifecycle_mode"}
     if set(raw) != allowed:
-        raise ValueError("native_launch must contain exactly the protocol-24 v3 fields")
-    if raw.get("version") != 3:
-        raise ValueError("native_launch.version must be 3")
+        raise ValueError("native_launch must contain exactly the protocol-26 v4 fields")
+    if raw.get("version") != 4:
+        raise ValueError("native_launch.version must be 4")
     executable = measure_xcsh_executable(raw.get("xcsh_executable"), expected_sha256=expected_executable_sha256)
     raw_dir, raw_path = raw.get("session_dir"), raw.get("session_path")
     if not isinstance(raw_dir, str) or not isinstance(raw_path, str):
@@ -366,16 +366,16 @@ def measure_native_launch(raw: Any, *, expected_executable_sha256: str | None = 
             or not hmac.compare_digest(hashlib.sha256(first_line).hexdigest(), declared_header["sha256"])):
         raise ValueError("native_launch session_header conflicts with the first JSONL header line")
     model = native_model_selector(raw.get("model"), "native_launch.model")
-    if raw.get("discovery") != "reduced-v1" or raw.get("tools") != "read":
-        raise ValueError("native_launch supports only discovery=reduced-v1 and tools=read")
+    if raw.get("discovery") != "reduced-v1" or raw.get("tools") != "read_interactions":
+        raise ValueError("native_launch supports only discovery=reduced-v1 and tools=read_interactions")
     if not isinstance(raw.get("interactive"), bool):
         raise ValueError("native_launch.interactive must be boolean")
     if raw.get("lifecycle_mode") != "managed_turn_v1":
         raise ValueError("native_launch.lifecycle_mode must be managed_turn_v1")
-    return {"version": 3, "xcsh_executable": executable["canonical_path"],
+    return {"version": 4, "xcsh_executable": executable["canonical_path"],
             "session_dir": str(canonical_dir), "session_path": str(canonical_path),
             "session_header": {"id": declared_header["id"], "sha256": declared_header["sha256"]},
-            "model": model, "discovery": "reduced-v1", "tools": "read",
+            "model": model, "discovery": "reduced-v1", "tools": "read_interactions",
             "interactive": raw["interactive"], "lifecycle_mode": "managed_turn_v1"}
 
 
@@ -1762,7 +1762,7 @@ class StateDB:
         if not isinstance(launch, dict):
             raise ValueError("native generation lacks immutable native_launch")
         executable, executable_sha256 = launch.get("xcsh_executable"), request.get("xcsh_executable_sha256")
-        # Protocol-22 v3 keeps an interactive child in its normal UI mode.
+        # Protocol-26 v4 keeps an interactive child in its normal UI mode.
         # JSON framing and --print are only the supported noninteractive
         # form; neither may leak into an interactive managed child.  The
         # reduced-v1 policy is complete and order-sensitive in Herdr's typed
@@ -1774,7 +1774,7 @@ class StateDB:
             "--session-dir", launch.get("session_dir"),
             "--resume", launch.get("session_path"),
             "--model", launch.get("model"),
-            "--tools", "read",
+            "--tools", "read,request_user_input,request_user_input_async",
             "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty",
         ])
         if not launch.get("interactive"):
@@ -2720,7 +2720,7 @@ class Broker:
 
         This is intentionally separate from Codex dispatch.  It records a
         durable task/idempotency claim before ``execution.resume`` and waits for
-        protocol-24 typed-native-launch binding plus semantic reports to settle it; process exit/output is not
+        protocol-26 typed-native-launch binding plus semantic reports to settle it; process exit/output is not
         task success evidence.
         """
         if params.get("idempotency_key") is None:
@@ -2757,7 +2757,7 @@ class Broker:
         executable = measure_xcsh_executable(launch["xcsh_executable"], expected_sha256=params.get("xcsh_executable_sha256"))
         persisted_identity = runtime_identity | {
             "workspace_id": workspace_id,
-            "resume_schema": "execution.resume/v3",
+            "resume_schema": "execution.resume/v4",
             "native_launch": launch,
             "xcsh_executable_sha256": executable["sha256"],
         }
@@ -2791,20 +2791,20 @@ class Broker:
                                                    text=text or "", label="xcsh-native-uat")
 
     async def _require_native_xcsh_resume_contract(self) -> None:
-        """Require protocol-24's typed native-launch response contract.
+        """Require protocol-26's interaction-capable typed native-launch response contract.
 
-        The authoritative compatibility boundary is protocol 24 plus the existing tracked execution and
-        semantic-journal capabilities. Protocol 24 adds the immutable
+        The authoritative compatibility boundary is protocol 26 plus the existing tracked execution and
+        semantic-journal capabilities. Protocol 26 adds the interaction-only
         workspace receipt needed to bind the returned pane/tab to the claimed
         workspace. Receipt validation below proves the required response
         schema at every admission.
         """
         pong = await self.herdr.request("ping", {}, timeout=10)
         caps = (pong or {}).get("capabilities") or {}
-        if (int((pong or {}).get("protocol", 0)) < 24
+        if (int((pong or {}).get("protocol", 0)) < 26
                 or not caps.get("tracked_executions")
                 or not caps.get("agent_turn_journal")):
-            raise ValueError("Herdr lacks the protocol-24 workspace-bound typed-native-launch, tracked-executions, and semantic-journal contract required for execution.resume")
+            raise ValueError("Herdr lacks the protocol-26 interaction-capable typed-native-launch, tracked-executions, and semantic-journal contract required for execution.resume")
 
     @staticmethod
     def _native_xcsh_effect_request(request: dict[str, Any], label: str) -> dict[str, Any]:
