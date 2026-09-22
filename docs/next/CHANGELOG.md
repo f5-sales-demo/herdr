@@ -2,11 +2,16 @@
 
 ## Unreleased
 
+## [0.18.0] - 2026-09-22
+
 ### Fixed
 - Managed agent launches now bypass interactive shell aliases so aliases cannot silently add arguments that break remote Codex resumes.
 - Control Manager remote Codex panes now isolate client-only configuration and preserve their exact Herdr session context across worker and manager resumes. (#58)
 
 ### Added
+- Native xcsh sessions can opt into a read-only interaction policy that allows
+  blocking and asynchronous user questions while keeping shell, write,
+  network, MCP, LSP, memories, skills, rules, and PTY access disabled. (#109)
 - Added first-class recognition of the `xcsh` coding agent (a fork of Pi): process and screen detection, lifecycle-authority state from xcsh's bundled herdr reporter (`source: "herdr:xcsh"`), and native session resume with `xcsh --resume=<session>`. xcsh ships its own reporter, so no `herdr integration install` step is required.
 
 ### Changed
@@ -14,6 +19,11 @@
 - Relicensed Herdr from AGPL-3.0-or-later to Apache-2.0.
 
 ### Fixed
+- Native xcsh resumes now preserve the selected Herdr session across retries
+  instead of falling back to the default session. (#113)
+- Stable update manifests now retain version-pinned release asset URLs after
+  documentation publication, so later releases cannot redirect older update
+  records. (#110)
 - Native xcsh generation resumes now bind a measured absolute executable path
   instead of resolving `xcsh` through the server `PATH`, preserving the binding
   across retries and rejecting executable replacement before launch. (#43)
