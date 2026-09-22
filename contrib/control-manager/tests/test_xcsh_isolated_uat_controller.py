@@ -95,7 +95,7 @@ class ControllerTests(unittest.TestCase):
   if not raw_binary or not expected:
    self.skipTest('set HERDR_XCSH_BINARY and HERDR_XCSH_SHA256 for the measured xcsh source smoke')
   binary=Path(raw_binary)
-  with tempfile.TemporaryDirectory(prefix='xcsh-v3-session-') as raw:
+  with tempfile.TemporaryDirectory(prefix='xcsh-v4-session-') as raw:
    root=Path(raw)
    controller=object.__new__(DisposableHerdrController)
    receipt=controller.create_xcsh_session(binary,expected,root,root/'sessions')

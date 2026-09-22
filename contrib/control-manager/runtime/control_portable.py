@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 
-PACKAGE_VERSION = 25
+PACKAGE_VERSION = 26
 STATE_SCHEMA_VERSION = 12
 
 

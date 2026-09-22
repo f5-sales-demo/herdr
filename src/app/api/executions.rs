@@ -178,7 +178,7 @@ impl App {
             Err(error) => return encode_error(id, "execution_tracking_failed", error),
         };
         // Admission durably records the superseded child's cooperative cancel
-        // action before this effect. Native v3 children stop only after their
+        // action before this effect. Native v4 children stop only after their
         // authenticated producer reaches that safe point; never terminate a
         // native PTY as a substitute for producer lifecycle settlement.
         let _ = previous;

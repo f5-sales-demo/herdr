@@ -1,6 +1,6 @@
 use crate::api::schema::{
     ExecutionCommand, ExecutionListParams, ExecutionResumeParams, ExecutionStartParams,
-    ExecutionTarget, ExecutionWaitParams, Method, NativeDiscoveryPolicy, NativeLaunchV3,
+    ExecutionTarget, ExecutionWaitParams, Method, NativeDiscoveryPolicy, NativeLaunchV4,
     NativeLifecycleMode, NativeSessionHeaderBinding, NativeToolsPolicy, Request,
 };
 
@@ -73,6 +73,7 @@ fn parse_resume(args: &[String]) -> std::io::Result<Method> {
     let mut cwd = None;
     let mut text = None;
     let mut interactive = false;
+    let mut tools = NativeToolsPolicy::Read;
     let mut index = 0;
     while index < rest.len() {
         if rest[index] == "--interactive" {
@@ -91,6 +92,13 @@ fn parse_resume(args: &[String]) -> std::io::Result<Method> {
             "--session-path" => session_path = Some(value),
             "--session-header-sha256" => session_header_sha256 = Some(value),
             "--model" => model = Some(value),
+            "--tools" => {
+                tools = match value.as_str() {
+                    "read" => NativeToolsPolicy::Read,
+                    "read_interactions" => NativeToolsPolicy::ReadInteractions,
+                    _ => return Err(std::io::Error::other("unknown native tools policy")),
+                }
+            }
             "--cwd" => cwd = Some(value),
             "--text" => text = Some(value),
             _ => {
@@ -104,8 +112,8 @@ fn parse_resume(args: &[String]) -> std::io::Result<Method> {
     Ok(Method::ExecutionResume(ExecutionResumeParams {
         execution_id: execution_id.clone(),
         generation,
-        native_launch: NativeLaunchV3 {
-            version: 3,
+        native_launch: NativeLaunchV4 {
+            version: 4,
             xcsh_executable: xcsh_executable
                 .ok_or_else(|| std::io::Error::other("--xcsh is required"))?,
             session_dir: session_dir
@@ -119,7 +127,7 @@ fn parse_resume(args: &[String]) -> std::io::Result<Method> {
             },
             model: model.ok_or_else(|| std::io::Error::other("--model is required"))?,
             discovery: NativeDiscoveryPolicy::ReducedV1,
-            tools: NativeToolsPolicy::Read,
+            tools,
             interactive,
             lifecycle_mode: NativeLifecycleMode::ManagedTurnV1,
         },
@@ -190,7 +198,7 @@ fn usage_ok() -> std::io::Result<i32> {
     Ok(0)
 }
 fn print_usage() {
-    eprintln!("herdr execution commands:\n  herdr execution start <id> --cwd <absolute-path> [--shell bash|zsh] -- <argv...|command-text>\n  herdr execution resume <semantic-id> <generation> --session <canonical-xcsh-session-header-id> --session-dir <canonical-dir> --session-path <canonical-jsonl> --session-header-sha256 <sha256-first-line-plus-lf> --xcsh <absolute-executable-path> --model <configured-model> [--interactive] --cwd <absolute-path> --text <text>\n  herdr execution get <backend-id>\n  herdr execution list [--since <revision>]\n  herdr execution wait <after-revision>\n  herdr execution cancel <backend-id>");
+    eprintln!("herdr execution commands:\n  herdr execution start <id> --cwd <absolute-path> [--shell bash|zsh] -- <argv...|command-text>\n  herdr execution resume <semantic-id> <generation> --session <canonical-xcsh-session-header-id> --session-dir <canonical-dir> --session-path <canonical-jsonl> --session-header-sha256 <sha256-first-line-plus-lf> --xcsh <absolute-executable-path> --model <configured-model> [--tools read|read_interactions] [--interactive] --cwd <absolute-path> --text <text>\n  herdr execution get <backend-id>\n  herdr execution list [--since <revision>]\n  herdr execution wait <after-revision>\n  herdr execution cancel <backend-id>");
 }
 
 #[cfg(test)]
@@ -232,5 +240,56 @@ mod tests {
             "/tmp/sessions/session.jsonl"
         );
         assert_eq!(params.native_launch.model, "openai/gpt-5");
+        assert_eq!(params.native_launch.version, 4);
+        assert_eq!(
+            serde_json::to_value(&params.native_launch.tools).unwrap(),
+            serde_json::json!("read")
+        );
+    }
+
+    #[test]
+    fn resume_cli_accepts_the_interaction_only_policy() {
+        let method = parse_resume(&[
+            "semantic".into(),
+            "7".into(),
+            "--session".into(),
+            "0123abcd4567ef89".into(),
+            "--session-dir".into(),
+            "/tmp/sessions".into(),
+            "--session-path".into(),
+            "/tmp/sessions/session.jsonl".into(),
+            "--session-header-sha256".into(),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            "--xcsh".into(),
+            "/opt/xcsh/bin/xcsh".into(),
+            "--model".into(),
+            "openai/gpt-5".into(),
+            "--tools".into(),
+            "read_interactions".into(),
+            "--cwd".into(),
+            "/tmp".into(),
+            "--text".into(),
+            "continue".into(),
+        ])
+        .unwrap();
+        let Method::ExecutionResume(params) = method else {
+            panic!("expected native resume");
+        };
+        assert_eq!(
+            serde_json::to_value(&params.native_launch.tools).unwrap(),
+            serde_json::json!("read_interactions")
+        );
+    }
+
+    #[test]
+    fn resume_cli_rejects_unknown_tool_policies() {
+        let error = parse_resume(&[
+            "semantic".into(),
+            "7".into(),
+            "--tools".into(),
+            "write".into(),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown native tools policy"));
     }
 }

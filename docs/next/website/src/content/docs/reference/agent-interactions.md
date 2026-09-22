@@ -2,7 +2,15 @@
 title: Agent interactions
 ---
 
-Protocol 25 advertises `agent_interactions: 1`. Interactions are server-owned records independent of immutable semantic turn records: a question may remain pending after the originating turn completes.
+Protocol 26 advertises `agent_interactions: 1`. Interactions are server-owned records independent of immutable semantic turn records: a question may remain pending after the originating turn completes.
+
+Native xcsh launches use the version 4 launch contract. `herdr execution resume`
+defaults to `--tools read`; pass `--tools read_interactions` when the native
+session must ask the user a blocking or asynchronous question. Herdr derives
+that policy as the exact xcsh allow-list
+`read,request_user_input,request_user_input_async` while continuing to disable
+MCP, LSP, memories, skills, rules, and PTY access. Other policy names are
+rejected.
 
 | Method | Purpose |
 | --- | --- |

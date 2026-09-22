@@ -1,6 +1,6 @@
 {
   "name": "control-manager",
-  "package_version": 25,
+  "package_version": 26,
   "state_schema_version": 12,
   "policy": "POLICY.md",
   "shared_policy": "control-policy.json",
@@ -9,14 +9,14 @@
   "scope": "recovery_manager_with_native_xcsh_uat_source",
   "excluded_product_modules": ["xcsh native synthetic fixture runner", "test/dev state and receipts", "installed prompt UAT evidence", "live-release UAT drivers"],
   "native_uat_source_handoff": {
-    "control_broker.py": "61854bcc8da33eab57cddb08eed8a942f79733ccf4f7345f932ea34ab97fafe4",
+    "control_broker.py": "0fb8333e6d38153082d85582761cedeb0f7063968ca7a837b800c18dfd668bff",
     "control_mcp.py": "f19fa2924b525e5cec98e35f1f2f58c1f967c38ed9792da905566d37a7657b01",
-    "control_portable.py": "b73d581eee9e7f3054f6c0351fd645822f0c6f45607b05f188a5aaa4ae671c48",
+    "control_portable.py": "98d8998d51eadf701e92c55b8f6d77e712f0d236a04e8445fad716f65f8c97d6",
     "runtime/xcsh_isolated_uat_controller.py": "f67530b3b8ebf7a19e39bf9d6f17891dba15c5535b8e9c8fa22426040df83d3f",
-    "runtime/xcsh_installed_uat.py": "a6efcd07b3cfd5e405b9f9963291d5ca746ac34a1ad88a00aa509d7c63fada73",
+    "runtime/xcsh_installed_uat.py": "21024dbc54c7234034e9bf3d24f5e8a024c9b19dd21d539b69d462b9859d4dbd",
     "runtime/xcsh-installed-uat/manifest.example.json": "ad028b60cdafc7804fb76c717b3f2f5e14f62124409dcd04f961a114ae6317f0",
-    "runtime/xcsh-installed-uat/scenarios-v1.json": "ccfac83038bd564155d38461b126fda2ccf4fcad97e4377eb4380802c6c3b543",
-    "XCSH_NATIVE_UAT_ACCEPTANCE.md": "2945def1a91f6ace1836e7bc5e875f7fe0de720b4a162cf7a17a5bd76e7658d3"
+    "runtime/xcsh-installed-uat/scenarios-v1.json": "c6f0916d0e0f10cb14d0f9e8f0f4231b1230fee1d05bde8967523f155ae7c2a5",
+    "XCSH_NATIVE_UAT_ACCEPTANCE.md": "a38359f4b5e6625c596516f6114a9e89b860b0cbe124b7e3de198ae4f65db977"
   },
   "contains_credentials": false,
   "contains_runtime_sessions": false,

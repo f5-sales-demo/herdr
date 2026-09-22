@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 26;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -3154,6 +3154,16 @@ mod tests {
         assert!(matches!(result, VersionCheck::Incompatible(_)));
         if let VersionCheck::Incompatible(msg) = result {
             assert!(msg.contains("older"), "error should mention older version");
+        }
+    }
+
+    #[test]
+    fn protocol_24_and_25_clients_are_rejected_by_protocol_26() {
+        for version in [24, 25] {
+            assert!(matches!(
+                check_client_version(version),
+                VersionCheck::Incompatible(_)
+            ));
         }
     }
 

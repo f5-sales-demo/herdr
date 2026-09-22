@@ -514,7 +514,7 @@ mod tests {
     #[test]
     fn cross_manager_crash_reload_starting_replay_confirms_registration() {
         use crate::api::schema::{
-            ExecutionResumeParams, NativeDiscoveryPolicy, NativeLaunchV3, NativeLifecycleMode,
+            ExecutionResumeParams, NativeDiscoveryPolicy, NativeLaunchV4, NativeLifecycleMode,
             NativeSessionHeaderBinding, NativeToolsPolicy,
         };
         let root = std::env::temp_dir().join(format!("herdr-cross-ledger-{}", now_ms()));
@@ -523,8 +523,8 @@ mod tests {
         let line = b"{\"type\":\"session\",\"id\":\"0123abcd4567ef89\"}\n";
         std::fs::write(&session, line).unwrap();
         use sha2::Digest;
-        let launch = NativeLaunchV3 {
-            version: 3,
+        let launch = NativeLaunchV4 {
+            version: 4,
             xcsh_executable: std::env::current_exe()
                 .unwrap()
                 .to_string_lossy()

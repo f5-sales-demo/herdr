@@ -41,7 +41,7 @@ pub struct ExecutionStartParams {
 pub struct ExecutionResumeParams {
     pub execution_id: String,
     pub generation: u64,
-    pub native_launch: NativeLaunchV3,
+    pub native_launch: NativeLaunchV4,
     pub text: String,
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -50,14 +50,14 @@ pub struct ExecutionResumeParams {
     pub label: Option<String>,
 }
 
-/// Version 3 native xcsh launch contract for protocol 24.
+/// Version 4 native xcsh launch contract for protocol 26.
 ///
 /// `session_path` is a canonical absolute JSONL path. `session_header.sha256`
 /// is the SHA-256 of exactly the first JSONL line, including its terminating
 /// LF byte. The header's `id` is xcsh's canonical 16-character lowercase hex
 /// SessionHeader ID; selector prefixes and paths are never reporter IDs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct NativeLaunchV3 {
+pub struct NativeLaunchV4 {
     pub version: u8,
     pub xcsh_executable: String,
     /// Canonical absolute directory containing `session_path`.
@@ -88,6 +88,7 @@ pub enum NativeDiscoveryPolicy {
 #[serde(rename_all = "snake_case")]
 pub enum NativeToolsPolicy {
     Read,
+    ReadInteractions,
 }
 
 /// Semantic lifecycle behavior, retained as durable producer contract rather
@@ -163,11 +164,11 @@ pub struct ExecutionRecord {
     pub native_producer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_executable: Option<NativeExecutableBinding>,
-    /// Complete protocol-24 typed native launch receipt. Kept alongside the
+    /// Complete protocol-26 typed native launch receipt. Kept alongside the
     /// normalized executable/session fields for compatibility with existing
     /// execution consumers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_launch: Option<NativeLaunchV3>,
+    pub native_launch: Option<NativeLaunchV4>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_registration: Option<NativeProducerRegistration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

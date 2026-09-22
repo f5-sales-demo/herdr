@@ -40,7 +40,7 @@ class InstalledPromptUatTests(unittest.TestCase):
         self.assertEqual(receipt["live_execution"], "not_started")
         self.assertEqual(len(receipt["scenario_ids"]), 9)
         self.assertIn("native_xcsh_admit", receipt["required_capabilities"])
-        self.assertEqual(json.loads(CATALOG.read_text())["native_resume_contract"]["herdr_protocol_minimum"], 24)
+        self.assertEqual(json.loads(CATALOG.read_text())["native_resume_contract"]["herdr_protocol_minimum"], 26)
 
     def test_preflight_rejects_nonisolated_or_incomplete_catalog(self):
         invalid = manifest(); invalid["isolation"] = "shared_runtime"
@@ -54,7 +54,7 @@ class InstalledPromptUatTests(unittest.TestCase):
             preflight(invalid, json.loads(CATALOG.read_text()))
         invalid_catalog = json.loads(CATALOG.read_text())
         invalid_catalog["native_resume_contract"]["herdr_protocol_minimum"] = 20
-        with self.assertRaisesRegex(PreflightError, "protocol-24"):
+        with self.assertRaisesRegex(PreflightError, "protocol-26"):
             preflight(manifest(), invalid_catalog)
 
     def test_fixture_must_bind_a_random_expected_value_and_exact_file(self):
@@ -183,7 +183,7 @@ class InstalledPromptUatTests(unittest.TestCase):
                 visible=reports[:ticks[0]]
                 return {"turns":[r for r in visible if r["revision"] > params.get("since_revision", 0)]}
             if method == "agent.turn.wait": return {"turns": []}
-            if method == "ping": return {"protocol":24,"capabilities":{"agent_turn_journal":True}}
+            if method == "ping": return {"protocol":26,"capabilities":{"agent_turn_journal":True}}
             raise AssertionError(method)
         original_broker,original_herdr=driver.unix_request,driver.herdr_request
         driver.unix_request,driver.herdr_request=fake_broker,fake_herdr
