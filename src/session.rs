@@ -31,6 +31,10 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
     if let Some(program) = args.first() {
         cleaned.push(program.clone());
     }
+    let native_resume_args_start = args
+        .windows(2)
+        .position(|pair| pair[0] == "execution" && pair[1] == "resume")
+        .map(|index| index + 2);
 
     if args.get(1).map(String::as_str) == Some("session")
         && args.get(2).map(String::as_str) == Some("attach")
@@ -60,6 +64,11 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
             break;
         }
         if arg == "--session" {
+            if native_resume_args_start.is_some_and(|start| index >= start) {
+                cleaned.push(arg.clone());
+                index += 1;
+                continue;
+            }
             let Some(value) = args.get(index + 1) else {
                 return Err("missing value for --session".to_string());
             };

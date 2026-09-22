@@ -25,6 +25,134 @@ fn native_launch(base: &Path, executable: &Path, session_id: &str) -> serde_json
     })
 }
 
+fn native_resume_args() -> Vec<&'static str> {
+    vec![
+        "execution",
+        "resume",
+        "semantic-cli",
+        "7",
+        "--session",
+        "0123abcd4567ef89",
+        "--session-dir",
+        "/tmp/sessions",
+        "--session-path",
+        "/tmp/sessions/session.jsonl",
+        "--session-header-sha256",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "--xcsh",
+        "/opt/xcsh/bin/xcsh",
+        "--model",
+        "test/model",
+        "--tools",
+        "read_interactions",
+        "--cwd",
+        "/tmp",
+        "--text",
+        "continue",
+    ]
+}
+
+fn receive_native_resume(listener: UnixListener) -> serde_json::Value {
+    listener.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                if request["method"] == "ping" {
+                    write_fake_pong(
+                        &mut stream,
+                        &request,
+                        "different-build-same-protocol",
+                        CURRENT_PROTOCOL,
+                    );
+                    continue;
+                }
+                writeln!(
+                    stream,
+                    "{}",
+                    serde_json::json!({
+                        "id": request["id"],
+                        "result": {"type": "execution_resumed"}
+                    })
+                )
+                .unwrap();
+                stream.flush().unwrap();
+                return request;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    Instant::now() < deadline,
+                    "native execution.resume did not reach the selected server"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(err) => panic!("failed to accept native resume request: {err}"),
+        }
+    }
+}
+
+fn assert_native_resume_request(request: &serde_json::Value) {
+    assert_eq!(request["method"], "execution.resume");
+    assert_eq!(
+        request["params"]["native_launch"]["session_header"]["id"],
+        "0123abcd4567ef89"
+    );
+    assert_eq!(
+        request["params"]["native_launch"]["tools"],
+        "read_interactions"
+    );
+}
+
+#[test]
+fn execution_resume_preserves_native_session_binding() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("herdr.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let server = thread::spawn(move || receive_native_resume(listener));
+
+    let args = native_resume_args();
+    let resumed = run_cli(&socket_path, &args);
+    let request = server.join().unwrap();
+
+    assert!(
+        resumed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert_native_resume_request(&request);
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn execution_resume_preserves_binding_after_global_named_session() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = named_session_socket(&config_home, "controller");
+    fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let server = thread::spawn(move || receive_native_resume(listener));
+
+    let mut args = vec!["--session", "controller"];
+    args.extend(native_resume_args());
+    let resumed = run_named_cli(&config_home, &runtime_dir, &args);
+    let request = server.join().unwrap();
+
+    assert!(
+        resumed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert_native_resume_request(&request);
+    cleanup_test_base(&base);
+}
+
 #[test]
 fn native_resume_socket_claim_is_idempotent_and_rejects_replay_conflicts() {
     let base = unique_test_dir();
