@@ -145,6 +145,7 @@ pub(super) fn snapshot(
                 title: agent.title,
                 terminal_title: agent.terminal_title,
                 terminal_title_stripped: agent.terminal_title_stripped,
+                latest_recap: agent.latest_recap,
                 agent_status: agent.agent_status,
                 state_change_seq: agent.state_change_seq,
                 state_labels,

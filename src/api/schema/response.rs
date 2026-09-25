@@ -61,6 +61,10 @@ pub enum ResponseResult {
     AgentInteractionDeliveries {
         deliveries: Vec<super::InteractionDelivery>,
     },
+    AgentRecap {
+        recap: super::AgentRecapRecord,
+        admitted: bool,
+    },
     AgentTurn {
         turn: AgentTurnRecord,
         admitted: bool,

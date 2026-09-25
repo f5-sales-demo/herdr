@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod agent_interactions;
+pub mod agent_recaps;
 pub mod agent_turns;
 pub mod agents;
 pub mod commands;
@@ -19,6 +20,7 @@ pub mod workspaces;
 pub mod worktrees;
 
 pub use agent_interactions::*;
+pub use agent_recaps::*;
 pub use agent_turns::*;
 pub use agents::*;
 pub use commands::*;
@@ -280,6 +282,10 @@ pub enum Method {
     AgentInteractionDeliveryGet(InteractionDeliveryTarget),
     #[serde(rename = "agent.interaction.delivery.ack")]
     AgentInteractionDeliveryAck(InteractionAckParams),
+    #[serde(rename = "agent.recap.report")]
+    AgentRecapReport(AgentRecapReportParams),
+    #[serde(rename = "agent.recap.get")]
+    AgentRecapGet(AgentTarget),
     #[serde(rename = "agent.turn.report")]
     AgentTurnReport(AgentTurnReportParams),
     #[serde(rename = "agent.turn.action.get")]

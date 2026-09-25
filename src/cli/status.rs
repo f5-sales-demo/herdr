@@ -282,6 +282,7 @@ struct ServerCapabilitiesJson {
     health_check: bool,
     worker_context_handoff: Option<u32>,
     xcsh_semantic_tracking: Option<u32>,
+    agent_recaps: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -329,6 +330,7 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
                     health_check: capabilities.health_check,
                     worker_context_handoff: capabilities.worker_context_handoff,
                     xcsh_semantic_tracking: capabilities.xcsh_semantic_tracking,
+                    agent_recaps: capabilities.agent_recaps,
                 }),
             compatible: protocol.map(|value| value == crate::protocol::PROTOCOL_VERSION),
             endpoint_compatible: capabilities.as_ref().and_then(|capabilities| {
@@ -428,6 +430,7 @@ mod tests {
                 health_check: true,
                 tracked_executions: true,
                 agent_turn_journal: true,
+                agent_recaps: Some(1),
                 agent_interactions: Some(1),
                 worker_context_handoff: Some(1),
                 xcsh_semantic_tracking: Some(1),

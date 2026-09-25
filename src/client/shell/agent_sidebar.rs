@@ -15,6 +15,7 @@ pub(super) struct AgentRow {
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
+    pub(super) latest_recap: Option<crate::api::schema::AgentRecapRecord>,
 }
 
 pub(super) fn ordered_agent_pane_ids(
@@ -79,7 +80,12 @@ pub(super) fn render_agent_panel(
         config,
         agent_scroll,
         hits,
-        |row| row.rows.len(),
+        |row| {
+            row.rows.len()
+                + row.latest_recap.as_ref().map_or(0, |recap| {
+                    1 + usize::from(recap.report.next_action.is_some())
+                })
+        },
         |buffer, rect, row, hits| {
             hits.agents.push((rect, row.pane_id.clone()));
             render_agent_row(buffer, rect, row, config);
@@ -315,6 +321,7 @@ pub(super) fn agent_row(
         status: agent.agent_status,
         focused: agent.focused,
         rows,
+        latest_recap: agent.latest_recap.clone(),
     })
 }
 
@@ -370,6 +377,37 @@ pub(super) fn render_agent_row(
             Rect::new(rect.x, rect.y + index as u16, rect.width, 1),
             buffer,
         );
+    }
+    if let Some(recap) = row.latest_recap.as_ref() {
+        let start = rows.len();
+        let style = secondary.add_modifier(Modifier::ITALIC);
+        if (start as u16) < rect.height {
+            let text = format!("↳ Recap: {}", recap.report.summary);
+            Paragraph::new(Line::from(text)).style(style).render(
+                Rect::new(
+                    rect.x.saturating_add(3),
+                    rect.y + start as u16,
+                    rect.width.saturating_sub(3),
+                    1,
+                ),
+                buffer,
+            );
+        }
+        if let Some(next) = recap.report.next_action.as_deref() {
+            if ((start + 1) as u16) < rect.height {
+                Paragraph::new(Line::from(format!("Next: {next}")))
+                    .style(style)
+                    .render(
+                        Rect::new(
+                            rect.x.saturating_add(3),
+                            rect.y + (start + 1) as u16,
+                            rect.width.saturating_sub(3),
+                            1,
+                        ),
+                        buffer,
+                    );
+            }
+        }
     }
 }
 

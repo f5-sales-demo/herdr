@@ -357,6 +357,7 @@ fn pane_cycle_last_and_agent_actions_resolve_to_stable_pane_ids() {
             title: None,
             terminal_title: None,
             terminal_title_stripped: None,
+            latest_recap: None,
             agent_status: AgentStatus::Idle,
             state_change_seq: 1,
             state_labels: Vec::new(),
@@ -373,6 +374,7 @@ fn pane_cycle_last_and_agent_actions_resolve_to_stable_pane_ids() {
             title: None,
             terminal_title: None,
             terminal_title_stripped: None,
+            latest_recap: None,
             agent_status: AgentStatus::Idle,
             state_change_seq: 2,
             state_labels: Vec::new(),
@@ -447,6 +449,7 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
             title: None,
             terminal_title: Some("first title".into()),
             terminal_title_stripped: Some("first".into()),
+            latest_recap: None,
             agent_status: AgentStatus::Done,
             state_change_seq: 10,
             state_labels: Vec::new(),
@@ -463,6 +466,7 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
             title: None,
             terminal_title: Some("second title".into()),
             terminal_title_stripped: Some("second".into()),
+            latest_recap: None,
             agent_status: AgentStatus::Blocked,
             state_change_seq: 20,
             state_labels: vec![("blocked".into(), "needs input".into())],
@@ -586,6 +590,7 @@ fn muted_agent_sidebar_rows_do_not_stack_terminal_faint() {
         title: None,
         terminal_title: None,
         terminal_title_stripped: None,
+        latest_recap: None,
         agent_status: AgentStatus::Working,
         state_change_seq: 1,
         state_labels: Vec::new(),
@@ -653,6 +658,7 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
             title: None,
             terminal_title: None,
             terminal_title_stripped: None,
+            latest_recap: None,
             agent_status: AgentStatus::Idle,
             state_change_seq: 1,
             state_labels: Vec::new(),
@@ -669,6 +675,7 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
             title: None,
             terminal_title: None,
             terminal_title_stripped: None,
+            latest_recap: None,
             agent_status: AgentStatus::Blocked,
             state_change_seq: 2,
             state_labels: Vec::new(),
@@ -685,6 +692,7 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
             title: None,
             terminal_title: None,
             terminal_title_stripped: None,
+            latest_recap: None,
             agent_status: AgentStatus::Idle,
             state_change_seq: 3,
             state_labels: Vec::new(),
@@ -759,6 +767,7 @@ fn agent_sort_toggle_is_client_local_and_persists_per_endpoint() {
         title: None,
         terminal_title: None,
         terminal_title_stripped: None,
+        latest_recap: None,
         agent_status: AgentStatus::Working,
         state_change_seq: 1,
         state_labels: Vec::new(),
@@ -1324,6 +1333,7 @@ fn semantic_notifications_use_client_policy_and_stable_navigation_targets() {
         title: None,
         terminal_title: None,
         terminal_title_stripped: None,
+        latest_recap: None,
         agent_status: AgentStatus::Blocked,
         state_change_seq: 1,
         state_labels: Vec::new(),
@@ -1461,4 +1471,55 @@ fn semantic_notifications_use_client_policy_and_stable_navigation_targets() {
     assert!(repaint);
     assert!(state.visible_notification.is_none());
     assert_eq!(state.pending_notifications.len(), 1);
+}
+
+#[test]
+fn agent_sidebar_shows_latest_recap_and_next_action() {
+    let mut projected = snapshot();
+    projected.agents.push(ClientShellAgent {
+        pane_id: "pane_1".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        name: Some("builder".into()),
+        display_agent: None,
+        agent: Some("xcsh".into()),
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        latest_recap: Some(crate::api::schema::AgentRecapRecord {
+            report: crate::api::schema::AgentRecapReportParams {
+                pane_id: "pane_1".into(),
+                source: "herdr:xcsh".into(),
+                session_id: "session-a".into(),
+                id: "recap-one".into(),
+                trigger: crate::api::schema::AgentRecapTrigger::Manual,
+                summary: "Completed the work.".into(),
+                next_action: Some("Review the result.".into()),
+                completed_turn_count: 3,
+                created_at: "2026-09-25T12:00:00Z".into(),
+            },
+        }),
+        agent_status: AgentStatus::Idle,
+        state_change_seq: 1,
+        state_labels: Vec::new(),
+        tokens: Vec::new(),
+        focused: true,
+    });
+    let config = ClientShellConfig::from_config(&Config::default());
+    let row = agent_sidebar::agent_row(&projected, "pane_1", &config, None).expect("agent row");
+    let height = (row.rows.len() + 2) as u16;
+    let mut buffer = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 80, height));
+    agent_sidebar::render_agent_row(
+        &mut buffer,
+        ratatui::layout::Rect::new(0, 0, 80, height),
+        &row,
+        &config,
+    );
+    let line = |y| -> String {
+        (0..80)
+            .filter_map(|x| buffer.cell((x, y)).map(|cell| cell.symbol().to_owned()))
+            .collect()
+    };
+    assert!(line(height - 2).contains("Recap: Completed the work."));
+    assert!(line(height - 1).contains("Next: Review the result."));
 }

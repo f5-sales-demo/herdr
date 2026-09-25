@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 26;
+pub const PROTOCOL_VERSION: u32 = 27;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -1083,6 +1083,8 @@ pub struct ClientShellAgent {
     pub title: Option<String>,
     pub terminal_title: Option<String>,
     pub terminal_title_stripped: Option<String>,
+    #[serde(default)]
+    pub latest_recap: Option<crate::api::schema::AgentRecapRecord>,
     #[serde(deserialize_with = "deserialize_client_shell_agent_status")]
     pub agent_status: crate::api::schema::AgentStatus,
     pub state_change_seq: u64,
@@ -3158,8 +3160,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_24_and_25_clients_are_rejected_by_protocol_26() {
-        for version in [24, 25] {
+    fn protocol_24_through_26_clients_are_rejected_by_protocol_27() {
+        for version in [24, 25, 26] {
             assert!(matches!(
                 check_client_version(version),
                 VersionCheck::Incompatible(_)
