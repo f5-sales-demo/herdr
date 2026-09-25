@@ -18,6 +18,8 @@ The skill authorizes control in two explicit contexts:
 
 An unpaired process must not search for sockets, inject `HERDR_ENV`, or infer ownership from its working directory. The absence of `HERDR_ENV` in an isolated worker does not prove that the human has no Herdr session.
 
+Managed-pane environment IDs are a launch snapshot. After a pane moves, use `herdr pane current --current` for its live workspace, tab, and pane IDs. A continuing process can still use its inherited pane ID as caller context; pairing issuance checks that ID against the live pane and its capability. External workers resolve their lease again after a move.
+
 With the skill installed, an agent can inspect and operate Herdr topology, run and observe commands, coordinate recognized agents, target saved machines safely, and use capability-gated durable execution or interaction contracts.
 
 The skill is Markdown instructions, not an application or service. If Herdr is already installed, `herdr --skill` prints the release-matched self-contained core bundled with that binary. A single-file command cannot include the folder's optional reference files; install the repository folder for progressive disclosure.

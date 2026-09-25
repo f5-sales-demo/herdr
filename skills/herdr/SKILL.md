@@ -65,19 +65,21 @@ Herdr injects caller context into managed panes:
 printf '%s\n' "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID"
 ```
 
+These environment values are a launch snapshot. A running shell or agent keeps its original values after its pane moves; Herdr resolves the original pane ID for that process, but the workspace and tab values can be stale. Refresh the live IDs with `herdr pane current --current` before using them for workspace or tab commands. If the caller binding is missing, report that this process is unbound; it does not establish that the human has no Herdr session.
+
 Prefer `--current`, an explicit ID, or a unique live agent name. Omitting a target may select a pane focused by the user or another client. Discover state with:
 
 ```bash
 herdr workspace list
-herdr tab list --workspace "$HERDR_WORKSPACE_ID"
 herdr pane current --current
-herdr pane list --workspace "$HERDR_WORKSPACE_ID"
 herdr agent list
 ```
 
+Use the `workspace_id` from `pane current` for `herdr tab list --workspace <live-workspace-id>` and `herdr pane list --workspace <live-workspace-id>`.
+
 Creation responses contain the next IDs: `workspace create` returns `.result.workspace`, `.result.tab`, and `.result.root_pane`; `tab create` returns `.result.tab` and `.result.root_pane`; `pane split` returns `.result.pane`.
 
-After `pane move`, use `.result.move_result.pane.pane_id` or the live agent name. Do not reuse `.result.move_result.previous_pane_id` as a general target. For named sessions, saved SSH machines, cross-server identity, and persistence choices, read [remote-and-persistence.md](references/remote-and-persistence.md).
+After `pane move`, use `.result.move_result.pane.pane_id` or the live agent name. A continuing process may still pass its inherited old ID to `--current`, which resolves to the moved pane; do not reuse `.result.move_result.previous_pane_id` as a general target. For named sessions, saved SSH machines, cross-server identity, and persistence choices, read [remote-and-persistence.md](references/remote-and-persistence.md).
 
 ## Operate a pane without stealing focus
 
