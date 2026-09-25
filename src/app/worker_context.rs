@@ -68,7 +68,9 @@ impl App {
         id: String,
         params: WorkerContextIssueParams,
     ) -> String {
-        let Some((_, pane_id)) = self.parse_current_public_pane_id(&params.pane_id) else {
+        // A process keeps its launch-time pane ID after a move. Resolve only
+        // Herdr's live pane aliases, then verify the pane-bound capability.
+        let Some((_, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return super::api::responses::encode_error(
                 id,
                 "worker_context_unauthorized",
@@ -350,5 +352,37 @@ mod tests {
             },
         );
         assert!(serde_json::from_str::<ErrorResponse>(&wrong_pane).is_ok());
+    }
+
+    #[test]
+    fn issue_accepts_moved_pane_alias_only_with_its_capability() {
+        let (mut app, pane_id, capability) = app_with_capability();
+        let (_, internal_id) = app.parse_pane_id(&pane_id).expect("live pane");
+        let old_id = "w-previous:p1".to_string();
+        app.state
+            .public_pane_id_aliases
+            .insert(old_id.clone(), internal_id);
+
+        let issued = app.handle_worker_context_issue(
+            "moved".into(),
+            WorkerContextIssueParams {
+                pane_id: old_id.clone(),
+                context_capability: capability,
+            },
+        );
+        let issued: SuccessResponse = serde_json::from_str(&issued).expect("issue response");
+        let ResponseResult::WorkerContextPairing { pane, .. } = issued.result else {
+            panic!("expected pairing response");
+        };
+        assert_eq!(pane.pane_id, pane_id);
+
+        let forged = app.handle_worker_context_issue(
+            "forged-moved".into(),
+            WorkerContextIssueParams {
+                pane_id: old_id,
+                context_capability: "forged".into(),
+            },
+        );
+        assert!(serde_json::from_str::<ErrorResponse>(&forged).is_ok());
     }
 }
