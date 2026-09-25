@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+- Agent recaps are now retained across server restarts and shown for an agent's current session in the sidebar, `herdr agent get`, and `herdr agent recap get`. The `agent_recaps: 1` capability lets xcsh report them without changing turn status. (#122, #123)
+
+### Changed
+- The agent skill now includes focused guidance for external workers, automation, and remote sessions. (#118, #119)
+
+### Fixed
+- Switching xcsh sessions now rebinds recap authority to the new session, so a previous session's recap is hidden and the next recap is accepted. (#124, #125)
+- External worker pairing now resolves a caller's current pane after that pane moves. (#120)
+
 ## [0.18.0] - 2026-09-22
 
 ### Fixed

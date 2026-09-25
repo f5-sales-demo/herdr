@@ -145,6 +145,20 @@ CLI の `herdr api snapshot` は、クライアントやエージェントが簡
 
 クライアントは `offset_from_bottom == 0` を最下部にいる状態として扱えます。
 
+## ネイティブ xcsh 再開のバインディング（プロトコル 24）
+
+`execution.resume` は、シェルコマンドの近道ではなく、ネイティブのライフサイクルプロトコルです。必須の `native_launch` はバージョン `3` で、絶対パスの計測済み `xcsh_executable`、正規化された `session_dir` と `session_path`、および xcsh の小文字 16 桁の 16 進 ID と最初の JSONL ヘッダー行（末尾の LF を含む）の SHA-256 を持つ `session_header` を含みます。Herdr は型付きの起動情報を検証して永続化し、起動直前に実行ファイルとセッションヘッダーを再検証します。再試行では同じバインディングが必要です。相対パス、利用できないファイル、通常の置き換えが行われたファイルは拒否されます。これは所有者が管理する成果物の計測境界であり、敵対的なファイルシステム所有者による同時変更に対する原子的なファイルハンドルからの実行保証ではありません。Herdr はサーバーの `PATH` からネイティブ子プロセスを探しません。
+
+`model` は設定済みの秘密ではない xcsh セレクターであり、ユーザー ID ではありません。`discovery: "reduced-v1"` は `--no-mcp --no-lsp --no-pty`、`tools: "read"` は `--tools read`、`interactive: false` は `--print` に変換されます。`lifecycle_mode: "managed_turn_v1"` は Herdr とプロデューサーの永続的な契約であり、非公開の xcsh CLI フラグではありません。Herdr がすべてのネイティブ引数を生成し、任意の argv や環境変数は受け付けません。
+
+子プロセスは最初に認証された `agent.turn.report` の `starting` イベントを送信します。Herdr は所有する PTY の PID とともに登録を保存し、`agent.turn.action.get` と `ack` を正確なプロデューサー、正規化されたセッション、世代、ペイン、継承された一度限りの能力に結び付けます。置き換えや `execution.cancel` は永続的な `cancel` アクションを作りますが、ネイティブ PTY を強制終了しません。プロデューサーは 30 秒以内に安全な地点で確認し、対応するターンを `cancelled` と報告します。確認がない場合は `timed_out` と記録されます。PTY の終了だけでは意味的なキャンセル結果になりません。この能力は起動された子プロセスによる所有を認証します。保存された PID は Herdr の PTY 所有証拠であり、ソケットのピア PID 認証情報ではありません。
+
+Unix では実行ファイルのパスに実行権限ビットも必要です。Windows では絶対パスの通常ファイルが必要で、実行可能かどうかはプラットフォームのプロセス起動規則（形式と拡張子を含む）で判断されます。
+
+```json
+{"id":"resume-1","method":"execution.resume","params":{"execution_id":"task-42","generation":1,"native_launch":{"version":3,"xcsh_executable":"/opt/xcsh/bin/xcsh","session_dir":"/work/.xcsh/sessions","session_path":"/work/.xcsh/sessions/session.jsonl","session_header":{"id":"0123abcd4567ef89","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},"model":"openai/gpt-5","discovery":"reduced-v1","tools":"read","interactive":false,"lifecycle_mode":"managed_turn_v1"},"text":"continue","cwd":"/work/project"}}
+```
+
 ### ペイングラフィックス
 
 ペイングラフィックスを使うと、プラグインがペイン上に画像データを配置できます。デフォルトで利用でき、サーバーで `[terminal].kitty_graphics = false` が設定されている場合は、すべてのペイングラフィックスメソッドが `feature_disabled` を返します。この設定の変更にはサーバーの再起動が必要です。`pane.graphics.info` はグラフィックスレイヤーを作成せず、接続中クライアントのセルの幅と高さをピクセル単位で返します。`pane.graphics.set` は `data_base64` の `png`、`rgb`、`rgba` データを受け取り、`pane.graphics.clear` はレイヤーを削除します。
