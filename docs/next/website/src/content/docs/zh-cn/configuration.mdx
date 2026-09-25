@@ -532,6 +532,17 @@ resume_agents_on_restore = true
 
 只有通过官方集成获得有效原生会话引用的窗格才能恢复；其他窗格会作为普通 shell 恢复。有关受支持的智能体和持久化行为，请参阅[会话状态与恢复](/docs/session-state/)。
 
+## 恢复智能体时的附加参数
+
+服务器恢复会话时，可以向受支持智能体的原生恢复命令传入额外的 CLI 参数：
+
+```toml
+[session.resume_agent_args]
+claude = ["--dangerously-skip-permissions"]
+```
+
+键是规范的智能体 ID。参数只会追加到恢复命令，不影响常规启动；仅支持原生恢复的智能体会使用它们。
+
 ## IME 光标跟踪
 
 在 macOS 上，隐藏硬件光标的 AI 智能体 TUI 可能导致原生输入法候选窗口无法跟随聚焦窗格。使用以下设置可为这些窗格显示光标锚点：

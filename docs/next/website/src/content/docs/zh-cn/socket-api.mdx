@@ -145,6 +145,20 @@ CLI 的 `herdr api snapshot` 会把当前 `session.snapshot` 响应输出为 JSO
 
 客户端可以把 `offset_from_bottom == 0` 视为位于底部。
 
+## 原生 xcsh 恢复绑定（协议 24）
+
+`execution.resume` 是原生生命周期协议，而不是 shell 命令的快捷方式。必需的 `native_launch` 使用版本 `3`：它包含经过度量的绝对路径 `xcsh_executable`、规范化的 `session_dir` 和 `session_path`，以及带有 xcsh 规范小写 16 位十六进制 ID 和首行 JSONL 标头（含末尾 LF）SHA-256 的 `session_header`。Herdr 会在声明持久化代次之前验证并保存完整的类型化启动凭据，在启动前再次检查可执行文件和会话标头。重试必须提供相同的绑定；相对路径、不可用文件或通常方式替换的文件都会被拒绝。这是由所有者控制的文件度量边界，并不保证在恶意文件系统所有者并发修改时实现原子化的文件句柄到执行转换。Herdr 不会通过服务器的 `PATH` 查找原生子进程。
+
+`model` 是配置的非机密 xcsh 选择器，不是用户身份。`discovery: "reduced-v1"` 转换为 `--no-mcp --no-lsp --no-pty`，`tools: "read"` 转换为 `--tools read`，`interactive: false` 转换为 `--print`。`lifecycle_mode: "managed_turn_v1"` 是 Herdr 与生产者的持久生命周期契约，而不是未公开的 xcsh CLI 参数。Herdr 自行构造所有原生参数，不接受任意 argv 或环境变量。
+
+原生子进程首先提交经过身份验证的 `agent.turn.report` `starting` 事件。Herdr 将注册信息和其拥有的 PTY PID 一同持久化，并将 `agent.turn.action.get`/`ack` 绑定到确切的生产者、规范会话、代次、窗格和继承的一次性能力。替换或 `execution.cancel` 会创建持久化的 `cancel` 动作，但不会强制终止原生 PTY。生产者须在 30 秒内于安全点确认，然后报告关联轮次为 `cancelled`。缺失确认会被持久记录为 `timed_out`；仅观察到 PTY 退出不构成原生语义取消结果。能力证明启动子进程的持有权；持久化 PID 是 Herdr 拥有 PTY 的证据，而不是声称的套接字对端 PID 凭据。
+
+在 Unix 上，该路径还必须带有执行权限位。在 Windows 上，它必须是绝对路径的普通文件；能否执行由平台进程启动器按常规文件格式和扩展名规则决定。
+
+```json
+{"id":"resume-1","method":"execution.resume","params":{"execution_id":"task-42","generation":1,"native_launch":{"version":3,"xcsh_executable":"/opt/xcsh/bin/xcsh","session_dir":"/work/.xcsh/sessions","session_path":"/work/.xcsh/sessions/session.jsonl","session_header":{"id":"0123abcd4567ef89","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},"model":"openai/gpt-5","discovery":"reduced-v1","tools":"read","interactive":false,"lifecycle_mode":"managed_turn_v1"},"text":"continue","cwd":"/work/project"}}
+```
+
 ### 窗格图形
 
 窗格图形允许插件在窗格上放置图像数据。该功能默认可用；当服务器设置 `[terminal].kitty_graphics = false` 时，所有窗格图形方法都返回 `feature_disabled`。更改此设置需要重启服务器。调用 `pane.graphics.info` 会返回所连接客户端的单元格像素宽度和高度,但不会创建图形层。`pane.graphics.set` 接受 `data_base64` 中的 `png`、`rgb` 或 `rgba` 数据,`pane.graphics.clear` 删除该图层。
