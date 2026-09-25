@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 26,
+  "protocol": 27,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -1304,6 +1304,60 @@
             "source"
           ],
           "type": "object"
+        },
+        "AgentRecapReportParams": {
+          "properties": {
+            "completed_turn_count": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "trigger": {
+              "$ref": "#/schemas/request/$defs/AgentRecapTrigger"
+            }
+          },
+          "required": [
+            "pane_id",
+            "source",
+            "session_id",
+            "id",
+            "trigger",
+            "summary",
+            "completed_turn_count",
+            "created_at"
+          ],
+          "type": "object"
+        },
+        "AgentRecapTrigger": {
+          "enum": [
+            "manual",
+            "automatic"
+          ],
+          "type": "string"
         },
         "AgentRenameParams": {
           "properties": {
@@ -7215,6 +7269,38 @@
         {
           "properties": {
             "method": {
+              "const": "agent.recap.report",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentRecapReportParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.recap.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.turn.report",
               "type": "string"
             },
@@ -7821,6 +7907,16 @@
             "interactive_ready": {
               "type": "boolean"
             },
+            "latest_recap": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentRecapRecord"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "launch_pending": {
               "type": "boolean"
             },
@@ -7983,6 +8079,60 @@
             "local_override_shadowing_remote"
           ],
           "type": "object"
+        },
+        "AgentRecapRecord": {
+          "properties": {
+            "completed_turn_count": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "trigger": {
+              "$ref": "#/schemas/success_response/$defs/AgentRecapTrigger"
+            }
+          },
+          "required": [
+            "pane_id",
+            "source",
+            "session_id",
+            "id",
+            "trigger",
+            "summary",
+            "completed_turn_count",
+            "created_at"
+          ],
+          "type": "object"
+        },
+        "AgentRecapTrigger": {
+          "enum": [
+            "manual",
+            "automatic"
+          ],
+          "type": "string"
         },
         "AgentSessionInfo": {
           "properties": {
@@ -11315,6 +11465,26 @@
                 "admitted": {
                   "type": "boolean"
                 },
+                "recap": {
+                  "$ref": "#/schemas/success_response/$defs/AgentRecapRecord"
+                },
+                "type": {
+                  "const": "agent_recap",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "recap",
+                "admitted"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "admitted": {
+                  "type": "boolean"
+                },
                 "turn": {
                   "$ref": "#/schemas/success_response/$defs/AgentTurnRecord"
                 },
@@ -12877,6 +13047,15 @@
           "properties": {
             "agent_interactions": {
               "description": "Version of the independent observation and producer-acknowledged interaction API.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "agent_recaps": {
+              "description": "Version of the session-bound agent recap API.",
               "format": "uint32",
               "minimum": 0,
               "type": [

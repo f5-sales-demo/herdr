@@ -18,6 +18,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
     match subcommand {
         "list" => agent_list(&args[1..]),
         "get" => agent_get(&args[1..]),
+        "recap" => agent_recap(&args[1..]),
         "read" => agent_read(&args[1..]),
         "send-keys" => agent_send_keys(&args[1..]),
         "prompt" => agent_prompt(&args[1..]),
@@ -460,6 +461,23 @@ fn agent_get(args: &[String]) -> std::io::Result<i32> {
     super::print_response(&super::send_request(&Request {
         id: "cli:agent:get".into(),
         method: Method::AgentGet(AgentTarget {
+            target: target.clone(),
+        }),
+    })?)
+}
+
+fn agent_recap(args: &[String]) -> std::io::Result<i32> {
+    let [command, target] = args else {
+        eprintln!("usage: herdr agent recap get <target>");
+        return Ok(2);
+    };
+    if command != "get" {
+        eprintln!("usage: herdr agent recap get <target>");
+        return Ok(2);
+    }
+    super::print_response(&super::send_request(&Request {
+        id: "cli:agent:recap:get".into(),
+        method: Method::AgentRecapGet(AgentTarget {
             target: target.clone(),
         }),
     })?)
@@ -928,6 +946,7 @@ fn print_agent_help() {
     eprintln!("herdr agent commands:");
     eprintln!("  herdr agent list");
     eprintln!("  herdr agent get <target>");
+    eprintln!("  herdr agent recap get <target>");
     eprintln!("  herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!("  herdr agent send-keys <target> <key> [key ...]");
     eprintln!("  herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]");

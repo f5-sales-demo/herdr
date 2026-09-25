@@ -730,6 +730,7 @@ fn success_response_round_trips() {
                 health_check: true,
                 tracked_executions: true,
                 agent_turn_journal: true,
+                agent_recaps: Some(1),
                 agent_interactions: Some(1),
                 worker_context_handoff: Some(1),
                 xcsh_semantic_tracking: Some(1),
@@ -1462,4 +1463,18 @@ fn pane_link_resolve_round_trips() {
         serde_json::from_value::<ResponseResult>(json).unwrap(),
         result
     );
+}
+
+#[test]
+fn agent_recap_report_has_typed_protocol() {
+    let request: super::Request = serde_json::from_value(serde_json::json!({
+        "id": "recap-1", "method": "agent.recap.report", "params": {
+            "pane_id": "w1:p1", "source": "xcsh", "session_id": "session-1",
+            "id": "recap-1", "trigger": "manual", "summary": "The work is complete.",
+            "next_action": "Review tests.", "completed_turn_count": 3,
+            "created_at": "2026-09-25T12:00:00Z"
+        }
+    }))
+    .expect("typed recap method");
+    assert!(matches!(request.method, super::Method::AgentRecapReport(_)));
 }

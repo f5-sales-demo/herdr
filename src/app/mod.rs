@@ -105,6 +105,7 @@ impl AppPolicy {
 pub struct App {
     pub state: AppState,
     pub(crate) runtime_state: crate::execution::SharedRuntimeState,
+    pub(crate) agent_recaps: crate::agent_recap::AgentRecapStore,
     pub(crate) agent_admission: crate::agent_admission::AdmissionController,
     /// Prompt payloads retained by the server until admission releases them.
     pub(crate) queued_agent_prompts: HashMap<String, crate::api::schema::AgentPromptParams>,
@@ -604,6 +605,7 @@ impl App {
             last_api_notification_at: None,
             state,
             runtime_state,
+            agent_recaps: crate::agent_recap::AgentRecapStore::load(),
             agent_admission: crate::agent_admission::AdmissionController::new(
                 config.agent_admission.max_in_flight,
                 config

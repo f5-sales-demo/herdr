@@ -396,6 +396,10 @@ impl App {
             screen_detection_skipped: terminal.full_lifecycle_hook_authority_active(),
             state_labels: pane.state_labels,
             tokens: pane.tokens,
+            latest_recap: pane
+                .agent_session
+                .as_ref()
+                .and_then(|session| self.agent_recaps.latest(&session.source, &session.value)),
             agent_session: pane.agent_session,
             workspace_id: pane.workspace_id,
             tab_id: pane.tab_id,

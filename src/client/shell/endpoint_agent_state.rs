@@ -132,6 +132,7 @@ mod tests {
             title: None,
             terminal_title: None,
             terminal_title_stripped: None,
+            latest_recap: None,
             agent_status: status,
             state_change_seq: sequence,
             state_labels: Vec::new(),
