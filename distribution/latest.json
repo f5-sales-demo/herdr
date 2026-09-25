@@ -1,8 +1,8 @@
 {
-  "version": "0.18.0",
-  "protocol": 26,
+  "version": "0.19.0",
+  "protocol": 27,
   "endpoint_generation": 1,
-  "notes": "## What's Changed\n* fix(release): pin archived manifest asset URLs by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/111\n* feat: add native interaction tool policy by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/112\n* fix(cli): preserve native resume session binding by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/114\n* docs(release): finalize protocol 26 notes by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/117\n\n\n**Full Changelog**: https://github.com/f5-sales-demo/herdr/compare/v0.17.0...v0.18.0",
+  "notes": "## What's Changed\n* docs(skill): add progressive Herdr operating guidance by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/119\n* fix(context): allow pairing from moved pane callers by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/120\n* feat(agent): retain session recaps by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/123\n* fix: rebind xcsh recap authority on session switch by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/125\n* docs(release): finalize recap notes and locale parity by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/127\n\n\n**Full Changelog**: https://github.com/f5-sales-demo/herdr/compare/v0.18.0...v0.19.0",
   "assets": {
     "linux-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-x86_64",
     "linux-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-aarch64",
@@ -11,16 +11,16 @@
     "windows-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-windows-x86_64.zip"
   },
   "sha256": {
-    "linux-x86_64": "51e1be106bec36b92966203539706938a6e44a2f24164865b4512041913e2c1f",
-    "linux-aarch64": "05eb76cd06dfe41bae39a510bd4c693691e8ce68a03834c1bd94733e5f4db82d",
-    "macos-x86_64": "2b2b0853d6d39cf8276a6ceb0ef80df6bc73131e1848976dbe995380094ee677",
-    "macos-aarch64": "9fd3693b8050fb068754bc04ca875fe8ea7380dcab15173caa029d135ee80695",
-    "windows-x86_64": "61e69794fcc63b2e110a45102657d1690c79f0f1136db4a6e5c001fe054f1566"
+    "linux-x86_64": "3a39991e2880729de34bd524ffeb3b44bd4cc9e3fb116f21799bc5df2f2ada09",
+    "linux-aarch64": "0fd425388e04ffeff5ce75d81a8babc3c234f95cdb3b671fbe551e26e3ee23fa",
+    "macos-x86_64": "21fcd3006fbda88a984149a27afb08953e5d022139d276ff9214c955669597ab",
+    "macos-aarch64": "84425dcd967358b1c50f11032a6af2053fd99a6f46b79017f0f582ae5e3b4d5b",
+    "windows-x86_64": "efcda86cb0986dcb8d7f85a9a2351e36c19da4259538421969d2183ac8fb0dcc"
   },
   "releases": {
-    "0.18.0": {
-      "notes": "## What's Changed\n* fix(release): pin archived manifest asset URLs by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/111\n* feat: add native interaction tool policy by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/112\n* fix(cli): preserve native resume session binding by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/114\n* docs(release): finalize protocol 26 notes by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/117\n\n\n**Full Changelog**: https://github.com/f5-sales-demo/herdr/compare/v0.17.0...v0.18.0",
-      "protocol": 26,
+    "0.19.0": {
+      "notes": "## What's Changed\n* docs(skill): add progressive Herdr operating guidance by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/119\n* fix(context): allow pairing from moved pane callers by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/120\n* feat(agent): retain session recaps by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/123\n* fix: rebind xcsh recap authority on session switch by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/125\n* docs(release): finalize recap notes and locale parity by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/127\n\n\n**Full Changelog**: https://github.com/f5-sales-demo/herdr/compare/v0.18.0...v0.19.0",
+      "protocol": 27,
       "endpoint_generation": 1,
       "assets": {
         "linux-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-x86_64",
@@ -28,6 +28,25 @@
         "macos-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-macos-x86_64",
         "macos-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-macos-aarch64",
         "windows-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-windows-x86_64.zip"
+      },
+      "sha256": {
+        "linux-x86_64": "3a39991e2880729de34bd524ffeb3b44bd4cc9e3fb116f21799bc5df2f2ada09",
+        "linux-aarch64": "0fd425388e04ffeff5ce75d81a8babc3c234f95cdb3b671fbe551e26e3ee23fa",
+        "macos-x86_64": "21fcd3006fbda88a984149a27afb08953e5d022139d276ff9214c955669597ab",
+        "macos-aarch64": "84425dcd967358b1c50f11032a6af2053fd99a6f46b79017f0f582ae5e3b4d5b",
+        "windows-x86_64": "efcda86cb0986dcb8d7f85a9a2351e36c19da4259538421969d2183ac8fb0dcc"
+      }
+    },
+    "0.18.0": {
+      "notes": "## What's Changed\n* fix(release): pin archived manifest asset URLs by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/111\n* feat: add native interaction tool policy by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/112\n* fix(cli): preserve native resume session binding by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/114\n* docs(release): finalize protocol 26 notes by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/117\n\n\n**Full Changelog**: https://github.com/f5-sales-demo/herdr/compare/v0.17.0...v0.18.0",
+      "protocol": 26,
+      "endpoint_generation": 1,
+      "assets": {
+        "linux-x86_64": "https://github.com/f5-sales-demo/herdr/releases/download/v0.18.0/herdr-linux-x86_64",
+        "linux-aarch64": "https://github.com/f5-sales-demo/herdr/releases/download/v0.18.0/herdr-linux-aarch64",
+        "macos-x86_64": "https://github.com/f5-sales-demo/herdr/releases/download/v0.18.0/herdr-macos-x86_64",
+        "macos-aarch64": "https://github.com/f5-sales-demo/herdr/releases/download/v0.18.0/herdr-macos-aarch64",
+        "windows-x86_64": "https://github.com/f5-sales-demo/herdr/releases/download/v0.18.0/herdr-windows-x86_64.zip"
       },
       "sha256": {
         "linux-x86_64": "51e1be106bec36b92966203539706938a6e44a2f24164865b4512041913e2c1f",
