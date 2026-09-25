@@ -225,4 +225,96 @@ mod tests {
         let error: ErrorResponse = serde_json::from_str(&recap_get).expect("not found");
         assert_eq!(error.error.code, "agent_recap_not_found");
     }
+
+    #[test]
+    fn xcsh_session_switch_hides_old_recap_and_rejects_late_old_reports() {
+        let (mut app, pane_id) = app_with_reporter();
+        let first = app.handle_agent_recap_report("first".into(), params(pane_id.clone()));
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&first).is_ok(),
+            "{first}"
+        );
+
+        let internal_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&internal_pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).expect("terminal");
+        let switched = terminal.set_agent_session_ref_for_session_start(
+            "herdr:xcsh".into(),
+            "xcsh".into(),
+            crate::agent_resume::AgentSessionRef::id("session-b"),
+            Some(3),
+            Some("new".into()),
+        );
+        assert!(
+            switched.is_some(),
+            "xcsh should rebind on an explicit new session"
+        );
+        assert!(terminal
+            .set_hook_authority_with_session_ref(
+                "herdr:xcsh".into(),
+                "xcsh".into(),
+                AgentState::Idle,
+                None,
+                crate::agent_resume::AgentSessionRef::id("session-b"),
+                Some(4),
+            )
+            .is_some());
+        let late_old_state = terminal.set_hook_authority_with_session_ref(
+            "herdr:xcsh".into(),
+            "xcsh".into(),
+            AgentState::Working,
+            None,
+            crate::agent_resume::AgentSessionRef::id("session-a"),
+            Some(5),
+        );
+        assert!(late_old_state.is_none());
+        assert_eq!(terminal.state, AgentState::Idle);
+
+        let current = app.handle_agent_get(
+            "current".into(),
+            AgentTarget {
+                target: pane_id.clone(),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&current).expect("agent");
+        let ResponseResult::AgentInfo { agent } = success.result else {
+            panic!("agent info")
+        };
+        assert!(agent.latest_recap.is_none());
+
+        let old = app.handle_agent_recap_report("old".into(), params(pane_id.clone()));
+        let error: ErrorResponse = serde_json::from_str(&old).expect("old recap rejection");
+        assert_eq!(error.error.code, "agent_recap_authority_mismatch");
+
+        let mut new = params(pane_id.clone());
+        new.session_id = "session-b".into();
+        let accepted = app.handle_agent_recap_report("new".into(), new.clone());
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&accepted).is_ok(),
+            "{accepted}"
+        );
+        let duplicate = app.handle_agent_recap_report("duplicate".into(), new);
+        let success: SuccessResponse = serde_json::from_str(&duplicate).expect("duplicate");
+        assert!(matches!(
+            success.result,
+            ResponseResult::AgentRecap {
+                admitted: false,
+                ..
+            }
+        ));
+        let current = app.handle_agent_get("current".into(), AgentTarget { target: pane_id });
+        let success: SuccessResponse = serde_json::from_str(&current).expect("agent");
+        let ResponseResult::AgentInfo { agent } = success.result else {
+            panic!("agent info")
+        };
+        assert_eq!(
+            agent
+                .latest_recap
+                .as_ref()
+                .map(|recap| recap.report.session_id.as_str()),
+            Some("session-b")
+        );
+    }
 }
