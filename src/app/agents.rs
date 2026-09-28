@@ -196,6 +196,7 @@ impl App {
 
         let mut argv = vec![crate::detect::interactive_agent_executable(kind).to_string()];
         argv.extend(params.args);
+        let launch_env = managed_agent_launch_environment(kind);
         // Managed launches must execute the requested agent with exactly the
         // supplied arguments. Interactive aliases can otherwise silently add
         // permission flags that are invalid for remote resume operations.
@@ -205,8 +206,9 @@ impl App {
             .collect::<Vec<_>>();
         #[cfg(not(unix))]
         let launch_argv = argv.clone();
-        let command = crate::platform::interactive_shell_command(&launch_argv, &shell_name)
-            .ok_or(AgentStartError::InvalidArgument)?;
+        let command =
+            crate::platform::interactive_shell_command(&launch_argv, &shell_name, &launch_env)
+                .ok_or(AgentStartError::InvalidArgument)?;
         let bytes = crate::app::api_helpers::encode_api_submission(runtime, &command);
         let timeout = Duration::from_millis(
             params
@@ -468,6 +470,16 @@ impl App {
     }
 }
 
+fn managed_agent_launch_environment(kind: crate::detect::Agent) -> Vec<(String, String)> {
+    match kind {
+        crate::detect::Agent::Xcsh => vec![(
+            "XCSH_HERDR_OWNER".to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        )],
+        _ => Vec::new(),
+    }
+}
+
 fn available_shell_name(runtime: &crate::terminal::TerminalRuntime) -> Option<String> {
     #[cfg(test)]
     if runtime.child_pid().is_none() {
@@ -526,7 +538,7 @@ pub(super) enum AgentRenameError {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_agent_name;
+    use super::{managed_agent_launch_environment, valid_agent_name};
 
     #[test]
     fn agent_names_use_a_small_cli_safe_grammar() {
@@ -545,5 +557,17 @@ mod tests {
         ] {
             assert!(!valid_agent_name(name), "expected {name:?} to be invalid");
         }
+    }
+
+    #[test]
+    fn managed_xcsh_launch_gets_a_fresh_owner_token() {
+        let first = managed_agent_launch_environment(crate::detect::Agent::Xcsh);
+        let second = managed_agent_launch_environment(crate::detect::Agent::Xcsh);
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].0, "XCSH_HERDR_OWNER");
+        assert!(uuid::Uuid::parse_str(&first[0].1).is_ok());
+        assert_ne!(first, second);
+        assert!(managed_agent_launch_environment(crate::detect::Agent::Codex).is_empty());
     }
 }

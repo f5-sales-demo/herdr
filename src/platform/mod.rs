@@ -361,6 +361,7 @@ pub(crate) fn is_powershell_process_name(name: &str) -> bool {
 pub(crate) fn interactive_unix_shell_command(
     argv: &[String],
     shell_name: &str,
+    env: &[(String, String)],
     quote_posix_arg: fn(&str) -> String,
 ) -> Option<String> {
     let quote = if is_powershell_process_name(shell_name) {
@@ -368,13 +369,37 @@ pub(crate) fn interactive_unix_shell_command(
     } else {
         quote_posix_arg
     };
+    let mut command = String::new();
+    for (name, value) in env {
+        if !valid_environment_name(name) {
+            return None;
+        }
+        if is_powershell_process_name(shell_name) {
+            command.push_str("$env:");
+            command.push_str(name);
+            command.push_str(" = ");
+            command.push_str(&quote_powershell_arg(value));
+            command.push_str("; ");
+        } else {
+            command.push_str(name);
+            command.push('=');
+            command.push_str(&quote(value));
+            command.push(' ');
+        }
+    }
     let mut parts = argv.iter();
-    let mut command = quote(parts.next()?);
+    command.push_str(&quote(parts.next()?));
     for part in parts {
         command.push(' ');
         command.push_str(&quote(part));
     }
     Some(command)
+}
+
+pub(crate) fn valid_environment_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some('A'..='Z') | Some('a'..='z') | Some('_'))
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 pub(crate) fn quote_powershell_arg(value: &str) -> String {
@@ -607,12 +632,21 @@ mod tests {
             "@options".into(),
         ];
         assert_eq!(
-            interactive_shell_command(&argv, "bash").as_deref(),
+            interactive_shell_command(&argv, "bash", &[]).as_deref(),
             Some("pi '' 'two words' 'a'\\''b' '$HOME' 'semi;colon' @options")
         );
         assert_eq!(
-            interactive_shell_command(&argv, "pwsh").as_deref(),
+            interactive_shell_command(&argv, "pwsh", &[]).as_deref(),
             Some("pi '' 'two words' 'a''b' '$HOME' 'semi;colon' '@options'")
+        );
+        let env = vec![("XCSH_HERDR_OWNER".into(), "owner token".into())];
+        assert_eq!(
+            interactive_shell_command(&argv, "bash", &env).as_deref(),
+            Some("XCSH_HERDR_OWNER='owner token' pi '' 'two words' 'a'\\''b' '$HOME' 'semi;colon' @options")
+        );
+        assert_eq!(
+            interactive_shell_command(&argv, "pwsh", &env).as_deref(),
+            Some("$env:XCSH_HERDR_OWNER = 'owner token'; pi '' 'two words' 'a''b' '$HOME' 'semi;colon' '@options'")
         );
     }
 

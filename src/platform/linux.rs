@@ -318,8 +318,12 @@ pub(crate) fn scrollback_editor_argv(path: &std::path::Path) -> std::io::Result<
     Ok(vec!["/bin/sh".to_string(), "-c".to_string(), command])
 }
 
-pub(crate) fn interactive_shell_command(argv: &[String], shell_name: &str) -> Option<String> {
-    super::interactive_unix_shell_command(argv, shell_name, shell_quote)
+pub(crate) fn interactive_shell_command(
+    argv: &[String],
+    shell_name: &str,
+    env: &[(String, String)],
+) -> Option<String> {
+    super::interactive_unix_shell_command(argv, shell_name, env, shell_quote)
 }
 
 fn shell_quote(value: &str) -> String {

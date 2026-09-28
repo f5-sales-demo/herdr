@@ -9,6 +9,7 @@
 - The agent skill now includes focused guidance for external workers, automation, and remote sessions. (#118, #119)
 
 ### Fixed
+- Managed `herdr agent start --kind xcsh` launches now provide a unique ownership token, allowing xcsh to bind its terminal-management integration to the current workspace without weakening its fail-closed behavior. (#132)
 - Switching xcsh sessions now rebinds recap authority to the new session, so a previous session's recap is hidden and the next recap is accepted. (#124, #125)
 - External worker pairing now resolves a caller's current pane after that pane moves. (#120)
 
