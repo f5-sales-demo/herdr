@@ -161,12 +161,16 @@ fn apply_pane_launch_env(cmd: &mut CommandBuilder, launch_env: &PaneLaunchEnv) {
     // must not inherit it or its root agent would look like a nested session.
     cmd.env_remove("OMPCODE");
     for (key, value) in &launch_env.extra {
+        if key == crate::HERDR_KITTY_GRAPHICS_ENV_VAR {
+            continue;
+        }
         cmd.env(key, value);
     }
     // Only Herdr can mint this capability. Never inherit it or allow an
     // extra environment entry to attach it to an unmanaged process.
     cmd.env_remove(crate::worker_context::CAPABILITY_ENV_VAR);
     cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
+    apply_kitty_graphics_capability_env(cmd, crate::kitty_graphics::is_enabled());
     crate::integration::apply_pane_base_env(cmd);
     crate::platform::apply_pane_runtime_marker(cmd);
     match &launch_env.identity {
@@ -186,6 +190,15 @@ fn apply_pane_launch_env(cmd: &mut CommandBuilder, launch_env: &PaneLaunchEnv) {
         PaneLaunchIdentity::OmitPane => {
             cmd.env_remove(crate::integration::HERDR_PANE_ID_ENV_VAR);
         }
+    }
+}
+
+// The marker describes the pane renderer, so only pane launches may advertise it.
+fn apply_kitty_graphics_capability_env(cmd: &mut CommandBuilder, enabled: bool) {
+    if enabled {
+        cmd.env(crate::HERDR_KITTY_GRAPHICS_ENV_VAR, crate::HERDR_ENV_VALUE);
+    } else {
+        cmd.env_remove(crate::HERDR_KITTY_GRAPHICS_ENV_VAR);
     }
 }
 
@@ -3740,6 +3753,52 @@ mod tests {
             cmd.get_env(crate::worker_context::CAPABILITY_ENV_VAR)
                 .and_then(std::ffi::OsStr::to_str),
             expected
+        );
+    }
+
+    #[test]
+    fn kitty_graphics_capability_tracks_pane_renderer() {
+        let mut cmd = CommandBuilder::new("shell");
+        cmd.env(crate::HERDR_KITTY_GRAPHICS_ENV_VAR, "inherited");
+        cmd.env("UNRELATED", "kept");
+
+        apply_kitty_graphics_capability_env(&mut cmd, true);
+        assert_eq!(
+            cmd.get_env(crate::HERDR_KITTY_GRAPHICS_ENV_VAR)
+                .and_then(std::ffi::OsStr::to_str),
+            Some(crate::HERDR_ENV_VALUE)
+        );
+        assert_eq!(
+            cmd.get_env("UNRELATED").and_then(std::ffi::OsStr::to_str),
+            Some("kept")
+        );
+
+        apply_kitty_graphics_capability_env(&mut cmd, false);
+        assert!(cmd.get_env(crate::HERDR_KITTY_GRAPHICS_ENV_VAR).is_none());
+        assert_eq!(
+            cmd.get_env("UNRELATED").and_then(std::ffi::OsStr::to_str),
+            Some("kept")
+        );
+    }
+
+    #[test]
+    fn pane_launch_env_reserves_kitty_graphics_capability() {
+        let mut cmd = CommandBuilder::new("shell");
+        let launch_env = PaneLaunchEnv::from_extra(vec![
+            (crate::HERDR_KITTY_GRAPHICS_ENV_VAR.into(), "hostile".into()),
+            ("UNRELATED".into(), "kept".into()),
+        ]);
+
+        apply_pane_launch_env(&mut cmd, &launch_env);
+
+        assert_ne!(
+            cmd.get_env(crate::HERDR_KITTY_GRAPHICS_ENV_VAR)
+                .and_then(std::ffi::OsStr::to_str),
+            Some("hostile")
+        );
+        assert_eq!(
+            cmd.get_env("UNRELATED").and_then(std::ffi::OsStr::to_str),
+            Some("kept")
         );
     }
 
