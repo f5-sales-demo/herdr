@@ -42,7 +42,7 @@ class DownstreamReleaseWorkflowTests(unittest.TestCase):
         self.assertIn('actual_arch="$(lipo -archs "${{ matrix.artifact }}")"', self.workflow)
         self.assertNotIn("scripts/macos_arch.py", self.workflow)
 
-    def test_only_manual_ci_completion_admits_an_automatic_release(self) -> None:
+    def test_green_push_or_manual_ci_completion_admits_an_automatic_release(self) -> None:
         prepare_guard = re.search(
             r"(?ms)^  prepare:\n    if: >-\n(?P<guard>.+?)^    runs-on:",
             self.workflow,
@@ -50,7 +50,9 @@ class DownstreamReleaseWorkflowTests(unittest.TestCase):
         self.assertIsNotNone(prepare_guard)
         guard = prepare_guard.group("guard")
         self.assertIn("github.event.workflow_run.event == 'workflow_dispatch'", guard)
-        self.assertNotIn("github.event.workflow_run.event == 'push'", guard)
+        self.assertIn("github.event.workflow_run.event == 'push'", guard)
+        self.assertIn("github.event.workflow_run.conclusion == 'success'", guard)
+        self.assertNotIn("github.event.workflow_run.event == 'pull_request'", guard)
 
     def test_existing_tag_recovery_separates_payload_and_tooling_pins(self) -> None:
         self.assertIn(
