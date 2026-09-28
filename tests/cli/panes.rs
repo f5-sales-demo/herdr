@@ -539,7 +539,7 @@ fn pane_shell_gets_herdr_socket_and_pane_env() {
             "run",
             "1-1",
             &format!(
-                "printf '%s\\n%s\\n' \"$HERDR_SOCKET_PATH\" \"$HERDR_PANE_ID\" > {}",
+                "printf '%s\\n%s\\n%s\\n' \"$HERDR_SOCKET_PATH\" \"$HERDR_PANE_ID\" \"$HERDR_KITTY_GRAPHICS\" > {}",
                 env_capture.display()
             ),
         ],
@@ -563,6 +563,7 @@ fn pane_shell_gets_herdr_socket_and_pane_env() {
         "env file was: {text:?}"
     );
     assert!(text.contains(&pane_id), "env file was: {text:?}");
+    assert_eq!(text.lines().nth(2), Some("1"), "env file was: {text:?}");
 
     cleanup_spawned_herdr(herdr, base);
 }
