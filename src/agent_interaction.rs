@@ -645,7 +645,7 @@ fn validate_report(params: &InteractionReportParams) -> Result<(), String> {
                 if payload
                     .get("isBlocking")
                     .and_then(serde_json::Value::as_bool)
-                    != Some(true)
+                    .is_none()
                     || !payload
                         .get("autoResolutionMs")
                         .is_some_and(serde_json::Value::is_null)
@@ -1161,6 +1161,14 @@ mod tests {
             "autoResolutionMs": null
         });
         assert!(validate_report(&waiting).is_ok());
+        waiting.payload["isBlocking"] = serde_json::json!(false);
+        assert!(validate_report(&waiting).is_ok());
+        waiting.payload["isBlocking"] = serde_json::json!("false");
+        assert_eq!(
+            validate_report(&waiting),
+            Err("interaction_invalid_waiting_payload".into())
+        );
+        waiting.payload["isBlocking"] = serde_json::json!(true);
         waiting.payload["autoResolutionMs"] = serde_json::json!(1000);
         assert_eq!(
             validate_report(&waiting),
