@@ -758,13 +758,15 @@ fn validate_answer(
             let questions = report.payload["questions"]
                 .as_array()
                 .expect("validated waiting questions");
-            if answers.len() != report.question_ids.len() {
+            if answers.keys().any(|id| !report.question_ids.contains(id)) {
                 return Err("interaction_invalid_waiting_answer".into());
             }
             for (index, id) in report.question_ids.iter().enumerate() {
-                let entries = answers
-                    .get(id)
-                    .and_then(serde_json::Value::as_object)
+                let Some(answer) = answers.get(id) else {
+                    continue;
+                };
+                let entries = answer
+                    .as_object()
                     .filter(|entry| entry.len() == 1)
                     .and_then(|entry| entry.get("answers"))
                     .and_then(serde_json::Value::as_array)
@@ -836,6 +838,35 @@ mod tests {
     fn path() -> PathBuf {
         std::env::temp_dir().join(format!("herdr-interaction-{}.json", uuid::Uuid::new_v4()))
     }
+    #[test]
+    fn waiting_answers_preserve_empty_and_partial_codex_responses() {
+        let mut waiting = report();
+        waiting.kind = InteractionKind::Waiting;
+        waiting.question_ids = vec!["first".into(), "second".into()];
+        waiting.payload = serde_json::json!({
+            "questions": [
+                {"id":"first", "options":[{"label":"Compact"}], "isOther":true},
+                {"id":"second", "options":[{"label":"Expanded"}], "isOther":true}
+            ],
+            "isBlocking": false,
+            "autoResolutionMs": null
+        });
+        for answer in [
+            serde_json::json!({"answers":{}}),
+            serde_json::json!({"answers":{"first":{"answers":["Compact"]}}}),
+            serde_json::json!({"answers":{"second":{"answers":[]}}}),
+        ] {
+            assert!(validate_answer(&waiting, &answer).is_ok());
+        }
+        for answer in [
+            serde_json::json!({"answers":{"unknown":{"answers":[]}}}),
+            serde_json::json!({"answers":{"first":{"answers":[3]}}}),
+            serde_json::json!({"answers":{"first":{"answers":[],"extra":true}}}),
+        ] {
+            assert!(validate_answer(&waiting, &answer).is_err());
+        }
+    }
+
     #[test]
     fn queued_delivery_is_private_and_only_acknowledgement_accepts() {
         let file = path();
