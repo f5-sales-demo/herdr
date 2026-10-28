@@ -2112,4 +2112,41 @@ scrollback_lines = 12345
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.advanced.scrollback_limit_bytes, 12345);
     }
+
+    #[test]
+    fn fork_admission_and_resume_args_survive_config_round_trip() {
+        let source = r#"
+[agent_admission]
+max_in_flight = 3
+
+[agent_admission.provider_limits]
+openai = 1
+anthropic = 2
+
+[session.resume_agent_args]
+xcsh = ["--model", "a model with spaces", "--read-only"]
+codex = ["--sandbox", "workspace-write"]
+"#;
+        let config: Config = toml::from_str(source).unwrap();
+        let table: toml::Value = toml::from_str(source).unwrap();
+        let serialized = toml::to_string(&table).unwrap();
+        let restored: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(restored.agent_admission.max_in_flight, 3);
+        assert_eq!(
+            restored.agent_admission.provider_limits.get("openai"),
+            Some(&1)
+        );
+        assert_eq!(
+            restored.agent_admission.provider_limits.get("anthropic"),
+            Some(&2)
+        );
+        assert_eq!(
+            restored.session.resume_agent_args,
+            config.session.resume_agent_args
+        );
+        assert_eq!(
+            restored.session.resume_agent_args["xcsh"][1],
+            "a model with spaces"
+        );
+    }
 }
