@@ -882,6 +882,18 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "argv"):
                 self.broker.db.admit_native_generation(first["id"], 0, changed)
 
+    async def test_native_admission_replay_retains_durable_public_binding(self):
+        workspace = await self.configure_control_workspace()
+        params = {"target": "binding-replay", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
+            "text": "safe", "workspace_id": workspace["workspace"]["workspace_id"],
+            "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"},
+            "idempotency_key": "binding-replay"}
+        first = await self.admit_native_xcsh(params)
+        replay = await self.admit_native_xcsh(params)
+        self.assertEqual(replay["native_executable"], first["native_executable"])
+        self.assertEqual(replay["native_launch"], first["native_launch"])
+        self.assertFalse(replay.get("admission_uncertain", False))
+
     async def test_await_user_continuation_reply_loss_replays_managed_generation(self):
         self.native_launch = self.native_launch | {"lifecycle_mode": "await_user_v1", "interactive": True}
         await self.test_xcsh_lost_continuation_response_reconciles_same_generation()

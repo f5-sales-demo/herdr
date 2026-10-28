@@ -382,6 +382,14 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
     prompt = case["prompt"].replace("{fixture_path}", fixture["path"])
     if controller is None:
         raise PreflightError("installed execution requires an authenticated controller-owned xcsh session")
+    case_key = f"installed-xcsh-uat:{run_id}:{case['id']}"
+    case_spec = hashlib.sha256(json.dumps({"runtime": runtime, "artifacts": manifest["artifacts"], "case": case}, sort_keys=True).encode()).hexdigest()
+    saved = controller.load_case_state(case_key, case_spec) if hasattr(controller, "load_case_state") else {}
+    if saved.get("final_receipt") is not None:
+        return saved["final_receipt"]
+    def persist() -> None:
+        if hasattr(controller, "save_case_state"):
+            controller.save_case_state(case_key, case_spec, saved)
     try:
         session_args = (Path(runtime["xcsh_executable"]), runtime["xcsh_executable_sha256"],
                         Path(runtime.get("cwd", "/")),
@@ -413,29 +421,68 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
         }
     except Exception as exc:
         raise PreflightError(f"controller could not create a measured xcsh session: {exc}") from exc
-    task = unix_request(broker_socket, "native_xcsh_admit", {
-        "target": "xcsh-native-uat", "cwd": runtime.get("cwd", "/isolated/xcsh-native-uat"),
-        "priority": "routine", "prompt": case["prompt"], "text": prompt,
-        "session_id": session_id, "workspace_id": runtime["workspace_id"], "native_launch": native_launch,
-        "xcsh_executable_sha256": executable_sha256,
-        "runtime_identity": ({f"{name}_artifact": artifact_id(manifest["artifacts"][name], name) for name in ("xcsh", "herdr", "manager")}
-                             | {"xcsh_model": model}),
-        "idempotency_key": f"installed-xcsh-uat:{run_id}:{case['id']}",
-    })
+    task = saved.get("initial_task")
+    if task is None:
+        task = unix_request(broker_socket, "native_xcsh_admit", {
+            "target": "xcsh-native-uat", "cwd": runtime.get("cwd", "/isolated/xcsh-native-uat"),
+            "priority": "routine", "prompt": case["prompt"], "text": prompt,
+            "session_id": session_id, "workspace_id": runtime["workspace_id"], "native_launch": native_launch,
+            "xcsh_executable_sha256": executable_sha256,
+            "runtime_identity": ({f"{name}_artifact": artifact_id(manifest["artifacts"][name], name) for name in ("xcsh", "herdr", "manager")}
+                                 | {"xcsh_model": model}),
+            "idempotency_key": f"installed-xcsh-uat:{run_id}:{case['id']}",
+        })
     if task.get("native_executable") != {"canonical_path": executable, "sha256": executable_sha256}:
         raise PreflightError("broker admission did not return the measured native executable binding")
-    if task.get("state") == "unknown":
+    if task.get("state") == "unknown" or task.get("admission_uncertain"):
         raise PreflightError("native_xcsh_admit returned uncertain launch; reuse the same run_id after reconciliation, never create another task")
+    if saved.get("initial_task") is None:
+        if task.get("run_generation", 0) != 0:
+            raise PreflightError("replayed run lacks its original generation-zero admission receipt")
+        saved["initial_task"] = task
+        persist()
     if controller is not None:
         try:
             controller.register_execution(task)
         except Exception as exc:
             raise PreflightError(f"controller could not bind exact broker execution admission: {exc}") from exc
-    bindings = {0: admission_binding(task, session_id)}
-    records: list[dict[str, Any]] = []
-    cursor, continued, cancelled, controlled = 0, False, False, False
-    control_receipt: dict[str, Any] | None = None
-    causal_before: int | None = None
+    bindings = {int(g): b for g, b in saved.get("bindings", {0: admission_binding(task, session_id)}).items()}
+    records: list[dict[str, Any]] = saved.get("records", [])
+    cursor = saved.get("cursor", 0)
+    continued, cancelled, controlled = (saved.get(key, False) for key in ("continued", "cancelled", "controlled"))
+    control_receipt: dict[str, Any] | None = saved.get("control_receipt")
+    causal_before: int | None = saved.get("causal_before")
+    def checkpoint() -> None:
+        saved.update(bindings=bindings, records=records, cursor=cursor, continued=continued,
+                     cancelled=cancelled, controlled=controlled, control_receipt=control_receipt, causal_before=causal_before)
+        persist()
+    def continuation() -> dict[str, Any]:
+        nonlocal continued
+        saved["continuation_claimed"] = True
+        checkpoint()
+        receipt = unix_request(broker_socket, "continue_task", {"task_id": task["id"], "text": prompt})
+        generation = receipt.get("run_generation")
+        if (receipt.get("admission_uncertain") or not isinstance(generation, int)
+                or generation != max(bindings) + 1 or receipt.get("id") != task["id"]):
+            raise PreflightError("continuation lacks authoritative generation receipt; reconcile the same run")
+        bindings[generation] = admission_binding(receipt, session_id)
+        continued = True
+        saved["continuation_claimed"] = False
+        saved["continuation_receipt"] = receipt
+        checkpoint()
+        return receipt
+    if saved.get("continuation_claimed") and not continued:
+        if case["id"] != "continuation":
+            raise PreflightError("controlled action outcome requires authoritative controller reconciliation")
+        continuation()
+    if case["id"] == "generation_supersession" and continued and control_receipt is None:
+        control_receipt = controller.real_action("generation_supersession", task["pane_id"],
+            f"{run_id}:{case['id']}:continue", controller.token,
+            lambda: (_ for _ in ()).throw(AssertionError("recovery cannot create another continuation effect")))
+        assert_controller_identity(control_receipt, task)
+        if control_receipt.get("effect", {}).get("broker_task_id") != task["id"]:
+            raise PreflightError("recovered controller receipt is not bound to the admitted execution")
+    checkpoint()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         fresh, cursor = _journal_for_task(herdr_socket, task["id"], cursor)
@@ -455,19 +502,12 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
                         or not isinstance(observed.get("native_event_revision"), int)
                         or observed["native_event_revision"] < latest.get("event_revision", 0)):
                     raise PreflightError("native consumer did not durably apply the observed semantic transition")
+        checkpoint()
         states = [state for _, state in semantic_trace(records)]
         current_reports = [item.get("report", item) for item in records
                            if item.get("report", item).get("generation") == max(bindings)]
         current_state = current_reports[-1].get("state") if current_reports else None
         if current_state == "waiting_input" and case["id"] in {"continuation", "generation_supersession"} and not continued:
-            def continuation() -> dict[str, Any]:
-                receipt = unix_request(broker_socket, "continue_task", {"task_id": task["id"], "text": prompt})
-                generation = receipt.get("run_generation")
-                if (receipt.get("admission_uncertain") or not isinstance(generation, int)
-                        or generation != max(bindings) + 1 or receipt.get("id") != task["id"]):
-                    raise PreflightError("continuation lacks authoritative generation receipt")
-                bindings[generation] = admission_binding(receipt, session_id)
-                return receipt
             if case["id"] == "generation_supersession":
                 control_receipt = controller.real_action("generation_supersession", task["pane_id"],
                     f"{run_id}:{case['id']}:continue", controller.token, continuation)
@@ -483,9 +523,11 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
             else:
                 continuation()
             continued = True
+            checkpoint()
         if states and states[-1] == "working" and case["id"] == "cancel" and not cancelled:
             unix_request(broker_socket, "request_stop", {"task_id": task["id"]})
             cancelled = True
+            checkpoint()
         if states and states[-1] == "working" and case["id"] == "reconnect_replay" and not controlled:
             causal_before = max([0] + [int(item.get("revision", 0)) for item in records])
             control_receipt = controller.real_action("reconnect_replay", task["pane_id"],
@@ -493,6 +535,7 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
             assert_controller_identity(control_receipt, task)
             require_causal_action(control_receipt, kind="reconnect_replay", task=task, records_before=records)
             controlled = True
+            checkpoint()
         if states and states[-1] == "working" and case["id"] == "restart_loss" and not controlled:
             causal_before = max([0] + [int(item.get("revision", 0)) for item in records])
             control_receipt = controller.real_action("restart_loss", task["pane_id"],
@@ -509,7 +552,10 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
         if trace_matches(case, records) and current_state == "waiting_input":
             observed = unix_request(broker_socket, "status", {"task_id": task["id"]})["tasks"][0]
             validate_journal(case, records, observed, None, fixture=fixture, bindings=bindings)
-            return {"scenario_id": case["id"], "task_id": task["id"], "pass": True, "evidence_class": "installed_waiting_input"}
+            receipt = {"scenario_id": case["id"], "task_id": task["id"], "pass": True, "evidence_class": "installed_waiting_input"}
+            saved["final_receipt"] = receipt
+            checkpoint()
+            return receipt
         if current_state in {"completed", "failed", "cancelled", "lost", "interrupted"}:
             if trace_matches(case, records) or current_state != case["expected_states"][-1]:
                 break
@@ -550,9 +596,12 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
         control_receipt = wait_for_manager_cleanup(broker_socket, herdr_socket, task, deadline)
     if case["id"] in controlled_cases and control_receipt is None:
         raise PreflightError("required isolated controller action produced no authoritative receipt")
-    return {"scenario_id": case["id"], "task_id": task["id"], "pass": True, "accepted": False,
+    receipt = {"scenario_id": case["id"], "task_id": task["id"], "pass": True, "accepted": False,
             "session_receipt": session_receipt, "controller_receipt": control_receipt,
             "evidence_class": "installed_runtime_pending_gate"}
+    saved["final_receipt"] = receipt
+    checkpoint()
+    return receipt
 
 
 def execute(manifest: dict[str, Any], catalog: dict[str, Any], *, run_id: str | None = None,

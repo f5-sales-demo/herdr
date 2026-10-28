@@ -3,6 +3,22 @@ from pathlib import Path
 from xcsh_isolated_uat_controller import ControllerError, DisposableHerdrController, IsolatedController
 
 class ControllerTests(unittest.TestCase):
+ def test_case_state_survives_reopen_and_rejects_changed_specification(self):
+  with tempfile.TemporaryDirectory() as raw:
+   root=Path(raw); binary=root/'herdr'; binary.write_bytes(b'fixture')
+   own={'session_id':'xcsh-uat-a','service_id':'xcsh-uat-a','workspace_id':'w1','pane_ids':['p1']}
+   state={'initial_task':{'id':'e1'},'bindings':{'0':{'pane_id':'p1'}},'cursor':7}
+   c=DisposableHerdrController(root/'actions.sqlite',own,'token',binary)
+   self.assertEqual(c.load_case_state('same-run','original-spec'),{})
+   c.save_case_state('same-run','original-spec',state); c.close()
+   c=DisposableHerdrController(root/'actions.sqlite',own,'token',binary)
+   self.assertEqual(c.load_case_state('same-run','original-spec'),state)
+   for operation in (lambda: c.load_case_state('same-run','changed-spec'),
+                     lambda: c.save_case_state('same-run','changed-spec',{})):
+    with self.assertRaisesRegex(ControllerError,'immutable run specification'): operation()
+   self.assertEqual(c.load_case_state('same-run','original-spec'),state)
+   c.close()
+
  def test_session_replay_preserves_header_before_execution_admission(self):
   import json
   with tempfile.TemporaryDirectory() as raw:

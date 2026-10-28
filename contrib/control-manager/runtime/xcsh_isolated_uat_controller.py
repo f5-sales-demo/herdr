@@ -219,6 +219,20 @@ class DisposableHerdrController(IsolatedController):
                 "xcsh_executable": str(xcsh_binary.resolve()),
                 "xcsh_executable_sha256": hashlib.sha256(xcsh_binary.read_bytes()).hexdigest()}
 
+    def load_case_state(self, key: str, spec_sha256: str) -> dict[str, Any]:
+        self.conn.execute("CREATE TABLE IF NOT EXISTS uat_cases(key TEXT PRIMARY KEY, spec_sha256 TEXT NOT NULL, state TEXT NOT NULL)")
+        prior = self.conn.execute("SELECT spec_sha256, state FROM uat_cases WHERE key=?", (key,)).fetchone()
+        if prior is None:
+            return {}
+        if prior["spec_sha256"] != spec_sha256:
+            raise ControllerError("case replay conflicts with immutable run specification")
+        return json.loads(prior["state"])
+
+    def save_case_state(self, key: str, spec_sha256: str, state: dict[str, Any]) -> None:
+        self.load_case_state(key, spec_sha256)
+        self.conn.execute("INSERT INTO uat_cases VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET state=excluded.state",
+                          (key, spec_sha256, json.dumps(state, sort_keys=True)))
+
     def session_for_run(self, key: str, xcsh_binary: Path, expected_sha256: str, cwd: Path,
                         session_dir: Path) -> dict[str, Any]:
         """Persist a measured session before any execution claim can occur."""

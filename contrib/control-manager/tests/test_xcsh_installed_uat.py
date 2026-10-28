@@ -22,6 +22,100 @@ def manifest():
 
 
 class InstalledPromptUatTests(unittest.TestCase):
+    def test_execute_case_recovers_lost_continuation_and_replays_completed_run(self):
+        self._check_case_recovery("continuation")
+
+    def test_execute_case_recovers_completed_supersession_without_another_effect(self):
+        self._check_case_recovery("generation_supersession")
+
+    def _check_case_recovery(self, case_id):
+        from unittest.mock import patch
+        import xcsh_installed_uat as driver
+        from xcsh_isolated_uat_controller import IsolatedController
+        case = next(case for case in json.loads(CATALOG.read_text())["scenarios"] if case["id"] == case_id)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); candidate = self.prepared_manifest(root)
+            counts = {"sessions": 0, "admissions": 0, "continuation_calls": 0, "continuation_effects": 0}
+            current_generation = 0
+            lose_response = True
+            session_id = "0123abcd4567ef89"
+            result = candidate["runtime"]["fixture"]["value"]
+            state_file = root / "case-state.json"
+            session_file = root / "session-receipt.json"
+            class Controller:
+                token = "synthetic"
+                def real_action(self, kind, pane, key, token, external):
+                    nonlocal lose_response
+                    controller = IsolatedController(root / "actions.sqlite", {
+                        "session_id": "xcsh-uat-synthetic", "service_id": "xcsh-uat-synthetic",
+                        "workspace_id": "w-isolated", "pane_ids": ["pane-0"]}, token)
+                    try:
+                        controller.register_execution(task(0))
+                        def hook(kind, target):
+                            nonlocal lose_response
+                            receipt = external()
+                            return {"kind": kind, "session_id": target["session_id"],
+                                    "pane_id": pane, "effect": {"broker_task_id": receipt["id"]}}
+                        receipt = controller.act(kind, pane, key, token, hook)
+                        if lose_response:
+                            lose_response = False
+                            raise RuntimeError("lost completed controller response after effect")
+                        return receipt
+                    finally:
+                        controller.close()
+                def load_case_state(self, key, spec):
+                    return json.loads(state_file.read_text()) if state_file.exists() else {}
+                def save_case_state(self, key, spec, state): state_file.write_text(json.dumps(state))
+                def session_for_run(self, key, *_):
+                    if session_file.exists(): return json.loads(session_file.read_text())
+                    counts["sessions"] += 1
+                    receipt = {"session_id": session_id, "session_dir": "/synthetic", "session_path": "/synthetic/session.jsonl",
+                               "session_header": {"id": session_id, "sha256": "a"*64},
+                               "xcsh_executable": "/isolated/xcsh", "xcsh_executable_sha256": "a"*64}
+                    session_file.write_text(json.dumps(receipt)); return receipt
+                def register_execution(self, task):
+                    self.assert_gen_zero = task["pane_id"] == "pane-0"
+                    if not self.assert_gen_zero: raise AssertionError("current pane mislabeled as generation zero")
+            task = lambda generation: {"id": "task-1", "pane_id": f"pane-{generation}", "tab_id": f"tab-{generation}",
+                "workspace_id": "w-isolated", "agent_session_id": session_id, "run_generation": generation, "state": "completed" if generation else "starting"}
+            records = []
+            ev = {0: 0, 1: 0}
+            for revision, (generation, state) in enumerate([(0,"starting"),(0,"working"),(0,"waiting_input"),
+                    (0,"working"),(0,"cancelled"),(1,"starting"),(1,"working"),(1,"working"),(1,"completed")], 1):
+                ev[generation] += 1
+                report = {"execution_id":"task-1","producer":"xcsh","session_id":session_id,"pane_id":f"pane-{generation}",
+                          "turn_id":f"turn-{generation}","generation":generation,"event_revision":ev[generation],"state":state}
+                if state=="cancelled": report["reason"]="superseded"
+                if state=="completed": report |= {"result":result,"result_digest":hashlib.sha256(result.encode()).hexdigest()}
+                records.append({"revision":revision,"report":report})
+            def broker(path, method, params):
+                nonlocal current_generation, lose_response
+                if method=="native_xcsh_admit":
+                    counts["admissions"] += 1
+                    return task(current_generation) | {"native_executable":{"canonical_path":"/isolated/xcsh","sha256":"a"*64},"native_launch":params["native_launch"]}
+                if method=="continue_task":
+                    counts["continuation_calls"] += 1
+                    if not current_generation:
+                        current_generation=1; counts["continuation_effects"] += 1
+                    if lose_response and case_id == "continuation":
+                        lose_response=False; raise RuntimeError("lost continuation response after effect")
+                    return task(1)
+                if method=="consume_native_turns": return {"applied":[{"task_id":"task-1","state":"completed" if current_generation else "waiting_human"}]}
+                if method=="status": return {"tasks":[task(current_generation)],"pending_completions":[{"task_id":"task-1","delivery_state":"consumed"}]}
+                raise AssertionError(method)
+            def herdr(path, method, params):
+                if method=="agent.turn.list": return {"turns":[r for r in records[:9 if current_generation else 3] if r["revision"]>params["since_revision"]]}
+                raise AssertionError(method)
+            with patch.object(driver,"unix_request",side_effect=broker), patch.object(driver,"herdr_request",side_effect=herdr):
+                with self.assertRaisesRegex(RuntimeError,"lost .* response"):
+                    execute_case(candidate,case,run_id="same-run",controller=Controller())
+                recovered = execute_case(candidate,case,run_id="same-run",controller=Controller())
+                replay = execute_case(candidate,case,run_id="same-run",controller=Controller())
+            self.assertEqual(recovered,replay)
+            self.assertTrue(recovered["pass"])
+            self.assertEqual(counts,{"sessions":1,"admissions":1,
+                "continuation_calls":2 if case_id == "continuation" else 1,"continuation_effects":1})
+
     def test_generation_oracle_retains_binding_and_distinct_progress_events(self):
         case = next(case for case in json.loads(CATALOG.read_text())["scenarios"] if case["id"] == "continuation")
         states = [(0, "starting"), (0, "working"), (0, "waiting_input"), (0, "working"),

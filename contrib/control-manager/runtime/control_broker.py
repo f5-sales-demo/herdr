@@ -2735,7 +2735,14 @@ class Broker:
         existing = self._idempotent_admission("native_xcsh_admit", params)
         if existing is not None:
             await self._reconcile_native_xcsh_admissions(existing["id"])
-            return public_task(self.db.task(existing["id"])) | {"admitted": False, "idempotency_replayed": True}  # type: ignore[arg-type]
+            task = self.db.task(existing["id"])
+            binding = self.db.current_native_generation(existing["id"])
+            result = public_task(task) | {"admitted": False, "idempotency_replayed": True}
+            if binding is not None:
+                result |= self._native_xcsh_public_binding(binding)
+            if binding is None or binding["backend_execution_id"] is None:
+                result["admission_uncertain"] = True
+            return result
         target = bounded(params.get("target"), 64, "target", required=True)
         if not TARGET_RE.fullmatch(target or ""):
             raise ValueError("target must match task target rules")
