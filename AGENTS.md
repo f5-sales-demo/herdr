@@ -159,6 +159,11 @@ The website build runs `website/scripts/prepare-docs.mjs`. It keeps stable docs 
 
 During release review, finalize `docs/next` and run `just release-docs-check`. Do not copy next docs into the stable website manually. After the GitHub Release succeeds, release CI snapshots the tagged next docs, promotes them to stable, updates `latest.json`, and deploys them together. Normal feature/fix work should not edit root `README.md`, root `CHANGELOG.md`, stable website docs, or `website/latest.json` unless explicitly requested.
 
+This fork maintains English documentation only. Do not edit Japanese or Chinese
+locale trees as part of development or release preparation. `just release-docs-check`
+validates the maintained English docs; the separate localization process can run
+`just translation-docs-check` when reconciling locales.
+
 Put local PRDs, planning notes, and exploratory specs under `.local/prd/`; `.local/` is ignored and locally controlled.
 
 ## Commit Style

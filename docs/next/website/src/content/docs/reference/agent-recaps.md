@@ -2,7 +2,7 @@
 title: Agent recaps
 ---
 
-Protocol 27 advertises `agent_recaps: 1` in the `ping` capabilities object. Agents may report a short recap of their current conversation without changing their lifecycle state. Herdr stores the recap in a bounded journal for its named server session, replays it after restart, and shows the latest recap for an agent's current session in `agent.get`, `herdr agent get`, `herdr agent recap get`, and the agent sidebar.
+Protocol 28 advertises `agent_recaps: 1` in the `ping` capabilities object. Agents may report a short recap of their current conversation without changing their lifecycle state. Herdr stores the recap in a bounded journal for its named server session, replays it after restart, and shows the latest recap for an agent's current session in `agent.get`, `herdr agent get`, `herdr agent recap get`, and the agent sidebar.
 
 The producer calls `agent.recap.report` with:
 

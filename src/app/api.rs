@@ -7,7 +7,6 @@ mod env;
 mod executions;
 mod integrations;
 mod layouts;
-mod pane_graphics;
 mod panes;
 pub(crate) mod plugins;
 pub(super) mod responses;
@@ -41,6 +40,14 @@ impl App {
                 segment_index,
                 result,
             } => self.handle_tab_bar_command_finished(generation, segment_index, result),
+            AppEvent::WorktreeReadFinished(result) => {
+                let changes_workspace = matches!(
+                    &result.request.method,
+                    crate::api::schema::Method::WorktreeOpen(_)
+                );
+                self.handle_api_worktree_read_finished(*result);
+                changes_workspace
+            }
             ev @ AppEvent::TerminalBell { .. } => {
                 self.handle_internal_event(ev);
                 false
@@ -139,6 +146,34 @@ impl App {
             return Vec::new();
         }
 
+        if let AppEvent::RestoredWorktreeSpaceChecked {
+            workspace_id,
+            expected,
+            valid,
+        } = ev
+        {
+            self.pending_restored_worktree_spaces
+                .retain(|(id, space)| id != &workspace_id || space != &expected);
+            let changed_workspace = (!valid)
+                .then(|| {
+                    self.state.workspaces.iter().position(|workspace| {
+                        workspace.id == workspace_id
+                            && workspace.worktree_space.as_ref() == Some(&expected)
+                    })
+                })
+                .flatten();
+            self.state
+                .handle_app_event(AppEvent::RestoredWorktreeSpaceChecked {
+                    workspace_id,
+                    expected,
+                    valid,
+                });
+            if let Some(ws_idx) = changed_workspace {
+                self.emit_workspace_updated(ws_idx);
+            }
+            return Vec::new();
+        }
+
         if let AppEvent::TabBarCommandFinished {
             generation,
             segment_index,
@@ -177,6 +212,11 @@ impl App {
                     crate::api::schema::PluginCommandStatus::Failed
                 };
             }
+            return Vec::new();
+        }
+
+        if let AppEvent::WorktreeReadFinished(result) = ev {
+            self.handle_api_worktree_read_finished(*result);
             return Vec::new();
         }
 
@@ -255,7 +295,10 @@ impl App {
             AppEvent::PaneDied {
                 pane_id,
                 exit_reason,
-            } if exit_reason.requires_session_checkpoint() && self.find_pane(*pane_id).is_some() && !self.overlay_panes.contains_key(pane_id)
+            } if (exit_reason.requires_session_checkpoint()
+                || (*exit_reason == crate::platform::ChildExitReason::Exited
+                    && (self.server_hangup_probe)()))
+                && self.find_pane(*pane_id).is_some() && !self.overlay_panes.contains_key(pane_id)
         );
         if checkpointed_pane_exit {
             self.checkpoint_session_before_pane_exit();
@@ -335,7 +378,58 @@ impl App {
             };
         let terminal_cwd_reported = matches!(ev, AppEvent::TerminalCwdReported { .. });
         let previous_toast = self.state.toast.clone();
+        let retired_admission = match &ev {
+            AppEvent::PaneDied { pane_id, .. } => self.find_pane(*pane_id).and_then(|(ws, _)| {
+                self.public_pane_id(ws, *pane_id)
+                    .map(|public| (*pane_id, public))
+            }),
+            AppEvent::AgentProcessDetected { pane_id, .. }
+            | AppEvent::StateChanged {
+                pane_id,
+                process_exited: true,
+                ..
+            }
+            | AppEvent::ReportedAgentShellReturned { pane_id, .. } => {
+                self.find_pane(*pane_id).and_then(|(ws, _)| {
+                    let terminal_id = self.state.terminal_id_for_pane(ws, *pane_id)?;
+                    let terminal = self.state.terminals.get(&terminal_id)?;
+                    (!terminal.full_lifecycle_hook_authority_active())
+                        .then(|| {
+                            self.public_pane_id(ws, *pane_id)
+                                .map(|public| (*pane_id, public))
+                        })
+                        .flatten()
+                })
+            }
+            _ => None,
+        };
+        let changed_session_admission = if let AppEvent::AgentSessionReported { pane_id, .. } = &ev
+        {
+            self.find_pane(*pane_id).and_then(|(ws, _)| {
+                self.agent_info(ws, *pane_id)
+                    .map(|info| (ws, *pane_id, info.agent_session))
+            })
+        } else {
+            None
+        };
         let mut pane_updates = self.state.handle_app_event(ev);
+        if let Some((raw_pane, pane_id)) = retired_admission {
+            if pane_updates.iter().any(|update| update.pane_id == raw_pane)
+                || self.parse_pane_id(&pane_id).is_none()
+            {
+                self.cancel_agent_admission_for_panes(std::slice::from_ref(&pane_id));
+            }
+        }
+        if let Some((ws, pane, previous)) = changed_session_admission {
+            if self
+                .agent_info(ws, pane)
+                .is_some_and(|info| info.agent_session != previous)
+            {
+                if let Some(pane_id) = self.public_pane_id(ws, pane) {
+                    self.cancel_agent_admission_for_panes(std::slice::from_ref(&pane_id));
+                }
+            }
+        }
         for update in &pane_updates {
             if update.state != crate::detect::AgentState::Idle {
                 continue;
@@ -411,13 +505,26 @@ impl App {
             let Some(prompt) = self.queued_agent_prompts.remove(&request.id) else {
                 continue;
             };
+            let (handoff_tx, handoff_rx) =
+                std::sync::mpsc::channel::<std::sync::mpsc::Receiver<std::io::Result<()>>>();
+            if let Err(error) =
+                crate::thread_spawn::spawn_named("herdr-queued-agent-prompt", move || {
+                    let Ok(completion) = handoff_rx.recv() else {
+                        return;
+                    };
+                    if let Ok(Err(error)) = completion.recv() {
+                        tracing::warn!(%error, "queued agent prompt submission failed");
+                    }
+                })
+            {
+                tracing::warn!(%error, "could not start queued prompt completion waiter");
+                self.queued_agent_prompts.insert(request.id.clone(), prompt);
+                self.agent_admission.requeue_front(request);
+                continue;
+            }
             match self.queue_agent_prompt("agent-admission-release".to_owned(), prompt.clone()) {
                 Ok(agents::AgentPromptDispatch::Submitted { completion, .. }) => {
-                    std::thread::spawn(move || {
-                        if let Ok(Err(error)) = completion.recv() {
-                            tracing::warn!(%error, "queued agent prompt submission failed");
-                        }
-                    });
+                    let _ = handoff_tx.send(completion);
                 }
                 Ok(agents::AgentPromptDispatch::Queued { .. }) => {}
                 Err(_) => {
@@ -522,6 +629,7 @@ impl App {
                     runtime.set_full_lifecycle_authority_active(
                         terminal.full_lifecycle_hook_authority_active(),
                     );
+                    runtime.set_self_reported_agent_active(terminal.self_reported_agent_active());
                 }
             }
         }
@@ -625,7 +733,13 @@ impl App {
             .terminal_runtimes
             .get(&terminal_id)
             .map(|runtime| runtime.current_size())
-            .unwrap_or_else(|| self.state.estimate_pane_size());
+            .unwrap_or_else(|| {
+                self.state
+                    .new_pane_size(crate::ui::NewPanePlacement::Existing {
+                        ws_idx,
+                        pane: pane_id,
+                    })
+            });
         let Some(launch_env) = self.pane_launch_env(ws_idx, pane_id, Vec::new()) else {
             return false;
         };
@@ -637,7 +751,7 @@ impl App {
             cwd,
             self.state.pane_scrollback_limit_bytes,
             self.state.host_terminal_theme,
-            self.state.host_terminal_appearance,
+            self.pane_host_terminal_appearance(),
             crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
             &launch_env,
             self.event_tx.clone(),
@@ -975,6 +1089,13 @@ impl App {
                     result: ResponseResult::Ok {},
                 }
             }
+            Method::ServerSshAgentRegister(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "connection_local_only",
+                    "SSH agent registration requires a persistent local JSON API connection",
+                );
+            }
             Method::ServerLiveHandoff(_) => {
                 let response = ErrorResponse {
                     id: request.id,
@@ -1116,7 +1237,13 @@ impl App {
             Method::WorkspaceClose(target) => {
                 return self.handle_workspace_close(request.id, target);
             }
-            Method::WorktreeList(params) => return self.handle_worktree_list(request.id, params),
+            Method::WorktreeList(_) | Method::WorktreeOpen(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "invalid_request",
+                    "worktree discovery is handled asynchronously by the app runtime",
+                );
+            }
             Method::WorktreeCreate(params) => {
                 let _ = params;
                 return responses::encode_error(
@@ -1125,7 +1252,6 @@ impl App {
                     "worktree.create is handled asynchronously by the app runtime",
                 );
             }
-            Method::WorktreeOpen(params) => return self.handle_worktree_open(request.id, params),
             Method::WorktreeRemove(params) => {
                 let _ = params;
                 return responses::encode_error(
@@ -1204,6 +1330,7 @@ impl App {
             }
             Method::PaneResize(params) => return self.handle_pane_resize(request.id, params),
             Method::PaneScroll(params) => return self.handle_pane_scroll(request.id, params),
+            Method::PaneClear(target) => return self.handle_pane_clear(request.id, target),
             Method::PaneEditScrollback(target) => {
                 return self.handle_pane_edit_scrollback(request.id, target);
             }
@@ -1229,34 +1356,6 @@ impl App {
             }
             Method::PaneRename(params) => return self.handle_pane_rename(request.id, params),
             Method::PaneRead(params) => return self.handle_pane_read(request.id, params),
-            Method::PaneGraphicsSet(params) => {
-                return self.handle_pane_graphics_set(request.id, params);
-            }
-            Method::PaneGraphicsClear(params) => {
-                return self.handle_pane_graphics_clear(request.id, params);
-            }
-            Method::PaneGraphicsInfo(params) => {
-                return self.handle_pane_graphics_info(request.id, params);
-            }
-            Method::PaneGraphicsStream(_) => {
-                return responses::encode_error(
-                    request.id,
-                    "stream_transport_required",
-                    "pane.graphics.stream requires the streaming socket transport",
-                );
-            }
-            Method::PaneGraphicsStreamSet(params) => {
-                return self.handle_pane_graphics_stream_set(request.id, params);
-            }
-            Method::PaneGraphicsStreamDirect(params) => {
-                return self.handle_pane_graphics_stream_direct(request.id, params);
-            }
-            Method::PaneGraphicsStreamOpen(params) => {
-                return self.handle_pane_graphics_stream_open(request.id, params);
-            }
-            Method::PaneGraphicsStreamClose(params) => {
-                return self.handle_pane_graphics_stream_close(request.id, params);
-            }
             Method::PaneReportAgent(params) => {
                 return self.handle_pane_report_agent(request.id, params);
             }
@@ -1662,8 +1761,17 @@ mod tests {
             .attached_terminal_id
             .clone();
         let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        #[cfg(unix)]
+        let (runtime, _detection_events) = {
+            let mut runtime = runtime;
+            runtime.test_process_pty_bytes(b"shell prompt");
+            let events = runtime.test_start_basic_detection();
+            runtime.test_wait_for_detection_reads(1).await;
+            (runtime, events)
+        };
+        #[cfg(not(unix))]
         let reset_notify = runtime.agent_detection_reset_notify_for_test();
-        app.terminal_runtimes.insert(terminal_id, runtime);
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
 
         let response = app.handle_api_request(crate::api::schema::Request {
             id: "reload_manifests".into(),
@@ -1678,6 +1786,13 @@ mod tests {
             .unwrap()
             .is_empty());
 
+        #[cfg(unix)]
+        app.terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .test_wait_for_detection_reads(2)
+            .await;
+        #[cfg(not(unix))]
         tokio::time::timeout(
             std::time::Duration::from_millis(50),
             reset_notify.notified(),

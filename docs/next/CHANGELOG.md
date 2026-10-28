@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Breaking Changes
+- Standard Kitty graphics in pane terminal output replaces `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, and `pane.graphics.stream`. Removed methods return `unknown_method`. (#138)
+- Private client/server protocol 28 rejects protocol-27 peers. Use a fresh matching server or restart the affected server after installation; a running protocol-27 server cannot adopt the new binary in place. Endpoint generation remains 1. (#138)
+
+### Added
+- Configure multiple prefix keys and bind pane screen clearing separately from scrollback clearing. The Go To picker now includes every agent and terminal. (#138)
+- Agents can report their own resume commands, and restored agents can start with configurable spacing. Native xcsh resume provenance and configured resume arguments remain authoritative. (#138)
+- Inspect machine status and reconnect saved machines from the CLI. SSH setup discovers available hosts, defaults labels to host names, and reuses authentication. (#138)
+- Update managed plugins directly from GitHub. (#138)
+- Send mouse events through terminal session control and use actionable native Windows notifications. (#138)
+
+### Changed
+- Standard Kitty images stay loaded while offscreen, return when scrolling back, and crop around overlays. Retained rendering and bulk encoding reduce repeated terminal work. (#138)
+- Bundled agent guidance documents the current graphics, resume, lifecycle and worker-control interfaces. (#138)
+
+### Fixed
+- Preserve session layouts when panes exit during shutdown, retain unavailable worktree groups, and keep restoration responsive during slow Git discovery. Session saves finish before persisted files are replaced. (#138)
+- Keep servers alive after terminal hangups, transient accept errors and thread-spawn failures. Slow connections no longer cause valid server sockets to be treated as stale. (#138)
+- Recover endpoint connections after wake, retry a selected reconnecting machine promptly, and recover blocked shared SSH connections without losing workspace navigation or remote sidebar preferences. (#138)
+- Preserve quick Escape taps, literal plus bindings, Ctrl+Shift letters, non-Latin Ctrl shortcuts and Windows accent shortcuts. Keyboard protocol flags return after reconnect, and complete Windows input records survive paste. (#138)
+- Keep synchronized pane redraws atomic, reduce cursor flicker and interactive echo latency, and apply appearance changes after the matching terminal background. (#138)
+- Detect agent startup, completion, blocked dialogs, suspended sessions and wrapper launches more accurately. Codex retains session-only hooks and screen-based lifecycle detection. (#138)
+- Recognize Windows remote hosts before running POSIX scripts, preserve Windows shell working directories, and require explicit opt-in for cross-elevation local access. (#138)
+- Bound clipboard helpers so a hung clipboard service cannot freeze Herdr, preserve mouse capture while opening hyperlinks, and avoid redundant Windows clipboard history entries. (#138)
+- Native xcsh resume provenance remains authoritative over generic reported commands, and configured resume arguments remain attached to the selected command. (#138)
+- Pane/workspace closure releases admission capacity and discards queued prompts. Process/session replacement cannot inherit old queued mutations; completion waiters fail before released prompts are submitted. (#138)
+
+## [0.19.4] - 2026-10-07
+
 ### Added
 - Agent recaps are now retained across server restarts and shown for an agent's current session in the sidebar, `herdr agent get`, and `herdr agent recap get`. The `agent_recaps: 1` capability lets xcsh report them without changing turn status. (#122, #123)
 
@@ -9,7 +38,6 @@
 - The agent skill now includes focused guidance for external workers, automation, and remote sessions. (#118, #119)
 
 ### Fixed
-- Managed `herdr agent start --kind xcsh` launches now provide a unique ownership token, allowing xcsh to bind its terminal-management integration to the current workspace without weakening its fail-closed behavior. (#132)
 - Switching xcsh sessions now rebinds recap authority to the new session, so a previous session's recap is hidden and the next recap is accepted. (#124, #125)
 - External worker pairing now resolves a caller's current pane after that pane moves. (#120)
 

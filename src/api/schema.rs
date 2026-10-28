@@ -9,6 +9,7 @@ pub mod common;
 pub mod events;
 pub mod executions;
 pub mod integrations;
+pub(crate) mod operations;
 pub mod panes;
 pub mod plugins;
 pub mod response;
@@ -49,285 +50,137 @@ pub struct Request {
     pub method: Method,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(tag = "method", content = "params")]
-// Request enums are short-lived wire values; keeping variants direct preserves
-// the simple serde shape and avoids boxing churn across every caller.
-#[allow(clippy::large_enum_variant)]
-pub enum Method {
-    #[serde(rename = "ping")]
-    Ping(PingParams),
-    #[serde(rename = "server.stop")]
-    ServerStop(EmptyParams),
-    #[serde(rename = "server.live_handoff")]
-    ServerLiveHandoff(ServerLiveHandoffParams),
-    #[serde(rename = "server.reload_config")]
-    ServerReloadConfig(EmptyParams),
-    #[serde(rename = "server.agent_manifests")]
-    ServerAgentManifests(EmptyParams),
-    #[serde(rename = "server.reload_agent_manifests")]
-    ServerReloadAgentManifests(EmptyParams),
-    #[serde(rename = "worker_context.issue")]
-    WorkerContextIssue(WorkerContextIssueParams),
-    #[serde(rename = "worker_context.claim")]
-    WorkerContextClaim(WorkerContextClaimParams),
-    #[serde(rename = "worker_context.resolve")]
-    WorkerContextResolve(WorkerContextLeaseParams),
-    #[serde(rename = "worker_context.revoke")]
-    WorkerContextRevoke(WorkerContextLeaseParams),
-    #[serde(rename = "notification.show")]
-    NotificationShow(NotificationShowParams),
-    #[serde(rename = "product_announcement.dismiss")]
-    ProductAnnouncementDismiss(ProductAnnouncementDismissParams),
-    #[serde(rename = "release_notes.dismiss")]
-    ReleaseNotesDismiss(ReleaseNotesDismissParams),
-    #[serde(rename = "command.invoke")]
-    CommandInvoke(CommandInvokeParams),
-    #[serde(rename = "client.window_title.set")]
-    ClientWindowTitleSet(ClientWindowTitleSetParams),
-    #[serde(rename = "client.window_title.clear")]
-    ClientWindowTitleClear(EmptyParams),
-    #[serde(rename = "client_shell.surface.set")]
-    ClientShellSurfaceSet(ClientShellSurfaceSetParams),
-    #[serde(rename = "session.snapshot")]
-    SessionSnapshot(EmptyParams),
-    #[serde(rename = "workspace.create")]
-    WorkspaceCreate(WorkspaceCreateParams),
-    #[serde(rename = "workspace.list")]
-    WorkspaceList(EmptyParams),
-    #[serde(rename = "workspace.get")]
-    WorkspaceGet(WorkspaceTarget),
-    #[serde(rename = "workspace.focus")]
-    WorkspaceFocus(WorkspaceTarget),
-    #[serde(rename = "workspace.rename")]
-    WorkspaceRename(WorkspaceRenameParams),
-    #[serde(rename = "workspace.move")]
-    WorkspaceMove(WorkspaceMoveParams),
-    #[serde(rename = "workspace.move_block")]
-    WorkspaceMoveBlock(WorkspaceMoveBlockParams),
-    #[serde(rename = "workspace.report_metadata")]
-    WorkspaceReportMetadata(WorkspaceReportMetadataParams),
-    #[serde(rename = "workspace.close")]
-    WorkspaceClose(WorkspaceCloseParams),
-    #[serde(rename = "worktree.list")]
-    WorktreeList(WorktreeListParams),
-    #[serde(rename = "worktree.create")]
-    WorktreeCreate(WorktreeCreateParams),
-    #[serde(rename = "worktree.open")]
-    WorktreeOpen(WorktreeOpenParams),
-    #[serde(rename = "worktree.remove")]
-    WorktreeRemove(WorktreeRemoveParams),
-    #[serde(rename = "tab.create")]
-    TabCreate(TabCreateParams),
-    #[serde(rename = "tab.list")]
-    TabList(TabListParams),
-    #[serde(rename = "tab.get")]
-    TabGet(TabTarget),
-    #[serde(rename = "tab.focus")]
-    TabFocus(TabTarget),
-    #[serde(rename = "tab.rename")]
-    TabRename(TabRenameParams),
-    #[serde(rename = "tab.move")]
-    TabMove(TabMoveParams),
-    #[serde(rename = "tab.close")]
-    TabClose(TabTarget),
-    #[serde(rename = "agent.list")]
-    AgentList(EmptyParams),
-    #[serde(rename = "agent.get")]
-    AgentGet(AgentTarget),
-    #[serde(rename = "agent.read")]
-    AgentRead(AgentReadParams),
-    #[serde(rename = "agent.explain")]
-    AgentExplain(AgentTarget),
-    #[serde(rename = "agent.send_keys")]
-    AgentSendKeys(AgentSendKeysParams),
-    #[serde(rename = "agent.rename")]
-    AgentRename(AgentRenameParams),
-    #[serde(rename = "agent.view.set")]
-    AgentViewSet(AgentViewSetParams),
-    #[serde(rename = "agent.view.clear")]
-    AgentViewClear(AgentViewClearParams),
-    #[serde(rename = "agent.focus")]
-    AgentFocus(AgentTarget),
-    #[serde(rename = "agent.start")]
-    AgentStart(AgentStartParams),
-    #[serde(rename = "agent.prompt")]
-    AgentPrompt(AgentPromptParams),
-    #[serde(rename = "agent.wait")]
-    AgentWait(AgentWaitParams),
-    #[serde(rename = "pane.split")]
-    PaneSplit(PaneSplitParams),
-    #[serde(rename = "pane.swap")]
-    PaneSwap(PaneSwapParams),
-    #[serde(rename = "pane.move")]
-    PaneMove(PaneMoveParams),
-    #[serde(rename = "pane.zoom")]
-    PaneZoom(PaneZoomParams),
-    #[serde(rename = "pane.layout")]
-    PaneLayout(PaneLayoutParams),
-    #[serde(rename = "pane.process_info")]
-    PaneProcessInfo(PaneProcessInfoParams),
-    #[serde(rename = "layout.export")]
-    LayoutExport(LayoutExportParams),
-    #[serde(rename = "layout.apply")]
-    LayoutApply(LayoutApplyParams),
-    #[serde(rename = "layout.set_split_ratio")]
-    LayoutSetSplitRatio(LayoutSetSplitRatioParams),
-    #[serde(rename = "pane.neighbor")]
-    PaneNeighbor(PaneNeighborParams),
-    #[serde(rename = "pane.edges")]
-    PaneEdges(PaneEdgesParams),
-    #[serde(rename = "pane.focus_direction")]
-    PaneFocusDirection(PaneFocusDirectionParams),
-    #[serde(rename = "pane.resize")]
-    PaneResize(PaneResizeParams),
-    #[serde(rename = "pane.scroll")]
-    PaneScroll(PaneScrollParams),
-    #[serde(rename = "pane.edit_scrollback")]
-    PaneEditScrollback(PaneTarget),
-    #[serde(rename = "pane.selection.read")]
-    PaneSelectionRead(PaneSelectionReadParams),
-    #[serde(rename = "pane.copy_motion")]
-    PaneCopyMotion(PaneCopyMotionParams),
-    #[serde(rename = "pane.copy_search")]
-    PaneCopySearch(PaneCopySearchParams),
-    #[serde(rename = "pane.list")]
-    PaneList(PaneListParams),
-    #[serde(rename = "pane.current")]
-    PaneCurrent(PaneCurrentParams),
-    #[serde(rename = "pane.get")]
-    PaneGet(PaneTarget),
-    #[serde(rename = "pane.focus")]
-    PaneFocus(PaneTarget),
-    #[serde(rename = "pane.input.set")]
-    PaneInputSet(PaneInputSetParams),
-    #[serde(rename = "pane.link.activate")]
-    PaneLinkActivate(PaneLinkActivateParams),
-    #[serde(rename = "pane.link.resolve")]
-    PaneLinkResolve(PaneLinkActivateParams),
-    #[serde(rename = "pane.rename")]
-    PaneRename(PaneRenameParams),
-    #[serde(rename = "pane.send_text")]
-    PaneSendText(PaneSendTextParams),
-    #[serde(rename = "pane.send_keys")]
-    PaneSendKeys(PaneSendKeysParams),
-    #[serde(rename = "pane.send_input")]
-    PaneSendInput(PaneSendInputParams),
-    #[serde(rename = "pane.read")]
-    PaneRead(PaneReadParams),
-    #[serde(rename = "pane.graphics.set")]
-    PaneGraphicsSet(PaneGraphicsSetParams),
-    #[serde(rename = "pane.graphics.clear")]
-    PaneGraphicsClear(PaneGraphicsClearParams),
-    #[serde(rename = "pane.graphics.info")]
-    PaneGraphicsInfo(PaneTarget),
-    #[serde(rename = "pane.graphics.stream")]
-    #[schemars(skip)]
-    PaneGraphicsStream(PaneGraphicsStreamParams),
-    #[serde(skip)]
-    #[schemars(skip)]
-    PaneGraphicsStreamSet(PaneGraphicsSetParams),
-    #[serde(skip)]
-    #[schemars(skip)]
-    PaneGraphicsStreamDirect(PaneGraphicsDirectParams),
-    #[serde(skip)]
-    #[schemars(skip)]
-    PaneGraphicsStreamOpen(PaneGraphicsStreamParams),
-    #[serde(skip)]
-    #[schemars(skip)]
-    PaneGraphicsStreamClose(PaneGraphicsStreamParams),
-    #[serde(rename = "pane.report_agent")]
-    PaneReportAgent(PaneReportAgentParams),
-    #[serde(rename = "pane.report_agent_session")]
-    PaneReportAgentSession(PaneReportAgentSessionParams),
-    #[serde(rename = "pane.report_agent_heartbeat")]
-    PaneReportAgentHeartbeat(PaneReportAgentHeartbeatParams),
-    #[serde(rename = "pane.report_metadata")]
-    PaneReportMetadata(PaneReportMetadataParams),
-    #[serde(rename = "pane.clear_agent_authority")]
-    PaneClearAgentAuthority(PaneClearAgentAuthorityParams),
-    #[serde(rename = "pane.release_agent")]
-    PaneReleaseAgent(PaneReleaseAgentParams),
-    #[serde(rename = "pane.close")]
-    PaneClose(PaneTarget),
-    #[serde(rename = "popup.close")]
-    PopupClose(EmptyParams),
-    #[serde(rename = "events.subscribe")]
-    EventsSubscribe(EventsSubscribeParams),
-    #[serde(rename = "events.wait")]
-    EventsWait(EventsWaitParams),
-    #[serde(rename = "execution.start")]
-    ExecutionStart(ExecutionStartParams),
-    #[serde(rename = "execution.resume")]
-    ExecutionResume(ExecutionResumeParams),
-    #[serde(rename = "execution.get")]
-    ExecutionGet(ExecutionTarget),
-    #[serde(rename = "execution.list")]
-    ExecutionList(ExecutionListParams),
-    #[serde(rename = "execution.wait")]
-    ExecutionWait(ExecutionWaitParams),
-    #[serde(rename = "execution.cancel")]
-    ExecutionCancel(ExecutionTarget),
-    #[serde(rename = "agent.interaction.report")]
-    AgentInteractionReport(InteractionReportParams),
-    #[serde(rename = "agent.interaction.read")]
-    AgentInteractionRead(InteractionTarget),
-    #[serde(rename = "agent.interaction.list")]
-    AgentInteractionList(InteractionListParams),
-    #[serde(rename = "agent.interaction.wait")]
-    AgentInteractionWait(InteractionWaitParams),
-    #[serde(rename = "agent.interaction.respond")]
-    AgentInteractionRespond(InteractionRespondParams),
-    #[serde(rename = "agent.interaction.delivery.get")]
-    AgentInteractionDeliveryGet(InteractionDeliveryTarget),
-    #[serde(rename = "agent.interaction.delivery.ack")]
-    AgentInteractionDeliveryAck(InteractionAckParams),
-    #[serde(rename = "agent.recap.report")]
-    AgentRecapReport(AgentRecapReportParams),
-    #[serde(rename = "agent.recap.get")]
-    AgentRecapGet(AgentTarget),
-    #[serde(rename = "agent.turn.report")]
-    AgentTurnReport(AgentTurnReportParams),
-    #[serde(rename = "agent.turn.action.get")]
-    AgentTurnActionGet(AgentTurnActionTarget),
-    #[serde(rename = "agent.turn.action.ack")]
-    AgentTurnActionAck(AgentTurnActionAckParams),
-    #[serde(rename = "agent.turn.get")]
-    AgentTurnGet(AgentTurnTarget),
-    #[serde(rename = "agent.turn.list")]
-    AgentTurnList(AgentTurnListParams),
-    #[serde(rename = "agent.turn.wait")]
-    AgentTurnWait(AgentTurnWaitParams),
-    #[serde(rename = "pane.wait_for_output")]
-    PaneWaitForOutput(PaneWaitForOutputParams),
-    #[serde(rename = "integration.list")]
-    IntegrationList(EmptyParams),
-    #[serde(rename = "integration.install")]
-    IntegrationInstall(IntegrationInstallParams),
-    #[serde(rename = "integration.uninstall")]
-    IntegrationUninstall(IntegrationUninstallParams),
-    #[serde(rename = "plugin.link")]
-    PluginLink(PluginLinkParams),
-    #[serde(rename = "plugin.list")]
-    PluginList(PluginListParams),
-    #[serde(rename = "plugin.unlink")]
-    PluginUnlink(PluginUnlinkParams),
-    #[serde(rename = "plugin.enable")]
-    PluginEnable(PluginSetEnabledParams),
-    #[serde(rename = "plugin.disable")]
-    PluginDisable(PluginSetEnabledParams),
-    #[serde(rename = "plugin.action.list")]
-    PluginActionList(PluginActionListParams),
-    #[serde(rename = "plugin.action.invoke")]
-    PluginActionInvoke(PluginActionInvokeParams),
-    #[serde(rename = "plugin.log.list")]
-    PluginLogList(PluginLogListParams),
-    #[serde(rename = "plugin.pane.open")]
-    PluginPaneOpen(PluginPaneOpenParams),
-    #[serde(rename = "plugin.pane.focus")]
-    PluginPaneFocus(PluginPaneFocusParams),
-    #[serde(rename = "plugin.pane.close")]
-    PluginPaneClose(PluginPaneCloseParams),
+// Variant order and parameter types preserve the existing wire contract.
+// The two flags are independent: presentation impact, then client-shell admission.
+operations::define_operations! {
+    Ping(PingParams) => "ping", false, false;
+    ServerStop(EmptyParams) => "server.stop", false, false;
+    ServerLiveHandoff(ServerLiveHandoffParams) => "server.live_handoff", false, false;
+    ServerReloadConfig(EmptyParams) => "server.reload_config", true, true;
+    ServerSshAgentRegister(ServerSshAgentRegisterParams) => "server.ssh_agent.register", false, false;
+    ServerAgentManifests(EmptyParams) => "server.agent_manifests", false, false;
+    ServerReloadAgentManifests(EmptyParams) => "server.reload_agent_manifests", true, false;
+    NotificationShow(NotificationShowParams) => "notification.show", true, false;
+    ProductAnnouncementDismiss(ProductAnnouncementDismissParams) => "product_announcement.dismiss", true, true;
+    ReleaseNotesDismiss(ReleaseNotesDismissParams) => "release_notes.dismiss", true, true;
+    CommandInvoke(CommandInvokeParams) => "command.invoke", true, true;
+    ClientWindowTitleSet(ClientWindowTitleSetParams) => "client.window_title.set", false, false;
+    ClientWindowTitleClear(EmptyParams) => "client.window_title.clear", false, false;
+    ClientShellSurfaceSet(ClientShellSurfaceSetParams) => "client_shell.surface.set", false, true;
+    SessionSnapshot(EmptyParams) => "session.snapshot", false, false;
+    WorkspaceCreate(WorkspaceCreateParams) => "workspace.create", true, true;
+    WorkspaceList(EmptyParams) => "workspace.list", false, false;
+    WorkspaceGet(WorkspaceTarget) => "workspace.get", false, false;
+    WorkspaceFocus(WorkspaceTarget) => "workspace.focus", true, true;
+    WorkspaceRename(WorkspaceRenameParams) => "workspace.rename", true, true;
+    WorkspaceMove(WorkspaceMoveParams) => "workspace.move", true, true;
+    WorkspaceMoveBlock(WorkspaceMoveBlockParams) => "workspace.move_block", true, true;
+    WorkspaceReportMetadata(WorkspaceReportMetadataParams) => "workspace.report_metadata", true, false;
+    WorkspaceClose(WorkspaceCloseParams) => "workspace.close", true, true;
+    WorktreeList(WorktreeListParams) => "worktree.list", false, true;
+    WorktreeCreate(WorktreeCreateParams) => "worktree.create", true, true;
+    WorktreeOpen(WorktreeOpenParams) => "worktree.open", true, true;
+    WorktreeRemove(WorktreeRemoveParams) => "worktree.remove", true, true;
+    TabCreate(TabCreateParams) => "tab.create", true, true;
+    TabList(TabListParams) => "tab.list", false, false;
+    TabGet(TabTarget) => "tab.get", false, false;
+    TabFocus(TabTarget) => "tab.focus", true, true;
+    TabRename(TabRenameParams) => "tab.rename", true, true;
+    TabMove(TabMoveParams) => "tab.move", true, true;
+    TabClose(TabTarget) => "tab.close", true, true;
+    AgentList(EmptyParams) => "agent.list", false, false;
+    AgentGet(AgentTarget) => "agent.get", false, false;
+    AgentRead(AgentReadParams) => "agent.read", false, false;
+    AgentExplain(AgentTarget) => "agent.explain", false, false;
+    AgentSendKeys(AgentSendKeysParams) => "agent.send_keys", true, false;
+    AgentRename(AgentRenameParams) => "agent.rename", true, false;
+    AgentViewSet(AgentViewSetParams) => "agent.view.set", true, false;
+    AgentViewClear(AgentViewClearParams) => "agent.view.clear", true, false;
+    AgentFocus(AgentTarget) => "agent.focus", true, false;
+    AgentStart(AgentStartParams) => "agent.start", true, false;
+    AgentPrompt(AgentPromptParams) => "agent.prompt", true, false;
+    AgentWait(AgentWaitParams) => "agent.wait", false, false;
+    PaneSplit(PaneSplitParams) => "pane.split", true, true;
+    PaneSwap(PaneSwapParams) => "pane.swap", true, true;
+    PaneMove(PaneMoveParams) => "pane.move", true, false;
+    PaneZoom(PaneZoomParams) => "pane.zoom", true, true;
+    PaneLayout(PaneLayoutParams) => "pane.layout", false, false;
+    PaneProcessInfo(PaneProcessInfoParams) => "pane.process_info", false, false;
+    LayoutExport(LayoutExportParams) => "layout.export", false, false;
+    LayoutApply(LayoutApplyParams) => "layout.apply", true, false;
+    LayoutSetSplitRatio(LayoutSetSplitRatioParams) => "layout.set_split_ratio", true, true;
+    PaneNeighbor(PaneNeighborParams) => "pane.neighbor", false, false;
+    PaneEdges(PaneEdgesParams) => "pane.edges", false, false;
+    PaneFocusDirection(PaneFocusDirectionParams) => "pane.focus_direction", true, true;
+    PaneResize(PaneResizeParams) => "pane.resize", true, true;
+    PaneScroll(PaneScrollParams) => "pane.scroll", true, true;
+    PaneClear(PaneTarget) => "pane.clear", true, true;
+    PaneEditScrollback(PaneTarget) => "pane.edit_scrollback", true, true;
+    PaneSelectionRead(PaneSelectionReadParams) => "pane.selection.read", false, true;
+    PaneCopyMotion(PaneCopyMotionParams) => "pane.copy_motion", false, true;
+    PaneCopySearch(PaneCopySearchParams) => "pane.copy_search", false, true;
+    PaneList(PaneListParams) => "pane.list", false, false;
+    PaneCurrent(PaneCurrentParams) => "pane.current", false, false;
+    PaneGet(PaneTarget) => "pane.get", false, false;
+    PaneFocus(PaneTarget) => "pane.focus", true, true;
+    PaneInputSet(PaneInputSetParams) => "pane.input.set", true, true;
+    PaneLinkActivate(PaneLinkActivateParams) => "pane.link.activate", false, true;
+    PaneLinkResolve(PaneLinkActivateParams) => "pane.link.resolve", false, true;
+    PaneRename(PaneRenameParams) => "pane.rename", true, true;
+    PaneSendText(PaneSendTextParams) => "pane.send_text", false, false;
+    PaneSendKeys(PaneSendKeysParams) => "pane.send_keys", false, false;
+    PaneSendInput(PaneSendInputParams) => "pane.send_input", false, false;
+    PaneRead(PaneReadParams) => "pane.read", false, false;
+    PaneReportAgent(PaneReportAgentParams) => "pane.report_agent", true, false;
+    PaneReportAgentSession(PaneReportAgentSessionParams) => "pane.report_agent_session", true, false;
+    PaneReportMetadata(PaneReportMetadataParams) => "pane.report_metadata", true, false;
+    PaneClearAgentAuthority(PaneClearAgentAuthorityParams) => "pane.clear_agent_authority", true, false;
+    PaneReleaseAgent(PaneReleaseAgentParams) => "pane.release_agent", true, false;
+    PaneClose(PaneTarget) => "pane.close", true, true;
+    PopupClose(EmptyParams) => "popup.close", true, false;
+    EventsSubscribe(EventsSubscribeParams) => "events.subscribe", false, false;
+    EventsWait(EventsWaitParams) => "events.wait", false, false;
+    PaneWaitForOutput(PaneWaitForOutputParams) => "pane.wait_for_output", false, false;
+    IntegrationList(EmptyParams) => "integration.list", false, true;
+    IntegrationInstall(IntegrationInstallParams) => "integration.install", false, true;
+    IntegrationUninstall(IntegrationUninstallParams) => "integration.uninstall", false, false;
+    PluginLink(PluginLinkParams) => "plugin.link", false, false;
+    PluginList(PluginListParams) => "plugin.list", false, false;
+    PluginUnlink(PluginUnlinkParams) => "plugin.unlink", true, false;
+    PluginEnable(PluginSetEnabledParams) => "plugin.enable", false, false;
+    PluginDisable(PluginSetEnabledParams) => "plugin.disable", true, false;
+    PluginActionList(PluginActionListParams) => "plugin.action.list", false, false;
+    PluginActionInvoke(PluginActionInvokeParams) => "plugin.action.invoke", true, false;
+    PluginLogList(PluginLogListParams) => "plugin.log.list", false, false;
+    PluginPaneOpen(PluginPaneOpenParams) => "plugin.pane.open", true, false;
+    PluginPaneFocus(PluginPaneFocusParams) => "plugin.pane.focus", true, false;
+    PluginPaneClose(PluginPaneCloseParams) => "plugin.pane.close", true, false;
+    WorkerContextIssue(WorkerContextIssueParams) => "worker_context.issue", false, false;
+    WorkerContextClaim(WorkerContextClaimParams) => "worker_context.claim", false, false;
+    WorkerContextResolve(WorkerContextLeaseParams) => "worker_context.resolve", false, false;
+    WorkerContextRevoke(WorkerContextLeaseParams) => "worker_context.revoke", false, false;
+    PaneReportAgentHeartbeat(PaneReportAgentHeartbeatParams) => "pane.report_agent_heartbeat", false, false;
+    ExecutionStart(ExecutionStartParams) => "execution.start", true, false;
+    ExecutionResume(ExecutionResumeParams) => "execution.resume", true, false;
+    ExecutionGet(ExecutionTarget) => "execution.get", false, false;
+    ExecutionList(ExecutionListParams) => "execution.list", false, false;
+    ExecutionWait(ExecutionWaitParams) => "execution.wait", false, false;
+    ExecutionCancel(ExecutionTarget) => "execution.cancel", true, false;
+    AgentInteractionReport(InteractionReportParams) => "agent.interaction.report", false, false;
+    AgentInteractionRead(InteractionTarget) => "agent.interaction.read", false, false;
+    AgentInteractionList(InteractionListParams) => "agent.interaction.list", false, false;
+    AgentInteractionWait(InteractionWaitParams) => "agent.interaction.wait", false, false;
+    AgentInteractionRespond(InteractionRespondParams) => "agent.interaction.respond", false, false;
+    AgentInteractionDeliveryGet(InteractionDeliveryTarget) => "agent.interaction.delivery.get", false, false;
+    AgentInteractionDeliveryAck(InteractionAckParams) => "agent.interaction.delivery.ack", false, false;
+    AgentRecapReport(AgentRecapReportParams) => "agent.recap.report", false, false;
+    AgentRecapGet(AgentTarget) => "agent.recap.get", false, false;
+    AgentTurnReport(AgentTurnReportParams) => "agent.turn.report", false, false;
+    AgentTurnActionGet(AgentTurnActionTarget) => "agent.turn.action.get", false, false;
+    AgentTurnActionAck(AgentTurnActionAckParams) => "agent.turn.action.ack", false, false;
+    AgentTurnGet(AgentTurnTarget) => "agent.turn.get", false, false;
+    AgentTurnList(AgentTurnListParams) => "agent.turn.list", false, false;
+    AgentTurnWait(AgentTurnWaitParams) => "agent.turn.wait", false, false;
 }
 
 #[cfg(test)]

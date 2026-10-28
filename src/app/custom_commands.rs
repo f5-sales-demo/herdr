@@ -369,10 +369,11 @@ impl App {
             return Err(std::io::Error::other("no active workspace"));
         };
         let previous_focus_target = self.state.current_pane_focus_target();
-        let (rows, cols) = self.state.estimate_pane_size();
-        let new_rows = rows.max(4);
-        let new_cols = cols.max(10);
+        let (rows, cols) = self
+            .state
+            .new_pane_size(crate::ui::NewPanePlacement::ZoomedOverlay);
         let (env, _) = self.custom_command_env();
+        let host_terminal_appearance = self.pane_host_terminal_appearance();
 
         let ws = self
             .state
@@ -393,14 +394,14 @@ impl App {
         });
         let new_pane = ws.split_focused_command(
             Direction::Horizontal,
-            new_rows,
-            new_cols,
+            rows,
+            cols,
             cwd,
             command,
             env,
             self.state.pane_scrollback_limit_bytes,
             self.state.host_terminal_theme,
-            self.state.host_terminal_appearance,
+            host_terminal_appearance,
         )?;
         let new_pane_id = new_pane.pane_id;
         self.terminal_runtimes
@@ -448,9 +449,9 @@ impl App {
             return Err(std::io::Error::other("no active workspace"));
         };
         let previous_focus_target = self.state.current_pane_focus_target();
-        let (rows, cols) = self.state.estimate_pane_size();
-        let new_rows = rows.max(4);
-        let new_cols = cols.max(10);
+        let (rows, cols) = self
+            .state
+            .new_pane_size(crate::ui::NewPanePlacement::ZoomedOverlay);
 
         let ws = self
             .state
@@ -470,6 +471,7 @@ impl App {
             })
         });
 
+        let host_terminal_appearance = self.pane_host_terminal_appearance();
         let (tab_idx, new_pane, workspace_id) = {
             let ws = self
                 .state
@@ -480,14 +482,14 @@ impl App {
             let result = ws.split_pane_argv_command(
                 previous_focus,
                 Direction::Horizontal,
-                new_rows,
-                new_cols,
+                rows,
+                cols,
                 cwd,
                 argv,
                 extra_env,
                 self.state.pane_scrollback_limit_bytes,
                 self.state.host_terminal_theme,
-                self.state.host_terminal_appearance,
+                host_terminal_appearance,
                 true,
             );
             let (tab_idx, new_pane) = match result {

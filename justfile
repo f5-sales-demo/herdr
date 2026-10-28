@@ -13,11 +13,16 @@ test:
 
 # Run repository maintenance contract tests
 maintenance-test:
-    {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_agent_skill scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_downstream_release_plan scripts.test_downstream_release_workflow scripts.test_hermes_integration_asset scripts.test_label_next_release_workflow scripts.test_package_windows_conpty scripts.test_preview scripts.test_render_downstream_homebrew_formula scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross
+    {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_agent_skill scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_downstream_release_plan scripts.test_downstream_release_workflow scripts.test_hermes_integration_asset scripts.test_label_next_release_workflow scripts.test_package_windows_conpty scripts.test_preview scripts.test_render_downstream_homebrew_formula scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross scripts.test_windows_input
 
 # Forward-test the public Herdr skill with the locally authenticated Codex CLI
 agent-skill-eval *args:
     {{python}} scripts/eval_agent_skill.py {{args}}
+
+# Local interactive Windows Terminal input qualification (never runs in normal CI).
+[windows]
+test-windows-input *args:
+    pwsh -NoProfile -File scripts/test_windows_input.ps1 -AllowInputInjection -ClearClipboard {{args}}
 
 # Run one nextest filter, e.g. `just test-one codex_stale_working`
 test-one filter:
@@ -78,12 +83,44 @@ install-hooks:
     @echo "installed git hooks from .githooks"
 
 # Build release binary
+[unix]
 build:
     cargo build --release --locked
 
+[windows]
+build:
+    python scripts/package_windows_conpty.py build-local
+
 # Non-gating full-render scaling profile for background workspaces and active panes
 bench-render-scale:
-    cargo test --release --locked --bin herdr render_scale_profile -- --ignored --nocapture --test-threads=1
+    cargo test --release --locked --bin herdr server::render_scale_benchmark::render_scale_profile -- --exact --ignored --nocapture --test-threads=1
+
+# Profile terminal target name resolution at increasing pane counts.
+bench-terminal-targets:
+    cargo test --release --locked --bin herdr terminal_target_lookup_profile -- --ignored --nocapture --test-threads=1
+
+# Profile Windows foreground inspection of isolated idle shells, without a server.
+[windows]
+bench-process-inspection:
+    cargo test --release --locked --bin herdr windows_process_inspection_profile -- --ignored --nocapture --test-threads=1
+
+# Profile BSP split collection and construction with balanced and skewed trees.
+bench-bsp-layout:
+    cargo test --release --locked --bin herdr bsp_layout_profile -- --ignored --nocapture --test-threads=1
+
+# Profile full and retained text, static-image, and unchanged-image updates.
+bench-retained-graphics:
+    cargo test --release --locked --bin herdr render_scale_profile_retained_graphics -- --ignored --nocapture --test-threads=1
+
+# Profile native image source cloning on Linux with a CoW-capable filesystem.
+# Other platforms and filesystems use decoded image fallback and cannot run this experiment.
+[linux]
+bench-native-image-sources:
+    cargo test --release --locked --bin herdr server::headless::tests::native_graphics::native_file_render_scale_profile -- --exact --ignored --nocapture --test-threads=1
+
+# Profile first-batch latency and aggregate drain cost for external API bursts.
+bench-api-fairness:
+    cargo test --release --locked --bin herdr external_api_burst_profile -- --ignored --nocapture --test-threads=1
 
 # ~3-5 minute CPU comparison; downloads stable unless HERDR_PERF_BASELINE_BIN is set
 bench-release-smoke:
@@ -108,7 +145,7 @@ libghostty-bindings *clang_args:
 build-libghostty-vt:
     scripts/build_vendored_libghostty_vt.sh
 
-# Check that release docs and changelog have been finalized from docs/next before release
+# Check maintained English release docs and changelog from docs/next before release
 release-docs-check:
     python3 scripts/agent_detection_manifest_check.py --require-all-published
     python3 scripts/config_reference_check.py
@@ -116,7 +153,6 @@ release-docs-check:
     node scripts/docs/preview.mjs check
     just docs-contract-test
     @test -f docs/next/README.md
-    @test -f docs/next/README.zh-CN.md
     @if ! diff -u CHANGELOG.md docs/next/CHANGELOG.md; then \
         echo "error: CHANGELOG.md differs from docs/next/CHANGELOG.md; finalize release notes before releasing"; \
         exit 1; \
@@ -128,6 +164,9 @@ release-docs-check:
         fi; \
     done
     @test -d docs/next/website/src/content/docs
+
+# Localization belongs to a separate process and does not gate fork releases.
+translation-docs-check:
     @for file in docs/next/website/src/content/docs/*.mdx; do \
         for locale in ja zh-cn; do \
             translated="docs/next/website/src/content/docs/$locale/$(basename "$file")"; \

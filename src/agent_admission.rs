@@ -235,4 +235,39 @@ mod tests {
         assert_eq!(cleanup.dropped, vec!["closing"]);
         assert_eq!(cleanup.released, vec![surviving]);
     }
+
+    #[test]
+    fn cancelled_dispatch_cannot_replay_or_release_another_providers_slot() {
+        let mut admission = AdmissionController::new(2, HashMap::from([("openai".into(), 1)]));
+        assert_eq!(
+            admission.submit(request("running", "openai")),
+            AdmissionDecision::Admitted
+        );
+        assert_eq!(
+            admission.submit(request("queued", "openai")),
+            AdmissionDecision::Queued { position: 1 }
+        );
+        assert_eq!(
+            admission.submit(request("other", "anthropic")),
+            AdmissionDecision::Admitted
+        );
+        let released = admission.cancel("running");
+        assert_eq!(released, vec![request("queued", "openai")]);
+        assert!(admission.cancel("running").is_empty());
+        assert_eq!(
+            admission.submit(released[0].clone()),
+            AdmissionDecision::Admitted
+        );
+        assert_eq!(
+            admission.submit(request("next", "openai")),
+            AdmissionDecision::Queued { position: 1 }
+        );
+        assert!(admission.cancel("running").is_empty());
+        assert_eq!(admission.queue_position_for_pane("pane-next"), Some(1));
+        assert!(admission.release_for_pane("pane-other").is_empty());
+        assert_eq!(
+            admission.release_for_pane("pane-queued"),
+            vec![request("next", "openai")]
+        );
+    }
 }

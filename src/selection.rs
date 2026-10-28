@@ -358,19 +358,46 @@ fn should_prefer_osc52() -> bool {
 ///
 /// Some terminals still only honor BEL-terminated OSC 52 writes, so herdr
 /// emits BEL here even though ST works in newer emulators.
-pub fn write_osc52_bytes(bytes: &[u8]) {
-    if !should_prefer_osc52() && crate::platform::write_clipboard(bytes) {
-        return;
+///
+/// Returns true when the text already matches or a clipboard write is dispatched.
+pub fn write_osc52_bytes(bytes: &[u8]) -> bool {
+    write_osc52_bytes_with_match(
+        bytes,
+        should_prefer_osc52(),
+        crate::platform::clipboard_text_matches,
+    )
+}
+
+fn write_osc52_bytes_with_match(
+    bytes: &[u8],
+    prefer_osc52: bool,
+    clipboard_text_matches: impl FnOnce(&[u8]) -> Option<bool>,
+) -> bool {
+    if !prefer_osc52 && clipboard_text_matches(bytes) == Some(true) {
+        tracing::debug!(bytes = bytes.len(), "suppressed duplicate clipboard write");
+        return true;
     }
 
-    let sequence = osc52_sequence(bytes);
-    let _ = std::io::stdout().write_all(sequence.as_bytes());
-    let _ = std::io::stdout().flush();
+    if !prefer_osc52 && crate::platform::write_clipboard(bytes) {
+        true
+    } else {
+        let sequence = osc52_sequence(bytes);
+        let mut stdout = std::io::stdout();
+        stdout.write_all(sequence.as_bytes()).is_ok() && stdout.flush().is_ok()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_clipboard_copy_reports_success() {
+        assert!(write_osc52_bytes_with_match(b"same text", false, |bytes| {
+            assert_eq!(bytes, b"same text");
+            Some(true)
+        }));
+    }
 
     #[test]
     fn visible_rects_match_selection_cells_when_scrolled_and_reversed() {

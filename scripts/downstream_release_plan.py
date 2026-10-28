@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -44,6 +45,8 @@ def bump(version: str, level: str) -> str:
         raise ValueError(f"expected a stable SemVer version, got {version!r}")
     major, minor, patch = (int(match.group(name)) for name in ("major", "minor", "patch"))
     if level == "major":
+        if major == 0:
+            return f"0.{minor + 1}.0"
         return f"{major + 1}.0.0"
     if level == "minor":
         return f"{major}.{minor + 1}.0"
@@ -88,6 +91,19 @@ def replace_lockfile_version(path: Path, version: str) -> None:
     path.write_text(updated, encoding="utf-8")
 
 
+def promote_staged_release_skill(root: Path) -> None:
+    """Promote English next guidance only as part of the release version write."""
+    for relative in (Path("SKILL.md"), Path("references/agents.md")):
+        source = root / "docs/next/skills/herdr" / relative
+        target = root / "skills/herdr" / relative
+        if not source.exists():
+            continue
+        if source.is_symlink() or not source.is_file() or target.is_symlink():
+            raise ValueError(f"release skill must use ordinary files: {relative}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", help="inclusive base tag or commit for the commit range")
@@ -99,6 +115,7 @@ def main() -> int:
     if args.write_version:
         replace_package_version(Path("Cargo.toml"), args.write_version)
         replace_lockfile_version(Path("Cargo.lock"), args.write_version)
+        promote_staged_release_skill(Path("."))
         return 0
     if not args.base or not args.current:
         parser.error("--base and --current are required unless --write-version is used")
