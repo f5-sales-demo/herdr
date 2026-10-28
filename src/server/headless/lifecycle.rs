@@ -83,6 +83,12 @@ impl HeadlessServer {
                 continue;
             };
             let mut handoff_runtime = runtime.handoff_runtime_state(pane_id);
+            handoff_runtime.agent_state = self
+                .app
+                .state
+                .terminals
+                .get(terminal_id)
+                .and_then(|terminal| terminal.handoff_agent_state());
             let has_agent_session = self
                 .app
                 .state
@@ -106,6 +112,7 @@ impl HeadlessServer {
             params.expected_version,
             self.api_window_title.clone(),
             self.app.worker_context_handoff_state(),
+            self.host_shutdown_intent.get(),
         );
         let mut import_child = match crate::server::handoff::spawn_handoff_import(
             import_exe.as_deref(),
@@ -242,7 +249,7 @@ impl HeadlessServer {
         let api_server = api::start_server_with_stop_control(
             api_tx,
             self.app.event_hub.clone(),
-            self.should_quit.clone(),
+            self.server_stop.clone(),
             self.app.runtime_state.clone(),
         )?;
 
@@ -300,7 +307,14 @@ impl HeadlessServer {
         if self.shutting_down {
             return;
         }
-        info!("server shutdown initiated");
+        let reason = if self.host_shutdown_requested.load(Ordering::Acquire) {
+            ShutdownReason::HostShutdown
+        } else {
+            self.server_stop
+                .take_reason()
+                .unwrap_or(ShutdownReason::Unknown)
+        };
+        info!(%reason, "server shutdown initiated");
         self.shutting_down = true;
 
         // Clear client-local host graphics, then send ServerShutdown to all connected clients.

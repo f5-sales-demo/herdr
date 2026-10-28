@@ -283,6 +283,7 @@ struct ServerCapabilitiesJson {
     worker_context_handoff: Option<u32>,
     xcsh_semantic_tracking: Option<u32>,
     agent_recaps: Option<u32>,
+    ssh_agent_registration: bool,
 }
 
 #[derive(Serialize)]
@@ -331,6 +332,7 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
                     worker_context_handoff: capabilities.worker_context_handoff,
                     xcsh_semantic_tracking: capabilities.xcsh_semantic_tracking,
                     agent_recaps: capabilities.agent_recaps,
+                    ssh_agent_registration: capabilities.ssh_agent_registration,
                 }),
             compatible: protocol.map(|value| value == crate::protocol::PROTOCOL_VERSION),
             endpoint_compatible: capabilities.as_ref().and_then(|capabilities| {
@@ -434,8 +436,16 @@ mod tests {
                 agent_interactions: Some(1),
                 worker_context_handoff: Some(1),
                 xcsh_semantic_tracking: Some(1),
+                ssh_agent_registration: false,
             }),
         }
+    }
+
+    #[test]
+    fn status_exposes_ssh_agent_registration() {
+        let server = running_server(Some("test"), None);
+        let value = serde_json::to_value(server_status_json(&server)).unwrap();
+        assert_eq!(value["capabilities"]["ssh_agent_registration"], false);
     }
 
     #[test]

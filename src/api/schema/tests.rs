@@ -734,6 +734,7 @@ fn success_response_round_trips() {
                 agent_interactions: Some(1),
                 worker_context_handoff: Some(1),
                 xcsh_semantic_tracking: Some(1),
+                ssh_agent_registration: false,
             }),
         },
     };
@@ -833,6 +834,7 @@ fn worktree_request_and_response_round_trip() {
                 focused: true,
                 cwd: Some("/worktrees/herdr/worktree-api".into()),
                 foreground_cwd: None,
+                restore_error: None,
                 label: None,
                 agent: None,
                 title: None,
@@ -1261,6 +1263,7 @@ fn create_response_round_trips_with_root_pane() {
                 focused: false,
                 cwd: Some("/tmp/review".into()),
                 foreground_cwd: None,
+                restore_error: None,
                 label: None,
                 agent: None,
                 title: None,
@@ -1477,4 +1480,10 @@ fn agent_recap_report_has_typed_protocol() {
     }))
     .expect("typed recap method");
     assert!(matches!(request.method, super::Method::AgentRecapReport(_)));
+}
+
+#[test]
+fn read_choices_cover_every_api_value() {
+    crate::cli::projection::assert_choices_cover_api_enum(READ_SOURCES);
+    crate::cli::projection::assert_choices_cover_api_enum(READ_FORMATS);
 }

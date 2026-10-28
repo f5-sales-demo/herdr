@@ -212,14 +212,25 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
     let bin_dir = base.join("bin");
     let args_path = base.join("xcsh-args");
     let env_path = base.join("xcsh-env");
+    let release_path = base.join("fixture-release");
+    // Hold the producer until this test releases it, including on assertion
+    // failure. A fixed sleep can expire while durable-history churn is running.
+    struct FixtureRelease(std::path::PathBuf);
+    impl Drop for FixtureRelease {
+        fn drop(&mut self) {
+            let _ = fs::write(&self.0, b"release");
+        }
+    }
+    let _release = FixtureRelease(release_path.clone());
     fs::create_dir_all(&bin_dir).unwrap();
     let fixture = bin_dir.join("xcsh");
     fs::write(
         &fixture,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n%s\\n%s\\n%s\\n%s\\n' \"$HERDR_EXECUTION_ID\" \"$HERDR_EXECUTION_GENERATION\" \"$HERDR_SOCKET_PATH\" \"$HERDR_PANE_ID\" \"$HERDR_NATIVE_CAPABILITY\" > '{}'\nsleep 1\npython3 - \"$HERDR_SOCKET_PATH\" \"$HERDR_PANE_ID\" \"$HERDR_EXECUTION_ID\" \"$HERDR_EXECUTION_GENERATION\" \"$HERDR_NATIVE_CAPABILITY\" <<'PY'\nimport json, socket, sys\nsock, pane, execution, generation, capability = sys.argv[1:]\nframe = {{'method':'agent.turn.report','params':{{'execution_id':execution,'pane_id':pane,'producer':'xcsh','session_id':'0123abcd4567ef89','turn_id':'fixture-turn','generation':int(generation),'event_revision':1,'state':'starting','native_capability':capability}}}}\nfor request_id in ('fixture-first', 'fixture-replay'):\n    frame['id'] = request_id\n    client = socket.socket(socket.AF_UNIX)\n    client.connect(sock)\n    client.sendall((json.dumps(frame) + '\\n').encode())\n    client.recv(65536)\n    client.close()\nPY\nsleep 30\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n%s\\n%s\\n%s\\n%s\\n' \"$HERDR_EXECUTION_ID\" \"$HERDR_EXECUTION_GENERATION\" \"$HERDR_SOCKET_PATH\" \"$HERDR_PANE_ID\" \"$HERDR_NATIVE_CAPABILITY\" > '{}'\nsleep 1\npython3 - \"$HERDR_SOCKET_PATH\" \"$HERDR_PANE_ID\" \"$HERDR_EXECUTION_ID\" \"$HERDR_EXECUTION_GENERATION\" \"$HERDR_NATIVE_CAPABILITY\" <<'PY'\nimport json, socket, sys\nsock, pane, execution, generation, capability = sys.argv[1:]\nframe = {{'method':'agent.turn.report','params':{{'execution_id':execution,'pane_id':pane,'producer':'xcsh','session_id':'0123abcd4567ef89','turn_id':'fixture-turn','generation':int(generation),'event_revision':1,'state':'starting','native_capability':capability}}}}\nfor request_id in ('fixture-first', 'fixture-replay'):\n    frame['id'] = request_id\n    client = socket.socket(socket.AF_UNIX)\n    client.connect(sock)\n    client.sendall((json.dumps(frame) + '\\n').encode())\n    client.recv(65536)\n    client.close()\nPY\nfixture_ticks=0\nwhile [ ! -e '{}' ] && [ \"$fixture_ticks\" -lt 300 ]; do sleep 1; fixture_ticks=$((fixture_ticks + 1)); done\n",
             args_path.display(),
             env_path.display(),
+            release_path.display(),
         ),
     ).unwrap();
     use std::os::unix::fs::PermissionsExt;
@@ -369,7 +380,10 @@ fn native_xcsh_fixture_child_receives_contract_and_replays_semantic_reports() {
             r#"{{"id":"fixture-retained","method":"execution.get","params":{{"execution_id":"{backend_id}"}}}}"#
         ),
     );
-    assert_eq!(retained["result"]["execution"]["state"], "running");
+    assert_eq!(
+        retained["result"]["execution"]["state"], "running",
+        "retained response: {retained}"
+    );
     let post_churn_report = send_request(
         &socket_path,
         &serde_json::json!({

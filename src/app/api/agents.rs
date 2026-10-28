@@ -100,7 +100,54 @@ impl App {
         let crate::api::schema::Method::AgentPrompt(params) = request.method else {
             return false;
         };
-        match self.queue_agent_prompt(request.id, params) {
+        let validated = match self.validate_agent_prompt(request.id, &params) {
+            Ok(validated) => validated,
+            Err(response) => {
+                let _ = respond_to.send(response);
+                return true;
+            }
+        };
+        // Start the completion waiter before submitting, so a refused thread
+        // fails the request while nothing has been sent yet.
+        let (handoff_tx, handoff_rx) = std::sync::mpsc::channel::<(
+            String,
+            crate::api::schema::AgentInfo,
+            std::sync::mpsc::Receiver<std::io::Result<()>>,
+        )>();
+        let waiter_respond_to = respond_to.clone();
+        let spawned = crate::thread_spawn::spawn_named("herdr-agent-prompt", move || {
+            let Ok((id, agent, completion)) = handoff_rx.recv() else {
+                return;
+            };
+            let response = match completion.recv() {
+                Ok(Ok(())) => encode_success(
+                    id,
+                    ResponseResult::AgentPrompted {
+                        agent,
+                        accepted: true,
+                        observed: false,
+                        queued: false,
+                        queue_position: None,
+                    },
+                ),
+                Ok(Err(err)) if err.kind() == std::io::ErrorKind::TimedOut => {
+                    encode_error(id, "timeout", err.to_string())
+                }
+                Ok(Err(err)) => encode_error(id, "agent_prompt_failed", err.to_string()),
+                Err(_) => encode_error(id, "agent_prompt_failed", "pty actor closed"),
+            };
+            let _ = waiter_respond_to.send(response);
+        });
+        if let Err(err) = spawned {
+            tracing::warn!(err = %err, "failed to spawn agent prompt thread");
+            let _ = respond_to.send(encode_error(
+                validated.id,
+                "agent_prompt_failed",
+                format!("could not start prompt completion waiter: {err}"),
+            ));
+            return true;
+        }
+        match self.queue_validated_agent_prompt(validated, params) {
             Ok(AgentPromptDispatch::Queued {
                 id,
                 agent,
@@ -122,26 +169,7 @@ impl App {
                 agent,
                 completion,
             }) => {
-                std::thread::spawn(move || {
-                    let response = match completion.recv() {
-                        Ok(Ok(())) => encode_success(
-                            id,
-                            ResponseResult::AgentPrompted {
-                                agent,
-                                accepted: true,
-                                observed: false,
-                                queued: false,
-                                queue_position: None,
-                            },
-                        ),
-                        Ok(Err(err)) if err.kind() == std::io::ErrorKind::TimedOut => {
-                            encode_error(id, "timeout", err.to_string())
-                        }
-                        Ok(Err(err)) => encode_error(id, "agent_prompt_failed", err.to_string()),
-                        Err(_) => encode_error(id, "agent_prompt_failed", "pty actor closed"),
-                    };
-                    let _ = respond_to.send(response);
-                });
+                let _ = handoff_tx.send((id, agent, completion));
             }
             Err(response) => {
                 let _ = respond_to.send(response);
@@ -150,11 +178,12 @@ impl App {
         true
     }
 
-    pub(super) fn queue_agent_prompt(
-        &mut self,
+    /// Runs every check that can reject a prompt without touching the pane.
+    fn validate_agent_prompt(
+        &self,
         id: String,
-        params: AgentPromptParams,
-    ) -> Result<AgentPromptDispatch, String> {
+        params: &AgentPromptParams,
+    ) -> Result<ValidatedAgentPrompt, String> {
         if params.text.is_empty() {
             return Err(encode_error(
                 id,
@@ -209,6 +238,99 @@ impl App {
                 ),
             ));
         }
+        let Some(agent) = self.agent_info(resolved.ws_idx, resolved.pane_id) else {
+            return Err(agent_not_found(id, &params.target));
+        };
+        Ok(ValidatedAgentPrompt {
+            id,
+            ws_idx: resolved.ws_idx,
+            pane_id: resolved.pane_id,
+            expected_agent,
+            agent,
+        })
+    }
+
+    pub(super) fn queue_agent_prompt(
+        &mut self,
+        id: String,
+        params: AgentPromptParams,
+    ) -> Result<AgentPromptDispatch, String> {
+        let validated = self.validate_agent_prompt(id, &params)?;
+        self.queue_validated_agent_prompt(validated, params)
+    }
+
+    fn queue_validated_agent_prompt(
+        &mut self,
+        validated: ValidatedAgentPrompt,
+        mut params: AgentPromptParams,
+    ) -> Result<AgentPromptDispatch, String> {
+        let admission_id = format!("agent-prompt:{}", self.next_agent_admission_id);
+        self.next_agent_admission_id = self.next_agent_admission_id.saturating_add(1);
+        let provider = params
+            .provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|provider| !provider.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| crate::detect::agent_label(validated.expected_agent).to_owned());
+        let Some(pane_id) = self.public_pane_id(validated.ws_idx, validated.pane_id) else {
+            return Err(agent_not_found(validated.id, &params.target));
+        };
+        if let crate::agent_admission::AdmissionDecision::Queued { position } = self
+            .agent_admission
+            .submit(crate::agent_admission::AdmissionRequest {
+                id: admission_id.clone(),
+                provider,
+                pane_id,
+            })
+        {
+            // A reused agent name must not redirect an already queued mutation.
+            params.target = self
+                .public_pane_id(validated.ws_idx, validated.pane_id)
+                .ok_or_else(|| agent_not_found(validated.id.clone(), &params.target))?;
+            self.queued_agent_prompts.insert(admission_id, params);
+            return Ok(AgentPromptDispatch::Queued {
+                id: validated.id,
+                agent: validated.agent,
+                position,
+            });
+        }
+        match self.submit_agent_prompt(validated, &params) {
+            Ok((id, agent, completion)) => Ok(AgentPromptDispatch::Submitted {
+                id,
+                agent,
+                completion,
+            }),
+            Err(response) => {
+                let released = self.agent_admission.cancel(&admission_id);
+                self.dispatch_released_agent_prompts(released);
+                Err(response)
+            }
+        }
+    }
+
+    fn submit_agent_prompt(
+        &mut self,
+        validated: ValidatedAgentPrompt,
+        params: &AgentPromptParams,
+    ) -> Result<
+        (
+            String,
+            crate::api::schema::AgentInfo,
+            std::sync::mpsc::Receiver<std::io::Result<()>>,
+        ),
+        String,
+    > {
+        let ValidatedAgentPrompt {
+            id,
+            ws_idx,
+            pane_id,
+            expected_agent,
+            agent,
+        } = validated;
+        let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
+            return Err(agent_not_found(id, &params.target));
+        };
         #[cfg(windows)]
         let submit_deadline = params
             .wait
@@ -224,56 +346,19 @@ impl App {
                     return Err(encode_error(id, "agent_prompt_failed", err.to_string()));
                 }
             };
-            if let Err(err) = runtime_before_admission.try_send_bytes(Bytes::from(focus)) {
+            if let Err(err) = runtime.try_send_bytes(Bytes::from(focus)) {
                 return Err(encode_error(id, "agent_prompt_failed", err.to_string()));
             }
         }
-        let (text, enter) = crate::app::api_helpers::encode_api_submission_parts(
-            runtime_before_admission,
-            &params.text,
-        );
+        let (text, enter) =
+            crate::app::api_helpers::encode_api_submission_parts(runtime, &params.text);
         #[cfg(windows)]
         let text = if expected_agent == crate::detect::Agent::Codex {
             let mut text = text;
-            append_codex_paste_boundary(runtime_before_admission, &mut text);
+            append_codex_paste_boundary(runtime, &mut text);
             text
         } else {
             text
-        };
-        let Some(agent) = self.agent_info(resolved.ws_idx, resolved.pane_id) else {
-            return Err(agent_not_found(id, &params.target));
-        };
-        let admission_id = format!("agent-prompt:{}", self.next_agent_admission_id);
-        self.next_agent_admission_id = self.next_agent_admission_id.saturating_add(1);
-        let provider = params
-            .provider
-            .as_deref()
-            .map(str::trim)
-            .filter(|provider| !provider.is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| crate::detect::agent_label(expected_agent).to_owned());
-        let Some(public_pane_id) = self.public_pane_id(resolved.ws_idx, resolved.pane_id) else {
-            return Err(agent_not_found(id, &params.target));
-        };
-        if let crate::agent_admission::AdmissionDecision::Queued { position } = self
-            .agent_admission
-            .submit(crate::agent_admission::AdmissionRequest {
-                id: admission_id.clone(),
-                provider,
-                pane_id: public_pane_id,
-            })
-        {
-            self.queued_agent_prompts.insert(admission_id, params);
-            return Ok(AgentPromptDispatch::Queued {
-                id,
-                agent,
-                position,
-            });
-        }
-        let Some(runtime) = self.lookup_runtime_sender(resolved.ws_idx, resolved.pane_id) else {
-            let released = self.agent_admission.cancel(&admission_id);
-            self.dispatch_released_agent_prompts(released);
-            return Err(agent_not_found(id, &params.target));
         };
         let completion = runtime
             .queue_user_input_submission(
@@ -282,16 +367,8 @@ impl App {
                 AGENT_PROMPT_SUBMIT_DELAY,
                 submit_deadline,
             )
-            .map_err(|err| {
-                let released = self.agent_admission.cancel(&admission_id);
-                self.dispatch_released_agent_prompts(released);
-                encode_error(id.clone(), "agent_prompt_failed", err.to_string())
-            })?;
-        Ok(AgentPromptDispatch::Submitted {
-            id,
-            agent,
-            completion,
-        })
+            .map_err(|err| encode_error(id.clone(), "agent_prompt_failed", err.to_string()))?;
+        Ok((id, agent, completion))
     }
 
     pub(super) fn handle_agent_read(
@@ -450,6 +527,14 @@ impl App {
 
         encode_success(id, ResponseResult::Ok {})
     }
+}
+
+struct ValidatedAgentPrompt {
+    id: String,
+    ws_idx: usize,
+    pane_id: crate::layout::PaneId,
+    expected_agent: crate::detect::Agent,
+    agent: crate::api::schema::AgentInfo,
 }
 
 fn agent_not_ready(id: String, target: &str) -> String {
@@ -695,6 +780,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_prompt_waiter_spawn_failure_fails_before_submitting() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::OpenCode), AgentState::Idle);
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        crate::thread_spawn::test_hook::fail_next_spawns(1);
+        let response = run_deferred_agent_prompt(
+            &mut app,
+            "req",
+            AgentPromptParams {
+                provider: None,
+
+                target: "reviewer".into(),
+                text: "hello".into(),
+                wait: None,
+            },
+        );
+
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "agent_prompt_failed");
+        std::thread::sleep(AGENT_PROMPT_SUBMIT_DELAY * 2);
+        assert!(rx.try_recv().is_err(), "a failed prompt must not be sent");
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_validation_errors_win_over_waiter_spawn_failure() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::OpenCode), AgentState::Idle);
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        for (target, text, code) in [
+            ("reviewer", "", "empty_agent_prompt"),
+            ("missing", "hello", "agent_not_found"),
+        ] {
+            crate::thread_spawn::test_hook::fail_next_spawns(1);
+            let response = run_deferred_agent_prompt(
+                &mut app,
+                "req",
+                AgentPromptParams {
+                    provider: None,
+
+                    target: target.into(),
+                    text: text.into(),
+                    wait: None,
+                },
+            );
+
+            let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+            assert_eq!(error.error.code, code);
+            assert!(
+                crate::thread_spawn::spawn_named("probe", || {}).is_err(),
+                "a rejected prompt must not start a waiter thread"
+            );
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn agent_prompt_rejects_blocked_agent_without_writing() {
         let mut app = app_with_agent();
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
@@ -905,5 +1062,164 @@ mod tests {
                 Some("shell-pane")
             );
         }
+    }
+
+    fn queued_prompt_app() -> (
+        App,
+        crate::layout::PaneId,
+        tokio::sync::mpsc::Receiver<Bytes>,
+    ) {
+        let mut app = app_with_agent();
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::OpenCode), AgentState::Working);
+        let (runtime, rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane, runtime);
+        app.agent_admission =
+            crate::agent_admission::AdmissionController::new(1, std::collections::HashMap::new());
+        (app, pane, rx)
+    }
+
+    fn occupy_admission(app: &mut App, id: &str, pane_id: String) {
+        assert_eq!(
+            app.agent_admission
+                .submit(crate::agent_admission::AdmissionRequest {
+                    id: id.into(),
+                    provider: "opencode".into(),
+                    pane_id,
+                }),
+            crate::agent_admission::AdmissionDecision::Admitted
+        );
+    }
+
+    fn queue_review_prompt(app: &mut App) {
+        assert!(matches!(
+            app.queue_agent_prompt(
+                "queued".into(),
+                AgentPromptParams {
+                    target: "reviewer".into(),
+                    text: "private queued prompt".into(),
+                    provider: None,
+                    wait: None,
+                }
+            )
+            .unwrap(),
+            AgentPromptDispatch::Queued { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn pane_workspace_and_group_close_drop_dead_queued_prompts_and_release_capacity() {
+        for close in ["pane", "workspace", "group"] {
+            let (mut app, pane, mut rx) = queued_prompt_app();
+            let public_pane = app.public_pane_id(0, pane).unwrap();
+            occupy_admission(&mut app, "running", public_pane.clone());
+            queue_review_prompt(&mut app);
+            if close == "group" {
+                let membership = |path: &str, linked| crate::workspace::WorktreeSpaceMembership {
+                    key: "repo-key".into(),
+                    label: "repo".into(),
+                    repo_root: "/repo".into(),
+                    checkout_path: path.into(),
+                    is_linked_worktree: linked,
+                };
+                app.state.workspaces[0].worktree_space = Some(membership("/repo", false));
+                let mut linked = crate::workspace::Workspace::test_new("linked");
+                linked.worktree_space = Some(membership("/repo-linked", true));
+                app.state.workspaces.push(linked);
+                app.state.ensure_test_terminals();
+            }
+            let method = if close == "pane" {
+                crate::api::schema::Method::PaneClose(crate::api::schema::PaneTarget {
+                    pane_id: public_pane,
+                })
+            } else {
+                crate::api::schema::Method::WorkspaceClose(
+                    crate::api::schema::WorkspaceCloseParams {
+                        workspace_id: app.public_workspace_id(0),
+                        close_group: close == "group",
+                    },
+                )
+            };
+            let response = app.handle_api_request(crate::api::schema::Request {
+                id: "close".into(),
+                method,
+            });
+            let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(response["result"]["type"], "ok", "{close}: {response}");
+            assert!(
+                app.queued_agent_prompts.is_empty(),
+                "{close} retained a dead prompt"
+            );
+            occupy_admission(&mut app, "surviving", "surviving-pane".into());
+            assert!(
+                rx.try_recv().is_err(),
+                "{close} replayed input to a closed pane"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn released_prompt_waiter_failure_requeues_without_input_and_retry_sends_once() {
+        let (mut app, pane, mut rx) = queued_prompt_app();
+        occupy_admission(&mut app, "running", "other-pane".into());
+        queue_review_prompt(&mut app);
+        let public_pane = app.public_pane_id(0, pane).unwrap();
+        assert_eq!(
+            app.queued_agent_prompts.values().next().unwrap().target,
+            public_pane
+        );
+        let released = app.agent_admission.cancel("running");
+        crate::thread_spawn::test_hook::fail_next_spawns(1);
+        app.dispatch_released_agent_prompts(released);
+        assert_eq!(
+            app.agent_admission.queue_position_for_pane(&public_pane),
+            Some(1)
+        );
+        assert_eq!(app.queued_agent_prompts.len(), 1);
+        assert!(rx.try_recv().is_err());
+        occupy_admission(&mut app, "retry-slot", "other-pane".into());
+        let retry = app.agent_admission.cancel("retry-slot");
+        app.dispatch_released_agent_prompts(retry);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap(),
+            Some(Bytes::from_static(b"private queued prompt"))
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap(),
+            Some(Bytes::from_static(b"\r"))
+        );
+        assert!(app.queued_agent_prompts.is_empty());
+        assert!(app.agent_admission.cancel("running").is_empty());
+        assert!(
+            rx.try_recv().is_err(),
+            "retry replayed an already submitted prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn replacement_process_discards_prompts_owned_by_the_previous_agent() {
+        let (mut app, pane, mut rx) = queued_prompt_app();
+        occupy_admission(&mut app, "running", "other-pane".into());
+        queue_review_prompt(&mut app);
+        app.handle_internal_event(crate::events::AppEvent::AgentProcessDetected {
+            pane_id: pane,
+            agent: Agent::OpenCode,
+            observed_at: std::time::Instant::now(),
+        });
+        assert!(app.queued_agent_prompts.is_empty());
+        assert!(app.agent_admission.cancel("running").is_empty());
+        assert!(
+            rx.try_recv().is_err(),
+            "a replacement inherited the old queued mutation"
+        );
     }
 }

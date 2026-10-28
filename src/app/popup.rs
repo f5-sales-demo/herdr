@@ -54,7 +54,7 @@ impl App {
                     crate::pane::AgentDetection::Disabled,
                     app.state.pane_scrollback_limit_bytes,
                     app.state.host_terminal_theme,
-                    app.state.host_terminal_appearance,
+                    app.pane_host_terminal_appearance(),
                     app.event_tx.clone(),
                     app.render_notify.clone(),
                     app.render_dirty.clone(),
@@ -87,7 +87,7 @@ impl App {
                     None,
                     app.state.pane_scrollback_limit_bytes,
                     app.state.host_terminal_theme,
-                    app.state.host_terminal_appearance,
+                    app.pane_host_terminal_appearance(),
                     app.event_tx.clone(),
                     app.render_notify.clone(),
                     app.render_dirty.clone(),
@@ -143,8 +143,8 @@ impl App {
         {
             self.state.view.terminal_area
         } else {
-            let (estimated_rows, estimated_cols) = self.state.estimate_pane_size();
-            ratatui::layout::Rect::new(0, 0, estimated_cols, estimated_rows)
+            let (cols, rows) = self.state.headless_size;
+            ratatui::layout::Rect::new(0, 0, cols, rows)
         };
         let Some(resolved_geometry) =
             resolve_popup_geometry(geometry.width, geometry.height, terminal_area)

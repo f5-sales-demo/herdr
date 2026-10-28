@@ -7,13 +7,15 @@ use std::sync::{Mutex, Once, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use portable_pty::CommandBuilder;
+
 static PID_REGISTRY: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 static RUNTIME_DIR_REGISTRY: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 static INIT: Once = Once::new();
 static CLEANUP_GUARD: OnceLock<CleanupGuard> = OnceLock::new();
 const WATCHDOG_SCAN_INTERVAL: Duration = Duration::from_secs(1);
 const RUNTIME_OWNER_MARKER: &str = ".herdr-test-owner-pid";
-pub const CURRENT_PROTOCOL: u32 = 27;
+pub const CURRENT_PROTOCOL: u32 = 28;
 pub const CURRENT_ENDPOINT_PROTOCOL_GENERATION: u32 = 1;
 pub const SERVER_MESSAGE_SERVER_SHUTDOWN: u32 = 3;
 pub const SERVER_MESSAGE_ENDPOINT_CONTROL: u32 = 20;
@@ -24,6 +26,11 @@ const CLIENT_MESSAGE_CLIENT_SHELL_PANE_INPUT: u32 = 13;
 const CLIENT_MESSAGE_CLIENT_SHELL_FOCUS: u32 = 18;
 const CLIENT_MESSAGE_ENDPOINT_CONTROL: u32 = 20;
 
+pub fn isolate_herdr_test_process(command: &mut CommandBuilder) {
+    command.env_remove("HERDR_STARTUP_CWD");
+    command.env_remove("HERDR_SESSION");
+}
+
 pub fn register_spawned_herdr_pid(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
@@ -32,6 +39,19 @@ pub fn register_spawned_herdr_pid(pid: Option<u32>) {
     ensure_cleanup_hooks();
     let mut registry = pid_registry_lock();
     registry.insert(pid);
+}
+
+/// Asks a spawned herdr process to exit. portable-pty's `kill` sends SIGHUP,
+/// which the server deliberately ignores.
+pub fn stop_spawned_herdr(child: &mut (dyn portable_pty::Child + Send + Sync)) {
+    match child.process_id() {
+        Some(pid) => unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        },
+        None => {
+            let _ = child.kill();
+        }
+    }
 }
 
 pub fn unregister_spawned_herdr_pid(pid: Option<u32>) {

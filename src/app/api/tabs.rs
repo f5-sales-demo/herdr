@@ -65,11 +65,11 @@ impl App {
         let cwd = cwd.map(PathBuf::from).unwrap_or_else(|| {
             self.resolve_new_terminal_cwd(self.focused_pane_cwd_in_workspace(ws_idx))
         });
-        let (rows, cols) = self.state.estimate_pane_size();
+        let (rows, cols) = self.state.new_pane_size(crate::ui::NewPanePlacement::Alone);
         let default_shell = self.state.default_shell.clone();
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
-        let host_terminal_appearance = self.state.host_terminal_appearance;
+        let host_terminal_appearance = self.pane_host_terminal_appearance();
         let extra_env = match super::env::normalize_launch_env(env) {
             Ok(env) => env,
             Err((code, message)) => return encode_error(id, &code, message),
@@ -237,6 +237,12 @@ impl App {
             .collect::<Vec<_>>();
 
         if closes_workspace {
+            if let Err(response) = self.require_restored_group_close_ready(
+                &id,
+                &self.state.workspace_close_indices(ws_idx),
+            ) {
+                return response;
+            }
             if self.state.confirm_implicit_worktree_group_close(ws_idx) {
                 return encode_error(
                     id,

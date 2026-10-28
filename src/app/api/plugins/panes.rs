@@ -115,22 +115,33 @@ impl App {
             crate::api::schema::SplitDirection::Right => Direction::Horizontal,
             crate::api::schema::SplitDirection::Down => Direction::Vertical,
         };
-        let (rows, cols) = self.state.estimate_pane_size();
+        let new_pane_placement = if placement == PluginPanePlacement::Zoomed {
+            crate::ui::NewPanePlacement::ZoomedOverlay
+        } else {
+            crate::ui::NewPanePlacement::Split {
+                ws_idx,
+                target: target_pane,
+                direction,
+                ratio: 0.5,
+            }
+        };
+        let (rows, cols) = self.state.new_pane_size(new_pane_placement);
         let previous_focus = self.state.current_pane_focus_target();
+        let host_terminal_appearance = self.pane_host_terminal_appearance();
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return encode_error(id, "workspace_not_found", "workspace not found");
         };
         let result = ws.split_pane_argv_command(
             target_pane,
             direction,
-            rows.max(4),
-            cols.max(10),
+            rows,
+            cols,
             Some(cwd),
             &pane.command,
             extra_env,
             self.state.pane_scrollback_limit_bytes,
             self.state.host_terminal_theme,
-            self.state.host_terminal_appearance,
+            host_terminal_appearance,
             params.focus || placement == PluginPanePlacement::Zoomed,
         );
         let (tab_idx, new_pane) = match result {
@@ -195,19 +206,20 @@ impl App {
                 Ok(env) => env,
                 Err((code, message)) => return encode_error(id, &code, message),
             };
-        let (rows, cols) = self.state.estimate_pane_size();
+        let (rows, cols) = self.state.new_pane_size(crate::ui::NewPanePlacement::Alone);
+        let host_terminal_appearance = self.pane_host_terminal_appearance();
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return encode_error(id, "workspace_not_found", "workspace not found");
         };
         let (tab_idx, terminal, runtime) = match ws.create_tab_argv_command(
-            rows.max(4),
-            cols.max(10),
+            rows,
+            cols,
             cwd,
             &pane.command,
             extra_env,
             self.state.pane_scrollback_limit_bytes,
             self.state.host_terminal_theme,
-            self.state.host_terminal_appearance,
+            host_terminal_appearance,
             None,
         ) {
             Ok(result) => result,

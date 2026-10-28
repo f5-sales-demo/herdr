@@ -49,7 +49,11 @@ impl App {
                 self.state.selected,
             );
             let history = self.persist_pane_history.then(|| {
-                crate::persist::capture_history(&self.state.workspaces, &self.terminal_runtimes)
+                crate::persist::capture_history(
+                    &snapshot,
+                    &self.state.workspaces,
+                    &self.terminal_runtimes,
+                )
             });
             SessionSaveJob::Save { snapshot, history }
         }
@@ -57,6 +61,11 @@ impl App {
 
     pub(crate) fn start_background_session_save(&mut self) {
         if !self.policy.persist_session {
+            self.session_save_deadline = None;
+            return;
+        }
+
+        if self.pane_exit_checkpoint_pending && !self.state.session_dirty {
             self.session_save_deadline = None;
             return;
         }
@@ -112,7 +121,7 @@ impl App {
     pub(crate) fn finish_checkpointed_pane_exit(&mut self) {
         if self.pane_exit_checkpoint_pending {
             self.state.session_dirty = false;
-            self.session_save_deadline = Some(Instant::now() + SESSION_SAVE_DEBOUNCE);
+            self.session_save_deadline = None;
         }
     }
 

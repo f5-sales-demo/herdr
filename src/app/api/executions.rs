@@ -109,7 +109,7 @@ impl App {
                 )
             }
         };
-        let (rows, cols) = self.state.estimate_pane_size();
+        let (rows, cols) = self.state.new_pane_size(crate::ui::NewPanePlacement::Alone);
         let mut env: Vec<(String, String)> = claimed
             .injected_env
             .iter()
@@ -252,7 +252,7 @@ impl App {
                 )
             }
         };
-        let (rows, cols) = self.state.estimate_pane_size();
+        let (rows, cols) = self.state.new_pane_size(crate::ui::NewPanePlacement::Alone);
         let Some(producer_capability) = manager.native_capability(&params.execution_id) else {
             return self.fail_visible_execution(
                 id,
