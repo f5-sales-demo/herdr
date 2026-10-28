@@ -338,6 +338,38 @@ def native_case_lifecycle(case_id: str) -> tuple[str, bool]:
     return "managed_turn_v1", True
 
 
+def semantic_trace(records: list[dict[str, Any]]) -> list[tuple[int, str]]:
+    """Project status changes while retaining all distinct journal events."""
+    trace: list[tuple[int, str]] = []
+    for record in records:
+        report = record.get("report", record)
+        pair = (report.get("generation"), report.get("state"))
+        if not trace or trace[-1] != pair:
+            trace.append(pair)
+    return trace
+
+
+def trace_matches(case: dict[str, Any], records: list[dict[str, Any]]) -> bool:
+    expected = case.get("expected_generation_states")
+    if expected is not None:
+        actual: dict[str, list[str]] = {}
+        for generation, state in semantic_trace(records):
+            states = actual.setdefault(str(generation), [])
+            if not states or states[-1] != state:
+                states.append(state)
+        return actual == expected
+    trace = semantic_trace(records)
+    return ([state for _, state in trace] == case["expected_states"]
+            and (case.get("expected_generations") is None
+                 or [generation for generation, _ in trace] == case["expected_generations"]))
+
+
+def admission_binding(task: dict[str, Any], session_id: str) -> dict[str, Any]:
+    if not isinstance(task.get("id"), str) or not isinstance(task.get("pane_id"), str):
+        raise PreflightError("admission lacks authoritative execution/pane binding")
+    return {"execution_id": task["id"], "pane_id": task["pane_id"], "session_id": session_id}
+
+
 def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str, timeout: float = 90,
                  controller: Any | None = None) -> dict[str, Any]:
     """Drive one real installed xcsh prompt through the atomic broker adapter."""
@@ -351,11 +383,13 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
     if controller is None:
         raise PreflightError("installed execution requires an authenticated controller-owned xcsh session")
     try:
-        session_receipt = controller.create_xcsh_session(
-            Path(runtime["xcsh_executable"]), runtime["xcsh_executable_sha256"],
-            Path(runtime.get("cwd", "/")),
-            Path(runtime["xcsh_session_dir"]) / f"{run_id}-{case['id']}-{uuid.uuid4().hex}",
-        )
+        session_args = (Path(runtime["xcsh_executable"]), runtime["xcsh_executable_sha256"],
+                        Path(runtime.get("cwd", "/")),
+                        Path(runtime["xcsh_session_dir"]) / f"{run_id}-{case['id']}-{uuid.uuid4().hex}")
+        if hasattr(controller, "session_for_run"):
+            session_receipt = controller.session_for_run(f"{run_id}:{case['id']}", *session_args)
+        else:
+            session_receipt = controller.create_xcsh_session(*session_args)
         session_id = session_receipt["session_id"]
         executable = session_receipt.get("xcsh_executable")
         executable_sha256 = session_receipt.get("xcsh_executable_sha256")
@@ -397,6 +431,7 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
             controller.register_execution(task)
         except Exception as exc:
             raise PreflightError(f"controller could not bind exact broker execution admission: {exc}") from exc
+    bindings = {0: admission_binding(task, session_id)}
     records: list[dict[str, Any]] = []
     cursor, continued, cancelled, controlled = 0, False, False, False
     control_receipt: dict[str, Any] | None = None
@@ -407,13 +442,32 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
         records.extend(fresh)
         if fresh:
             applied = unix_request(broker_socket, "consume_native_turns", {}).get("applied", [])
-            expected_state = fresh[-1].get("report", fresh[-1]).get("state")
-            if not any(item.get("task_id") == task["id"] and item.get("state") in {expected_state, "waiting_human", "unknown"} for item in applied):
-                raise PreflightError("native consumer did not apply the observed semantic transition")
-        states = [record.get("report", record).get("state") for record in records]
-        if states and states[-1] == "waiting_input" and case["id"] in {"continuation", "generation_supersession"} and not continued:
+            current = [item for item in fresh if item.get("report", item).get("generation") == max(bindings)]
+            expected_state = current[-1].get("report", current[-1]).get("state") if current else None
+            if current and not any(item.get("task_id") == task["id"] and item.get("state") in {expected_state, "waiting_human", "unknown"} for item in applied):
+                # The background consumer may have committed this batch already.
+                # Prove its durable producer cursor instead of replaying effects.
+                status = unix_request(broker_socket, "status", {"task_id": task["id"]})
+                observed = next((item for item in status.get("tasks", []) if item.get("id") == task["id"]), {})
+                latest = current[-1].get("report", current[-1])
+                if (observed.get("run_generation") != latest.get("generation")
+                        or observed.get("native_turn_id") != latest.get("turn_id")
+                        or not isinstance(observed.get("native_event_revision"), int)
+                        or observed["native_event_revision"] < latest.get("event_revision", 0)):
+                    raise PreflightError("native consumer did not durably apply the observed semantic transition")
+        states = [state for _, state in semantic_trace(records)]
+        current_reports = [item.get("report", item) for item in records
+                           if item.get("report", item).get("generation") == max(bindings)]
+        current_state = current_reports[-1].get("state") if current_reports else None
+        if current_state == "waiting_input" and case["id"] in {"continuation", "generation_supersession"} and not continued:
             def continuation() -> dict[str, Any]:
-                return unix_request(broker_socket, "continue_task", {"task_id": task["id"], "text": "isolated UAT continuation label"})
+                receipt = unix_request(broker_socket, "continue_task", {"task_id": task["id"], "text": prompt})
+                generation = receipt.get("run_generation")
+                if (receipt.get("admission_uncertain") or not isinstance(generation, int)
+                        or generation != max(bindings) + 1 or receipt.get("id") != task["id"]):
+                    raise PreflightError("continuation lacks authoritative generation receipt")
+                bindings[generation] = admission_binding(receipt, session_id)
+                return receipt
             if case["id"] == "generation_supersession":
                 control_receipt = controller.real_action("generation_supersession", task["pane_id"],
                     f"{run_id}:{case['id']}:continue", controller.token, continuation)
@@ -452,12 +506,13 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
             pong = herdr_request(herdr_socket, "ping", {})
             if int((pong or {}).get("protocol", 0)) < 24 or not ((pong or {}).get("capabilities") or {}).get("agent_turn_journal"):
                 raise PreflightError("restart controller receipt did not reconnect to protocol-26 interaction-capable native-launch journal runtime")
-        if states == case["expected_states"] and states[-1] == "waiting_input":
+        if trace_matches(case, records) and current_state == "waiting_input":
             observed = unix_request(broker_socket, "status", {"task_id": task["id"]})["tasks"][0]
-            validate_journal(case, records, observed, None, fixture=fixture)
+            validate_journal(case, records, observed, None, fixture=fixture, bindings=bindings)
             return {"scenario_id": case["id"], "task_id": task["id"], "pass": True, "evidence_class": "installed_waiting_input"}
-        if states and states[-1] in {"completed", "failed", "cancelled", "lost", "interrupted"}:
-            break
+        if current_state in {"completed", "failed", "cancelled", "lost", "interrupted"}:
+            if trace_matches(case, records) or current_state != case["expected_states"][-1]:
+                break
         # agent.turn.wait is an observation-only long poll; it must never be
         # confused with a report injection.
         herdr_request(herdr_socket, "agent.turn.wait", {"after_revision": cursor, "timeout_ms": 1000})
@@ -490,7 +545,7 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
         time.sleep(.2)
     if not consumed:
         raise PreflightError("manager consumption receipt was not observed; do not self-acknowledge it")
-    validate_journal(case, records, observed_task, consumed, fixture=fixture)
+    validate_journal(case, records, observed_task, consumed, fixture=fixture, bindings=bindings)
     if case["id"] == "cleanup":
         control_receipt = wait_for_manager_cleanup(broker_socket, herdr_socket, task, deadline)
     if case["id"] in controlled_cases and control_receipt is None:
@@ -511,30 +566,50 @@ def execute(manifest: dict[str, Any], catalog: dict[str, Any], *, run_id: str | 
 
 
 def validate_journal(case: dict[str, Any], records: list[dict[str, Any]], task: dict[str, Any], consumed: dict[str, Any] | None,
-                     *, fixture: dict[str, str] | None = None) -> None:
+                     *, fixture: dict[str, str] | None = None,
+                     bindings: dict[int, dict[str, Any]] | None = None) -> None:
     """Oracle for real journal observations; no prose/sentinel inference."""
     if not records:
         raise AssertionError("no real semantic journal records")
-    expected_states = case["expected_states"]
     reports = [record.get("report", record) for record in records]
     if any(record.get("synthetic") is True for record in records):
         raise AssertionError("synthetic journal records are not installed-runtime evidence")
     revisions = [record.get("revision") for record in records]
     if revisions != sorted(set(revisions)):
         raise AssertionError("journal revisions are not strictly monotonic/deduplicated")
-    if [report.get("state") for report in reports] != expected_states:
-        raise AssertionError("semantic state trace differs from scenario oracle")
-    expected_generations = case.get("expected_generations")
-    if expected_generations is not None and [report.get("generation") for report in reports] != expected_generations:
-        raise AssertionError("semantic generation trace differs from scenario oracle")
+    if not trace_matches(case, records):
+        raise AssertionError("semantic state/generation trace differs from scenario oracle")
+    if bindings is None:
+        bindings = {int(task.get("run_generation", 0)): admission_binding(task, task.get("agent_session_id"))}
+    for generation in sorted(bindings):
+        if generation == min(bindings):
+            continue
+        previous_wait = [record["revision"] for record, report in zip(records, reports)
+                         if report.get("generation") == generation - 1 and report.get("state") == "waiting_input"]
+        successor_start = [record["revision"] for record, report in zip(records, reports)
+                           if report.get("generation") == generation and report.get("state") == "starting"]
+        if not previous_wait or not successor_start or min(successor_start) <= min(previous_wait):
+            raise AssertionError("successor started before its predecessor continuation boundary")
+    event_ids = [(report.get("generation"), report.get("turn_id"), report.get("event_revision")) for report in reports]
+    if len(event_ids) != len(set(event_ids)):
+        raise AssertionError("journal repeats a logical producer event")
     for report in reports:
         if report.get("producer") != "xcsh" or not report.get("turn_id") or not isinstance(report.get("event_revision"), int):
             raise AssertionError("journal producer/turn/event revision is invalid")
-        if report.get("execution_id") != task["id"] or report.get("pane_id") != task.get("pane_id"):
+        if report.get("state") in {"failed", "cancelled", "lost", "interrupted"} and not report.get("reason"):
+            raise AssertionError("non-completed terminal semantic reason is missing")
+        if report.get("state") == "completed":
+            result, digest = report.get("result"), report.get("result_digest")
+            if not isinstance(result, str) or hashlib.sha256(result.encode()).hexdigest() != digest:
+                raise AssertionError("completed result digest is invalid")
+        binding = bindings.get(report.get("generation"))
+        if binding is None:
+            raise AssertionError("journal generation lacks an authoritative admission binding")
+        if report.get("execution_id") != binding["execution_id"] or report.get("pane_id") != binding["pane_id"]:
             raise AssertionError("journal execution/pane provenance mismatch")
-        if report.get("session_id") != task.get("agent_session_id"):
+        if report.get("session_id") != binding["session_id"]:
             raise AssertionError("journal session provenance mismatch")
-    terminal = reports[-1]
+    terminal = next(report for report in reversed(reports) if report.get("generation") == max(bindings))
     if terminal["state"] == "completed":
         result, digest = terminal.get("result"), terminal.get("result_digest")
         if not isinstance(result, str) or hashlib.sha256(result.encode()).hexdigest() != digest:
