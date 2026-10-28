@@ -1,7 +1,83 @@
 use std::env;
+use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+const REQUIRED_ZIG_VERSION: &str = "0.16.0";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ZigCandidate {
+    label: String,
+    executable: OsString,
+}
+
+fn zig_candidate(label: impl Into<String>, executable: impl Into<OsString>) -> ZigCandidate {
+    ZigCandidate {
+        label: label.into(),
+        executable: executable.into(),
+    }
+}
+
+fn versioned_zig_paths(home: &Path) -> Vec<PathBuf> {
+    let executable = format!("zig{}", env::consts::EXE_SUFFIX);
+    vec![
+        home.join(".local/opt")
+            .join(format!("zig-{REQUIRED_ZIG_VERSION}"))
+            .join(&executable),
+        home.join(format!("zig-{REQUIRED_ZIG_VERSION}"))
+            .join(executable),
+    ]
+}
+
+fn zig_candidates() -> Vec<ZigCandidate> {
+    if let Some(explicit) = env::var_os("ZIG") {
+        return vec![zig_candidate("ZIG", explicit)];
+    }
+
+    let mut candidates = vec![zig_candidate("zig on PATH", "zig")];
+    let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE"));
+    if let Some(home) = home {
+        for path in versioned_zig_paths(Path::new(&home)) {
+            candidates.push(zig_candidate(
+                format!("user-local {}", path.display()),
+                path.into_os_string(),
+            ));
+        }
+    }
+    candidates
+}
+
+fn select_zig(
+    candidates: &[ZigCandidate],
+    mut version: impl FnMut(&ZigCandidate) -> Result<String, String>,
+) -> Result<ZigCandidate, String> {
+    let mut rejected = Vec::new();
+    for candidate in candidates {
+        match version(candidate) {
+            Ok(found) if found.trim() == REQUIRED_ZIG_VERSION => return Ok(candidate.clone()),
+            Ok(found) => rejected.push(format!("{} reported {}", candidate.label, found.trim())),
+            Err(error) => rejected.push(format!("{}: {error}", candidate.label)),
+        }
+    }
+    Err(format!(
+		"no usable Zig {REQUIRED_ZIG_VERSION} compiler found; {}. Set ZIG to an exact Zig {REQUIRED_ZIG_VERSION} binary or install it in ~/.local/opt/zig-{REQUIRED_ZIG_VERSION}/",
+		rejected.join("; ")
+	))
+}
+
+fn resolve_zig() -> Result<ZigCandidate, String> {
+    select_zig(&zig_candidates(), |candidate| {
+        let output = Command::new(&candidate.executable)
+            .arg("version")
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(format!("`zig version` exited with {}", output.status));
+        }
+        String::from_utf8(output.stdout).map_err(|error| error.to_string())
+    })
+}
 
 fn zig_target(target: &str) -> &str {
     match target {
@@ -53,6 +129,9 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SIMD");
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_ZIG_SYSTEM_DIR");
     println!("cargo:rerun-if-env-changed=ZIG");
+    println!("cargo:rerun-if-env-changed=PATH");
+    println!("cargo:rerun-if-env-changed=HOME");
+    println!("cargo:rerun-if-env-changed=USERPROFILE");
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_WINDOWS_LIBC");
 
     let optimize = env::var("LIBGHOSTTY_VT_OPTIMIZE").unwrap_or_else(|_| "ReleaseFast".into());
@@ -69,8 +148,12 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let zig_prefix = out_dir.join("zig-out");
 
-    let zig = env::var("ZIG").unwrap_or_else(|_| "zig".into());
-    let mut command = Command::new(&zig);
+    let zig = resolve_zig().unwrap_or_else(|error| panic!("{error}"));
+    println!(
+        "cargo:warning=using Zig {REQUIRED_ZIG_VERSION} from {}",
+        zig.label
+    );
+    let mut command = Command::new(&zig.executable);
     command
         .arg("build")
         .arg("--prefix")
@@ -133,5 +216,46 @@ fn main() {
         println!("cargo:rustc-link-lib=static=ghostty-vt-static");
     } else {
         println!("cargo:rustc-link-lib=static=ghostty-vt");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_zig_candidate_does_not_fall_back_to_path() {
+        let candidates = vec![zig_candidate("ZIG", "/opt/zig")];
+        let error = select_zig(&candidates, |_| Ok("0.15.2".into())).unwrap_err();
+        assert!(error.contains("ZIG reported 0.15.2"));
+    }
+
+    #[test]
+    fn selects_user_local_candidate_after_wrong_path_version() {
+        let candidates = vec![
+            zig_candidate("zig on PATH", "zig"),
+            zig_candidate("user-local", "/home/test/.local/opt/zig-0.16.0/zig"),
+        ];
+        let selected = select_zig(&candidates, |candidate| {
+            Ok(if candidate.label == "zig on PATH" {
+                "0.15.2"
+            } else {
+                REQUIRED_ZIG_VERSION
+            }
+            .into())
+        })
+        .unwrap();
+        assert_eq!(selected.label, "user-local");
+    }
+
+    #[test]
+    fn user_local_paths_include_versioned_opt_installation() {
+        let paths = versioned_zig_paths(Path::new("/home/test"));
+        assert_eq!(
+            paths[0],
+            Path::new("/home/test")
+                .join(".local/opt/zig-0.16.0")
+                .join(format!("zig{}", env::consts::EXE_SUFFIX))
+        );
     }
 }
