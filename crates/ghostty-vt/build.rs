@@ -31,12 +31,21 @@ fn versioned_zig_paths(home: &Path) -> Vec<PathBuf> {
 }
 
 fn zig_candidates() -> Vec<ZigCandidate> {
-    if let Some(explicit) = env::var_os("ZIG") {
+    zig_candidates_with_inputs(
+        env::var_os("ZIG"),
+        env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")),
+    )
+}
+
+fn zig_candidates_with_inputs(
+    explicit: Option<OsString>,
+    home: Option<OsString>,
+) -> Vec<ZigCandidate> {
+    if let Some(explicit) = explicit {
         return vec![zig_candidate("ZIG", explicit)];
     }
 
     let mut candidates = vec![zig_candidate("zig on PATH", "zig")];
-    let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE"));
     if let Some(home) = home {
         for path in versioned_zig_paths(Path::new(&home)) {
             candidates.push(zig_candidate(
@@ -225,7 +234,9 @@ mod tests {
 
     #[test]
     fn explicit_zig_candidate_does_not_fall_back_to_path() {
-        let candidates = vec![zig_candidate("ZIG", "/opt/zig")];
+        let candidates =
+            zig_candidates_with_inputs(Some("/opt/zig".into()), Some("/home/test".into()));
+        assert_eq!(candidates.len(), 1);
         let error = select_zig(&candidates, |_| Ok("0.15.2".into())).unwrap_err();
         assert!(error.contains("ZIG reported 0.15.2"));
     }
@@ -246,6 +257,29 @@ mod tests {
         })
         .unwrap();
         assert_eq!(selected.label, "user-local");
+    }
+
+    #[test]
+    fn matching_path_precedes_user_local_compilers() {
+        let candidates = zig_candidates_with_inputs(None, Some("/home/test".into()));
+        let selected = select_zig(&candidates, |_| Ok(REQUIRED_ZIG_VERSION.into())).unwrap();
+        assert_eq!(selected.label, "zig on PATH");
+    }
+
+    #[test]
+    fn unavailable_and_wrong_version_compilers_fail_with_diagnostics() {
+        let candidates = zig_candidates_with_inputs(None, Some("/home/test".into()));
+        let error = select_zig(&candidates, |candidate| {
+            if candidate.label == "zig on PATH" {
+                Err("executable missing".into())
+            } else {
+                Ok("0.15.2".into())
+            }
+        })
+        .unwrap_err();
+        assert!(error.contains("no usable Zig 0.16.0 compiler found"));
+        assert!(error.contains("executable missing"));
+        assert!(error.contains("0.15.2"));
     }
 
     #[test]
