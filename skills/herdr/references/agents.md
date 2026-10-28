@@ -21,6 +21,7 @@ Reporter authority must be live and bound to the current pane occupant. After a 
 
 ## Interpret lifecycle conservatively
 
+- `queued`: the server retains a prompt while admission limits prevent dispatch; this is not delivery or execution evidence.
 - `working`: the authority reports or detects activity.
 - `blocked`: a known approval, question, or permission surface needs a decision.
 - `idle`: the agent is ready for input and seen according to the server view.
@@ -39,6 +40,6 @@ If the target is already blocked, `agent prompt` returns `agent_blocked` without
 
 ## Restore native sessions
 
-Snapshot restoration recreates layout but not arbitrary processes. Herdr resumes an agent conversation only when a current integration supplied a valid native session reference and the installed kind supports a resume command. Check `integration status` instead of assuming that detection implies restoration.
+Snapshot restoration retains layout and saved directories but does not preserve arbitrary processes. Herdr can resume an agent conversation from a valid native integration reference or an accepted agent-reported resume command. Native xcsh execution provenance remains authoritative over reported commands. Configured `[session.resume_agent_args]` apply to the selected command. Check `integration status` and the current session binding instead of assuming that detection implies restoration.
 
-Unsupported, missing, stale, duplicated, or invalid session references restore as shells. After restoration, rediscover the pane occupant and lifecycle authority before prompting. A live handoff preserves processes only when explicitly requested and successful; it is not the same as native session restoration.
+Unsupported, missing, stale or invalid resume references fall back to shells; duplicate conversation resumes are suppressed. An unavailable saved directory or shell stays visible as an unavailable pane with its saved intent intact. After restoration, rediscover the pane occupant and lifecycle authority before prompting. A live handoff preserves processes only when explicitly requested and successful; it is not the same as native session restoration.

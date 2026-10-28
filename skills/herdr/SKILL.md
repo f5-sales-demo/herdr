@@ -49,7 +49,9 @@ Do not run bare `herdr` for discovery; it launches or attaches the TUI. Do not p
 
 Before advanced behavior, require its named server capability. API consumers read the `ping` response; CLI consumers use the relevant status or discovery response. Treat a missing name as unsupported even when a numeric protocol looks new enough. Use numeric compatibility only where the installed interface documents that fallback. Do not stop, replace, or update an older server merely because a capability is absent.
 
-When a pane API advertises optional terminal features, use only those advertised values. For graphics, query `pane.graphics.info`; use its limits and transport acknowledgement rather than assuming Kitty graphics support from the outer terminal name.
+Image producers emit standard Kitty graphics through their pane's terminal output. In managed fork panes, `HERDR_ENV=1` together with `HERDR_KITTY_GRAPHICS=1` advertises enabled graphics; honor the absence of that child capability. Herdr owns image retention, clipping and delivery to the outer terminal.
+
+This release uses private client/server protocol 28 and endpoint generation 1. A running protocol-27 server cannot adopt the new binary in place.
 
 ## Target topology and identity explicitly
 
