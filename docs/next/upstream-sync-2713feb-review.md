@@ -30,13 +30,13 @@ Japanese and Chinese locale trees retain their fork baseline for the separate lo
 | `.github/workflows/preview.yml` | semantic auto merge | Official action pins; retain guards that disable upstream preview publication in the fork. |
 | `.github/workflows/release.yml` | direct conflict | Preserve disabled upstream release workflow; fork publication remains downstream-release. |
 | `AGENTS.md` | direct conflict | Preserve fork governance, autonomous commits, build-xcsh and release policy. |
-| `CHANGELOG.md` | direct conflict | Preserve fork stable release history; new release notes staged separately. |
+| `CHANGELOG.md` | direct conflict | Retain fork history and stage English sync notes with source version still 0.19.4. |
 | `Cargo.lock` | direct conflict | Official pinned dependency graph, fork version 0.19.4 and uuid dependency; regenerated from merged manifest. |
 | `Cargo.toml` | direct conflict | Adopt official workspace ghostty-vt and dependencies while retaining 0.19.4 and fork package URLs. |
 | `README.md` | semantic auto merge | Adopt official agent-support links; retain fork repository and installation contracts. |
 | `distribution/latest.json` | direct conflict | Preserve immutable fork stable manifest; updated only by fork publication. |
 | `distribution/preview.json` | direct conflict | Preserve disabled fork preview manifest. |
-| `docs/next/CHANGELOG.md` | direct conflict | Preserve fork next changelog; integrated release notes authored in English separately. |
+| `docs/next/CHANGELOG.md` | direct conflict | Finalize English sync notes and keep root/next changelogs identical. |
 | `docs/next/README.md` | semantic auto merge | Adopt official English agent-support links; retain fork installation contracts. |
 | `docs/next/api/herdr-api.schema.json` | semantic auto merge | Regenerate from resolved Rust schema at protocol 28; fork runtime APIs included and custom graphics APIs removed. |
 | `docs/next/website/src/content/docs/agents.mdx` | direct conflict | Adopt official English guidance with fork xcsh and graphics-capability context; preserve disabled preview publication. |
@@ -105,7 +105,7 @@ Japanese and Chinese locale trees retain their fork baseline for the separate lo
 | `scripts/docs/versions.integration.test.ts` | semantic auto merge | Official Windows junction rejection; retain fork English-only README and manifest guards. |
 | `scripts/package_windows_conpty.py` | semantic auto merge | Official additive build-local support; retain fork HTTPError.fp handling and pinned packaging. |
 | `scripts/test_release.py` | direct conflict | Retain fork deletion of upstream-only release tests; fork publication tests remain authoritative. |
-| `skills/herdr/SKILL.md` | direct conflict | Preserve latest stable fork skill pending release audit. |
+| `skills/herdr/SKILL.md` | direct conflict | Preserve current stable guidance; stage native Kitty/protocol-28 guidance under docs/next and promote it with the release version bump. |
 | `src/agent_resume.rs` | semantic auto merge | Official reported-command validation with fork xcsh path/ID support and native --resume planning retained. |
 | `src/api/mod.rs` | direct conflict | Use official operation metadata for presentation impact; fork operations unioned in schema. |
 | `src/api/schema.rs` | direct conflict | Adopt official operation catalog and union fork execution/turn/interactions/recaps/worker-context/heartbeat; remove custom graphics methods. |

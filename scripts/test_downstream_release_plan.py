@@ -8,6 +8,7 @@ from pathlib import Path
 if __package__:
     from scripts.downstream_release_plan import (
         bump,
+        promote_staged_release_skill,
         release_level,
         replace_lockfile_version,
         replace_package_version,
@@ -15,6 +16,7 @@ if __package__:
 else:
     from downstream_release_plan import (
         bump,
+        promote_staged_release_skill,
         release_level,
         replace_lockfile_version,
         replace_package_version,
@@ -66,6 +68,31 @@ class ReleasePlanTests(unittest.TestCase):
         level = release_level(messages)
         self.assertEqual(level, "major")
         self.assertEqual(bump("0.19.4", level), "0.20.0")
+
+    def test_release_skill_promotion_preserves_unstaged_references(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stable = root / "skills/herdr"
+            staged = root / "docs/next/skills/herdr"
+            (stable / "references").mkdir(parents=True)
+            (staged / "references").mkdir(parents=True)
+            (stable / "SKILL.md").write_text("stable guide")
+            (stable / "references/agents.md").write_text("stable agents")
+            (stable / "references/automation.md").write_text("retain automation")
+            (staged / "SKILL.md").write_text("native Kitty guide")
+            (staged / "references/agents.md").write_text("native provenance")
+            promote_staged_release_skill(root)
+            self.assertEqual((stable / "SKILL.md").read_text(), "native Kitty guide")
+            self.assertEqual((stable / "references/agents.md").read_text(), "native provenance")
+            self.assertEqual((stable / "references/automation.md").read_text(), "retain automation")
+            promote_staged_release_skill(root)
+            self.assertEqual((stable / "SKILL.md").read_text(), "native Kitty guide")
+
+    def test_release_skill_promotion_without_staged_files_is_a_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            promote_staged_release_skill(root)
+            self.assertFalse((root / "skills").exists())
 
     def test_non_conventional_commit_does_not_release(self) -> None:
         self.assertIsNone(release_level(["miscellaneous cleanup"]))

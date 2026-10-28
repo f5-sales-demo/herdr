@@ -2,13 +2,23 @@
 
 ## Unreleased
 
+### Breaking Changes
+- Standard Kitty graphics in pane terminal output replaces `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, and `pane.graphics.stream`. Removed methods return `unknown_method`. (#138)
+- Private client/server protocol 28 rejects protocol-27 peers. Use a fresh matching server or restart the affected server after installation; a running protocol-27 server cannot adopt the new binary in place. Endpoint generation remains 1. (#138)
+
 ### Added
+- Synchronize official Herdr through `2713feb56e9c9db33992db0a262c68f7426d46dd`, preserving 192 official commits and ancestry. This adds multiple prefixes, configurable pane clearing, reported resume commands, staggered restore, plugin updates, terminal mouse control, SSH recovery and current Windows input/security behavior. (#138)
 - Agent recaps are now retained across server restarts and shown for an agent's current session in the sidebar, `herdr agent get`, and `herdr agent recap get`. The `agent_recaps: 1` capability lets xcsh report them without changing turn status. (#122, #123)
 
 ### Changed
+- Breaking releases below major version 1 advance the minor version, selecting `0.20.0` from `0.19.4`; established major versions retain normal SemVer major bumps. Fork publication and 18-asset packaging remain in force. (#138)
+- Bundled agent guidance uses native Kitty output and explains private protocol 28 while preserving worker pairing and control authority. (#138)
 - The agent skill now includes focused guidance for external workers, automation, and remote sessions. (#118, #119)
 
 ### Fixed
+- Native xcsh resume provenance remains authoritative over generic reported commands, and configured resume arguments remain attached to the selected command. (#138)
+- Pane/workspace closure releases admission capacity and discards queued prompts. Process/session replacement cannot inherit old queued mutations; completion waiters fail before released prompts are submitted. (#138)
+- Managed `herdr agent start --kind xcsh` launches now provide a unique ownership token, allowing xcsh to bind its terminal-management integration to the current workspace without weakening its fail-closed behavior. (#132)
 - Switching xcsh sessions now rebinds recap authority to the new session, so a previous session's recap is hidden and the next recap is accepted. (#124, #125)
 - External worker pairing now resolves a caller's current pane after that pane moves. (#120)
 
