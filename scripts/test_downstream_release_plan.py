@@ -51,7 +51,21 @@ class ReleasePlanTests(unittest.TestCase):
     def test_breaking_change_is_a_major_release(self) -> None:
         self.assertEqual(release_level(["feat(api)!: replace protocol"]), "major")
         self.assertEqual(release_level(["feat: replace protocol\n\nBREAKING CHANGE: old clients stop working"]), "major")
-        self.assertEqual(bump("0.7.5", "major"), "1.0.0")
+        self.assertEqual(bump("0.7.5", "major"), "0.8.0")
+        self.assertEqual(bump("1.7.5", "major"), "2.0.0")
+        self.assertEqual(bump("2.0.0", "major"), "3.0.0")
+
+    def test_official_sync_breaking_release_plans_exactly_v0_20_0(self) -> None:
+        messages = [
+            "test: characterize fork behavior before upstream sync",
+            "feat(upstream)!: synchronize official Herdr through 2713feb",
+            "refactor!: adopt native Kitty graphics",
+            "feat: preserve fork runtime extensions on current Herdr",
+            "ci(release): retain fork publication after upstream sync",
+        ]
+        level = release_level(messages)
+        self.assertEqual(level, "major")
+        self.assertEqual(bump("0.19.4", level), "0.20.0")
 
     def test_non_conventional_commit_does_not_release(self) -> None:
         self.assertIsNone(release_level(["miscellaneous cleanup"]))

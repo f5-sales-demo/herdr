@@ -44,6 +44,8 @@ def bump(version: str, level: str) -> str:
         raise ValueError(f"expected a stable SemVer version, got {version!r}")
     major, minor, patch = (int(match.group(name)) for name in ("major", "minor", "patch"))
     if level == "major":
+        if major == 0:
+            return f"0.{minor + 1}.0"
         return f"{major + 1}.0.0"
     if level == "minor":
         return f"{major}.{minor + 1}.0"

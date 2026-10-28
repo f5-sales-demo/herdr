@@ -40,7 +40,7 @@ if [[ -z "$baseline" ]]; then
   baseline_version=$(jq -er '.version' "$repo_root/distribution/latest.json")
   baseline="$root/herdr-baseline"
   curl -fL --retry 3 \
-    "https://github.com/herdrdev/herdr/releases/download/v${baseline_version}/herdr-${platform}-${arch}" \
+    "https://github.com/f5-sales-demo/herdr/releases/download/v${baseline_version}/herdr-${platform}-${arch}" \
     -o "$baseline"
   chmod +x "$baseline"
 else
