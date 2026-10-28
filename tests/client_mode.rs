@@ -916,7 +916,8 @@ fn federated_launch_opens_local_directly_while_saved_ssh_is_unavailable() {
         fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
         fs::write(
             config_home.join(app_dir_name()).join("config.toml"),
-            "onboarding = false\n",
+            // This fixture tests endpoint readiness, without user login-shell startup hooks.
+            "onboarding = false\n[terminal]\nshell_mode = \"non_login\"\n",
         )
         .unwrap();
         let catalog_dir = runtime_dir

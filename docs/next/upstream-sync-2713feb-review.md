@@ -11,12 +11,13 @@ Source version remains `0.19.4`; private client/server protocol is 28 and endpoi
 - Baseline `just check`: 3,750 Rust tests passed, plus maintenance, integration, documentation and Windows cross-lint checks.
 - Resolved `just check`: 4,224 Rust tests passed, plus 179 maintenance tests, integration/documentation contracts and Windows cross-lint.
 - Control Manager baseline and candidate: 268 tests completed successfully, with two explicitly gated real-binary cases skipped. The candidate archive passed checksum/provenance verification and relocatable installer/bootstrap attestation.
+- macOS source checks: 3,995 Rust tests passed with the same live-handoff exclusion used by CI; maintenance and integration checks passed. The federated endpoint fixture uses a non-login shell to avoid unrelated user startup hooks.
 - Native xcsh resume precedence, generic configured arguments, closed-pane/group admission cleanup, replacement-process rejection and fallible queued waiters have focused coverage.
 - The paired xcsh fix is tracked in f5-sales-demo/xcsh#5091. Protocol-28 ordinary negotiation failed before the fix and passed afterward; protocol 29 remains rejected. All 83 focused Herdr tests and TypeScript checks passed. The broader package run had 10,332 passing tests and one unrelated host sandbox failure (`setpriv` permission denial), preserved privately.
 
 ## Remaining delivery gates
 
-Current-head hosted CI, benchmark regression remediation, native graphics/runtime UAT, release audit, immutable v0.20.0 publication, all 18 asset/provenance checks, and installed macOS/Linux/hosted-Windows acceptance remain to be recorded. No release or installed-artifact acceptance is implied by the source checks above.
+Current-head hosted CI, remaining native graphics/runtime UAT, release audit, immutable v0.20.0 publication, all 18 asset/provenance checks, and installed macOS/Linux/hosted-Windows acceptance remain to be recorded. No release or installed-artifact acceptance is implied by the source checks above.
 
 Japanese and Chinese locale trees retain their fork baseline for the separate localization process. English release checks pass. Localization parity is available separately through `just translation-docs-check` and does not gate fork releases.
 
@@ -29,7 +30,22 @@ The five-sample baseline/candidate run alternated order and measured 100 updates
 | Rendered marker | 18.008357 ms | 18.020122 ms | +0.065% |
 | API interaction | 0.421817 ms | 0.453226 ms | +7.446% |
 
-These measurements bind baseline `665f81f` and candidate `6f6338c4a`. The byte comparison covers the same two-row terminal body; UI chrome and intentionally optimized ANSI encoding are excluded. Raw captures and request timing samples remain private. Performance remains a release gate.
+These measurements bind baseline `665f81f` and candidate `6f6338c4a`. The byte comparison covers the same two-row terminal body; UI chrome and intentionally optimized ANSI encoding are excluded. Raw captures and request timing samples remain private. This first short run is preserved as an unsuccessful characterization; the quiet run below supplies the final timing gate.
+
+## Quiet performance and graphics verification
+
+The final five-sample run used 100 warm-up updates and 1,000 measured updates per sample, alternating baseline/candidate order on the same two CPUs. No local builds or tests overlapped it. Rendered terminal bodies were byte-equivalent and peak memory was 32.98%, below the 80% limit.
+
+| Metric | Baseline p95 | Candidate p95 | Change |
+| --- | --- | --- | --- |
+| Rendered marker | 18.090402 ms | 18.073645 ms | -0.093% |
+| API interaction | 0.453888 ms | 0.441366 ms | -2.759% |
+
+The no-p95-regression gate passed. The repository's two-round CPU smoke also passed (hidden-workspace CPU -12.2%, visible-pane CPU +1.5%, within its existing smoke threshold). API burst fairness passed. Six render-scale profiles passed on Ubuntu and macOS. The native source-clone experiment is Linux-only and requires a CoW-capable filesystem; Ubuntu uses the supported decoded fallback. `bench-render-scale` now selects its intended profile exactly; the capability-dependent experiment is available separately as `bench-native-image-sources`. No timing threshold was changed.
+
+Task-owned Ghostty fixtures rendered xcsh's standard Kitty image encoder standalone and inside Herdr. With graphics disabled, UAT found inherited host terminal hints could keep xcsh's image protocol enabled. The minimal coordinated xcsh fix selects the text fallback when Herdr omits its capability and prevents Windows Terminal SIXEL probes from re-enabling graphics. Its 698 TUI tests, 105 focused compatibility/corpus tests, type checks, and final source build passed. Enabled rendering and the disabled text fallback were visually verified. Images disappeared beneath the settings overlay and returned after it closed. A fresh Ghostty client reattached to the same server and terminal identity and rendered the retained image.
+
+The actual xcsh client negotiated ordinary protocol 28 against the task server. All four retired graphics methods returned `unknown_method`. Raw screenshots, timings, and failures remain private. Hosted CI and published/installed artifact gates remain separate.
 
 ## Path dispositions
 

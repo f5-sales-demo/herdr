@@ -93,7 +93,7 @@ build:
 
 # Non-gating full-render scaling profile for background workspaces and active panes
 bench-render-scale:
-    cargo test --release --locked --bin herdr render_scale_profile -- --ignored --nocapture --test-threads=1
+    cargo test --release --locked --bin herdr server::render_scale_benchmark::render_scale_profile -- --exact --ignored --nocapture --test-threads=1
 
 # Profile terminal target name resolution at increasing pane counts.
 bench-terminal-targets:
@@ -111,6 +111,12 @@ bench-bsp-layout:
 # Profile full and retained text, static-image, and unchanged-image updates.
 bench-retained-graphics:
     cargo test --release --locked --bin herdr render_scale_profile_retained_graphics -- --ignored --nocapture --test-threads=1
+
+# Profile native image source cloning on Linux with a CoW-capable filesystem.
+# Other platforms and filesystems use decoded image fallback and cannot run this experiment.
+[linux]
+bench-native-image-sources:
+    cargo test --release --locked --bin herdr server::headless::tests::native_graphics::native_file_render_scale_profile -- --exact --ignored --nocapture --test-threads=1
 
 # Profile first-batch latency and aggregate drain cost for external API bursts.
 bench-api-fairness:
