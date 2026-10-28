@@ -46,7 +46,7 @@ class FakeHerdr:
             execution = {"execution_id": backend, "backend_execution_id": backend,
                          "semantic_execution_id": semantic, "generation": generation,
                          "native_producer": "xcsh", "producer_session_id": launch["session_header"]["id"], "workspace_id": wid,
-                         "cwd": params["cwd"], "command": {"mode": "argv", "argv": [launch["xcsh_executable"]] + ([] if launch["interactive"] else ["--mode", "json"]) + ["--session-dir", launch["session_dir"], "--resume", launch["session_path"], "--model", launch["model"], "--tools", "read,request_user_input,request_user_input_async", "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty"] + ([] if launch["interactive"] else ["--print"]) + [params["text"]]},
+                         "cwd": params["cwd"], "command": {"mode": "argv", "argv": [launch["xcsh_executable"]] + ([] if launch["interactive"] else ["--mode", "json"]) + ["--session-dir", launch["session_dir"], "--resume", launch["session_path"], "--model", launch["model"], "--tools", "read,request_user_input,request_user_input_async", "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty"] + ([] if launch["interactive"] else ["--print"]) + ([] if launch["lifecycle_mode"] == "managed_turn_v1" else ["--native-lifecycle-control", launch["lifecycle_mode"]]) + [params["text"]]},
                          "native_executable": {"canonical_path": launch["xcsh_executable"],
                                                "sha256": hashlib.sha256(Path(launch["xcsh_executable"]).read_bytes()).hexdigest()},
                          "native_launch": launch,
@@ -89,7 +89,7 @@ class FakeHerdr:
                 execution.update(state="cancelled", signal_name="Interrupt", output_complete=True)
             return {"execution": execution, "admitted": False}
         if method == "ping":
-            return {"protocol": 26, "capabilities": {"tracked_executions": True, "agent_turn_journal": True}}
+            return {"protocol": 28, "capabilities": {"tracked_executions": True, "agent_turn_journal": True, "native_lifecycle_controls": True}}
         if method == "agent.turn.list":
             since = params.get("since_revision", 0)
             # Synthetic component model of PR49's cross-ledger settlement:
@@ -833,6 +833,66 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
                 await self.broker._require_native_xcsh_resume_contract()
         finally:
             self.broker.herdr.request = original
+
+    async def test_old_server_lacks_controls_before_any_durable_admission(self):
+        workspace = await self.configure_control_workspace()
+        self.native_launch = self.native_launch | {"lifecycle_mode": "await_user_v1", "interactive": True}
+        original = self.broker.herdr.request
+        async def old_server(method, params=None, timeout=65):
+            if method == "ping":
+                return {"protocol": 28, "capabilities": {"tracked_executions": True, "agent_turn_journal": True}}
+            return await original(method, params, timeout)
+        self.broker.herdr.request = old_server
+        before = self.broker.db.conn.execute("SELECT count(*) FROM tasks").fetchone()[0]
+        with self.assertRaisesRegex(ValueError, "native_lifecycle_controls"):
+            await self.admit_native_xcsh({"target": "old-server", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
+                "text": "safe", "workspace_id": workspace["workspace"]["workspace_id"],
+                "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"},
+                "idempotency_key": "old-server"})
+        self.assertEqual(self.broker.db.conn.execute("SELECT count(*) FROM tasks").fetchone()[0], before)
+        self.assertFalse(any(method == "execution.resume" for method, _ in self.broker.herdr.calls))
+
+    def test_native_lifecycle_modes_require_exact_interactive_policy(self):
+        for mode, interactive in [("await_user_v1", True), ("local_operation_failure_v1", False)]:
+            launch = self.native_launch | {"lifecycle_mode": mode, "interactive": interactive}
+            self.assertEqual(measure_native_launch(launch)["lifecycle_mode"], mode)
+            with self.assertRaisesRegex(ValueError, "requires interactive"):
+                measure_native_launch(launch | {"interactive": not interactive})
+
+    def test_native_lifecycle_rejects_malformed_values(self):
+        for value in ([], {}, None, 1):
+            with self.assertRaisesRegex(ValueError, "lifecycle_mode"):
+                measure_native_launch(self.native_launch | {"lifecycle_mode": value})
+
+    async def test_native_lifecycle_admission_preserves_mode_and_rejects_wrong_argv(self):
+        workspace = await self.configure_control_workspace()
+        for mode, interactive in [("await_user_v1", True), ("local_operation_failure_v1", False)]:
+            self.native_launch = self.native_launch | {"lifecycle_mode": mode, "interactive": interactive}
+            params = {"target": mode, "cwd": str(self.root), "priority": "routine", "prompt": "safe",
+                      "text": "semantic text", "workspace_id": workspace["workspace"]["workspace_id"],
+                      "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"},
+                      "idempotency_key": mode}
+            first = await self.admit_native_xcsh(params)
+            await self.admit_native_xcsh(params)
+            execution = self.broker.herdr.executions[first["backend_execution_id"]]
+            self.assertEqual(execution["native_launch"], self.native_launch)
+            self.assertEqual(execution["command"]["argv"][-3:], ["--native-lifecycle-control", mode, "semantic text"])
+            self.assertEqual("--print" in execution["command"]["argv"], not interactive)
+            changed = dict(execution, command={"mode": "argv", "argv": execution["command"]["argv"][:-3] + ["semantic text"]})
+            with self.assertRaisesRegex(ValueError, "argv"):
+                self.broker.db.admit_native_generation(first["id"], 0, changed)
+
+    async def test_await_user_continuation_reply_loss_replays_managed_generation(self):
+        self.native_launch = self.native_launch | {"lifecycle_mode": "await_user_v1", "interactive": True}
+        await self.test_xcsh_lost_continuation_response_reconciles_same_generation()
+        resumes = [params for method, params in self.broker.herdr.calls if method == "execution.resume"]
+        self.assertEqual(resumes[0]["native_launch"]["lifecycle_mode"], "await_user_v1")
+        self.assertTrue(all(params["native_launch"]["lifecycle_mode"] == "managed_turn_v1" for params in resumes[1:]))
+        self.assertTrue(all(params == resumes[1] for params in resumes[1:]))
+        initial = self.broker.herdr.executions[next(key for key, value in self.broker.herdr.executions.items() if value["generation"] == 0)]
+        self.assertEqual(initial["command"]["argv"][-3:-1], ["--native-lifecycle-control", "await_user_v1"])
+        current = next(value for value in self.broker.herdr.executions.values() if value["generation"] == 1)
+        self.assertNotIn("--native-lifecycle-control", current["command"]["argv"])
 
     def test_native_launch_v4_accepts_only_the_interaction_policy(self):
         launch = self.native_launch | {"version": 4, "tools": "read_interactions"}

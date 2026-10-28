@@ -3076,10 +3076,24 @@
         },
         "NativeLifecycleMode": {
           "description": "Semantic lifecycle behavior, retained as durable producer contract rather\nthan translated into an undocumented xcsh command-line flag.",
-          "enum": [
-            "managed_turn_v1"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "managed_turn_v1"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "await_user_v1",
+              "description": "Acceptance control: enter the native interactive continuation prompt.",
+              "type": "string"
+            },
+            {
+              "const": "local_operation_failure_v1",
+              "description": "Acceptance control: fail an owned local operation in JSON mode.",
+              "type": "string"
+            }
+          ]
         },
         "NativeSessionHeaderBinding": {
           "properties": {
@@ -9793,10 +9807,24 @@
         },
         "NativeLifecycleMode": {
           "description": "Semantic lifecycle behavior, retained as durable producer contract rather\nthan translated into an undocumented xcsh command-line flag.",
-          "enum": [
-            "managed_turn_v1"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "managed_turn_v1"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "await_user_v1",
+              "description": "Acceptance control: enter the native interactive continuation prompt.",
+              "type": "string"
+            },
+            {
+              "const": "local_operation_failure_v1",
+              "description": "Acceptance control: fail an owned local operation in JSON mode.",
+              "type": "string"
+            }
+          ]
         },
         "NativeProducerRegistration": {
           "description": "Durable proof that the launched native child has made its first\nauthenticated `starting` report. The PID is Herdr's PTY-child ownership\nevidence; the inherited capability authenticates the reporting process.",
@@ -12917,6 +12945,11 @@
               "type": "boolean"
             },
             "live_handoff": {
+              "type": "boolean"
+            },
+            "native_lifecycle_controls": {
+              "default": false,
+              "description": "Typed native producer acceptance controls beyond managed_turn_v1.",
               "type": "boolean"
             },
             "ssh_agent_registration": {

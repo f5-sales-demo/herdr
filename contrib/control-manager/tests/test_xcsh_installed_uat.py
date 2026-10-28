@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from xcsh_installed_uat import CATALOG, PreflightError, execute_case, preflight, validate_journal, validate_xcsh_archive_provenance
+from xcsh_installed_uat import native_case_lifecycle, CATALOG, PreflightError, execute_case, preflight, validate_journal, validate_xcsh_archive_provenance
 
 
 ROOT = Path(__file__).parent
@@ -22,6 +22,34 @@ def manifest():
 
 
 class InstalledPromptUatTests(unittest.TestCase):
+    def test_execute_case_admits_exact_catalog_lifecycle_modes(self):
+        from unittest.mock import patch
+        import xcsh_installed_uat as driver
+        class Controller:
+            def create_xcsh_session(self, *_):
+                return {"session_id": "0123abcd4567ef89", "session_dir": "/synthetic",
+                    "session_path": "/synthetic/session.jsonl", "session_header": {"id": "0123abcd4567ef89", "sha256": "a"*64},
+                    "xcsh_executable": "/isolated/xcsh", "xcsh_executable_sha256": "a"*64}
+        catalog = json.loads(CATALOG.read_text())["scenarios"]
+        for case_id, mode, interactive in [("waiting_input", "await_user_v1", True),
+                ("continuation", "await_user_v1", True), ("generation_supersession", "await_user_v1", True),
+                ("failure", "local_operation_failure_v1", False), ("success", "managed_turn_v1", True)]:
+            case = next(case for case in catalog if case["id"] == case_id)
+            with tempfile.TemporaryDirectory() as raw:
+                with patch.object(driver, "unix_request", side_effect=RuntimeError("captured admission")) as request:
+                    with self.assertRaisesRegex(RuntimeError, "captured admission"):
+                        execute_case(self.prepared_manifest(Path(raw)), case, run_id="selection", controller=Controller())
+                    args = request.call_args.args
+                    self.assertEqual(args[1], "native_xcsh_admit")
+                    self.assertEqual(args[2]["native_launch"]["lifecycle_mode"], mode)
+                    self.assertEqual(args[2]["native_launch"]["interactive"], interactive)
+
+    def test_native_case_lifecycle_selection(self):
+        for case in ("waiting_input", "continuation", "generation_supersession"):
+            self.assertEqual(native_case_lifecycle(case), ("await_user_v1", True))
+        self.assertEqual(native_case_lifecycle("failure"), ("local_operation_failure_v1", False))
+        self.assertEqual(native_case_lifecycle("success"), ("managed_turn_v1", True))
+
     def test_catalog_requires_exact_generation_trace_for_every_case(self):
         catalog = json.loads(CATALOG.read_text())
         for case in catalog["scenarios"]:

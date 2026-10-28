@@ -330,6 +330,14 @@ def assert_controller_identity(receipt: dict[str, Any], task: dict[str, Any]) ->
         raise PreflightError("controller receipt is not bound to the exact admitted execution")
 
 
+def native_case_lifecycle(case_id: str) -> tuple[str, bool]:
+    if case_id in {"waiting_input", "continuation", "generation_supersession"}:
+        return "await_user_v1", True
+    if case_id == "failure":
+        return "local_operation_failure_v1", False
+    return "managed_turn_v1", True
+
+
 def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str, timeout: float = 90,
                  controller: Any | None = None) -> dict[str, Any]:
     """Drive one real installed xcsh prompt through the atomic broker adapter."""
@@ -361,12 +369,13 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
         model = runtime.get("xcsh_model")
         if not isinstance(model, str) or not model or any(char in model for char in "\r\n\x00"):
             raise PreflightError("manifest must supply a configured nonsecret xcsh_model")
+        lifecycle_mode, interactive = native_case_lifecycle(case["id"])
         native_launch = {
             "version": 4, "xcsh_executable": executable,
             "session_dir": session_receipt.get("session_dir"), "session_path": session_receipt.get("session_path"),
             "session_header": session_receipt.get("session_header"), "model": model,
-            "discovery": "reduced-v1", "tools": "read_interactions", "interactive": True,
-            "lifecycle_mode": "managed_turn_v1",
+            "discovery": "reduced-v1", "tools": "read_interactions", "interactive": interactive,
+            "lifecycle_mode": lifecycle_mode,
         }
     except Exception as exc:
         raise PreflightError(f"controller could not create a measured xcsh session: {exc}") from exc

@@ -129,10 +129,10 @@ records. Full repo worktree discovery remains `worktree.list`.
 From the CLI, `herdr api snapshot` prints the live `session.snapshot` response
 as JSON for clients and agents that want a simple bootstrap command.
 
-## Native xcsh resume binding (protocol 24)
+## Native xcsh resume binding (protocol 28)
 
 `execution.resume` is a native lifecycle protocol, not a shell-command
-shortcut. Its required `native_launch` is version `3`: an absolute measured
+shortcut. Its required `native_launch` is version `4`: an absolute measured
 `xcsh_executable`, canonical `session_dir` and `session_path`, and a
 `session_header` containing the canonical 16-lowercase-hex xcsh ID plus the
 SHA-256 of exactly the first JSONL header line, including its terminating LF.
@@ -146,10 +146,19 @@ Herdr never resolves a native child through the server `PATH`.
 
 `model` is a configured nonsecret xcsh selector, never a user identity.
 `discovery: "reduced-v1"` becomes supported `--no-mcp --no-lsp --no-pty`
-flags, `tools: "read"` becomes `--tools read`, and `interactive: false`
+flags, `tools: "read_interactions"` allows read and interaction tools, and `interactive: false`
 becomes `--print`. `lifecycle_mode: "managed_turn_v1"` is a durable
 Herdr/producer lifecycle contract, deliberately not an undocumented xcsh CLI
 flag. Herdr derives all native argv itself and accepts no arbitrary argv/env.
+
+The acceptance modes `await_user_v1` and `local_operation_failure_v1` derive
+`--native-lifecycle-control` with that exact value. The former requires
+`interactive: true`; the latter requires `interactive: false`. The Control
+Manager selects these modes for waiting and failure acceptance. A continued
+await-user task starts a new `managed_turn_v1` generation, while retries replay
+the original immutable generation and argv. These additions retain protocol 28
+and native launch version 4. The manager requires the advertised
+`native_lifecycle_controls` capability before admitting either acceptance mode.
 
 Native children first submit an authenticated `agent.turn.report` `starting`
 event. Herdr persists that registration with the owned PTY PID and binds
@@ -168,7 +177,7 @@ be an absolute regular file; executable admission follows the platform process
 launcher, which applies its normal executable-format and extension rules.
 
 ```json
-{"id":"resume-1","method":"execution.resume","params":{"execution_id":"task-42","generation":1,"native_launch":{"version":3,"xcsh_executable":"/opt/xcsh/bin/xcsh","session_dir":"/work/.xcsh/sessions","session_path":"/work/.xcsh/sessions/session.jsonl","session_header":{"id":"0123abcd4567ef89","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},"model":"openai/gpt-5","discovery":"reduced-v1","tools":"read","interactive":false,"lifecycle_mode":"managed_turn_v1"},"text":"continue","cwd":"/work/project"}}
+{"id":"resume-1","method":"execution.resume","params":{"execution_id":"task-42","generation":1,"native_launch":{"version":4,"xcsh_executable":"/opt/xcsh/bin/xcsh","session_dir":"/work/.xcsh/sessions","session_path":"/work/.xcsh/sessions/session.jsonl","session_header":{"id":"0123abcd4567ef89","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},"model":"openai/gpt-5","discovery":"reduced-v1","tools":"read_interactions","interactive":false,"lifecycle_mode":"managed_turn_v1"},"text":"continue","cwd":"/work/project"}}
 ```
 
 Pane control methods use public pane ids such as `w1:p1`. Methods whose

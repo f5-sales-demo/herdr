@@ -431,6 +431,7 @@ mod tests {
                 surface_interest: true,
                 health_check: true,
                 tracked_executions: true,
+                native_lifecycle_controls: false,
                 agent_turn_journal: true,
                 agent_recaps: Some(1),
                 agent_interactions: Some(1),
