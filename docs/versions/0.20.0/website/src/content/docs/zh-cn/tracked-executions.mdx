@@ -1,0 +1,52 @@
+---
+title: 可跟踪的命令执行
+description: 由服务器管理的自动化客户端命令生命周期。
+---
+
+可跟踪执行提供进程生命周期证据，无需解读终端文本或代理界面状态。
+
+## 契约
+
+`execution.start` 需要调用方生成的 `execution_id`、已存在目录的绝对路径 `cwd`，以及以下两种明确的命令形式之一：
+
+- `{"mode":"argv","argv":[...]}` 直接执行参数向量。
+- `{"mode":"shell","shell":"bash|zsh","text":"..."}` 按所选 shell 的 `-lc` 语义执行原样文本。
+
+每次被接纳的执行都会在指定工作区或当前工作区创建一个新标签页，且不会切换焦点。根窗格在 Herdr 的原生 PTY 中直接启动命令，因此可以看到输出；对于 xcsh 等交互式工具，仍可正常使用 `pane.send_text`、`pane.send_keys` 和终端连接。
+
+使用相同 ID 和相同配置重复发起请求时，会返回现有记录和 `admitted: false`，不会再创建标签页。用同一 ID 提交不同配置会失败并返回 `execution_id_conflict`。服务器会记录接纳、PTY 成功启动、标签页和窗格 ID、PID、观测到的退出码或信号名、取消请求、字节数，以及经过脱敏且最多 4 KiB 的合并 PTY 流末尾。PTY 无法可靠区分 stdout 和 stderr，因此 `stdout_tail` 表示合并流，`stderr_tail` 保持为空。进程退出与 PTY 输出读取完毕是两个独立事实：`output_complete: true` 表示原生读取器已读完可用字节并到达 EOF。
+
+每个 Herdr 命名会话最多保留 256 条完整记录。过期 ID 仍受最近 4,096 条墓碑记录和持久化的 64 Kibit 概率过滤器保护。对于该二进制文件插入的 ID，过滤器不会产生假阴性，因此过期 ID 不会被悄悄重新执行。假阳性会保守地返回 `execution_expired`，此时需要使用新 ID。
+
+使用 `execution.get`、`execution.list` 和 `execution.wait` 查询状态、长轮询修订版本，或在重连后重放变更。在保留的会话日志中，修订版本单调递增。消费者应保存已观察到的最大修订版本，容忍重复记录，并以后续出现的同一 ID 记录为准。
+
+`execution.cancel` 使用从 Herdr 拥有的 PTY 子进程句柄复制的终止器。取消响应成功只证明已提出终止请求；只有同一子进程的监视器提供等待状态证据并报告 `cancelled` 或 `exited` 后，终止状态才可信。
+
+## 恢复与语义限制
+
+记录独立于窗格持久化。如果 Herdr 服务器在命令启动或运行期间重启，恢复后的记录会变为带有 `evidence_gap` 的 `lost`。Herdr 不会声称子进程仍在运行、已被终止或已成功退出。这表示至少一次接纳并通过幂等机制抑制重复，而不是分布式的严格恰好一次执行。
+
+可跟踪执行显示在交互式 PTY 窗格中，但不会抢占焦点。Shell 提示符、终端内容或 TUI 看似空闲都不是退出证据。Codex 或 xcsh 进程成功退出，也不能证明它完成了请求的任务；应单独读取代理原生的语义生命周期。
+
+## 原生语义轮次
+
+当服务器支持持久化的原生语义结果时，协议 22 会公布 `agent_turn_journal`。受跟踪的代理会收到 `HERDR_EXECUTION_ID`，并同时按该执行 ID 和服务器分配的 `HERDR_PANE_ID` 报告。若窗格不属于该执行，Herdr 会拒绝报告，避免生产者将结果附到无关工作上。
+
+通过 JSON API 使用 `agent.turn.report`、`agent.turn.get`、`agent.turn.list` 和 `agent.turn.wait`。轮次由生产者、原生会话 ID、原生轮次 ID 和代次共同标识。生产者的 `event_revision` 从 1 开始单调递增。Herdr 另行分配供消费者使用的日志 `revision`。完全相同的重复报告是幂等的；同一修订版本但内容不同的报告、过期修订版本以及终止事件后的更新都会被拒绝。
+
+状态包括 `starting`、`working`、`waiting_input`、`completed`、`failed`、`cancelled`、`interrupted` 和 `lost`。首个事件必须是 `starting`。只有 `completed` 可携带结果；结果上限为 8,000 个 UTF-8 字节，并附有 SHA-256 摘要。原因文本的上限也是 8,000 字节。服务器重启后，每个尚未终止的最新轮次都会变为 `lost`；已终止的记录从持久化日志重放。由于保留数量有限，消费者必须保存已接纳的事件和修订版本，不能把 Herdr 当作无限期结果存储。
+
+语义完成与执行退出及输出读取完毕相互独立。管理器只能根据与已接纳执行及预期原生身份匹配的终止语义事件判定任务成功；绝不能从 `execution.state`、窗格状态、终端输出或元数据标记推断成功。
+
+## CLI
+
+```sh
+herdr execution start build-42 --cwd /srv/project -- just check
+herdr execution start script-42 --cwd /srv/project --shell zsh -- 'printf "%s\n" "$PWD"'
+herdr execution get build-42
+herdr execution list --since 120
+herdr execution wait 120
+herdr execution cancel build-42
+```
+
+API 套接字仅允许所有者访问。输出末尾会尽力对常见凭据标签脱敏，但调用方仍不得打印秘密或完整的敏感对话记录。代理迁移是一次彻底替换：在接纳前生成并保存执行 ID，用控制工作区和安全的标签页名称调用 `execution.start`，保存返回的标签页和窗格 ID 以供查看和交互输入，再通过 `get`、`list --since` 或 `wait` 对账。只有在原生二进制文件已部署，且代理通过重连和取消操作的 UAT 后，才能移除 Python 包装器回调、暂存文件、提示符抓取以及根据窗格 ID 推断完成状态的逻辑。
