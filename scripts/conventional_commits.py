@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 ALLOWED_TYPES = {
+    "build",
     "feat",
     "fix",
     "perf",
