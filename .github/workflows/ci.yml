@@ -88,13 +88,11 @@ jobs:
             kind: unix
             nextest_filter: all()
           - os: macos-latest
-            # Preserve the required check name while avoiding constrained ARM acquisition.
-            runner: macos-26-intel
             kind: unix
             nextest_filter: not binary(live_handoff)
           - os: windows-latest
             kind: windows
-    runs-on: ${{ matrix.runner || matrix.os }}
+    runs-on: ${{ matrix.os }}
     # Allow cold native builds once a hosted runner becomes available.
     timeout-minutes: 45
     steps:
