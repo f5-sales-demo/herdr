@@ -20,7 +20,7 @@ except ImportError:  # Direct script invocation keeps scripts/ on sys.path.
 
 def merge_subjects(rev_range: str, *, cwd: Path | None = None) -> list[tuple[str, str]]:
     output = subprocess.check_output(
-        ["git", "log", "--merges", "--pretty=format:%H%x1f%s", rev_range], text=True, cwd=cwd
+        ["git", "log", "--first-parent", "--merges", "--pretty=format:%H%x1f%s", rev_range], text=True, cwd=cwd
     ).strip()
     return [tuple(line.split("\x1f", maxsplit=1)) for line in output.splitlines() if "\x1f" in line]
 

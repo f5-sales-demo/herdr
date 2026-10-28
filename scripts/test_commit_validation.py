@@ -51,6 +51,7 @@ class CommitValidationTests(unittest.TestCase):
             git("merge", "--no-ff", "feature", "-m", "Merge direct invalid feature")
             merge = git("rev-parse", "HEAD")
             self.assertNotEqual(validate("--range", f"{base}..{merge}").returncode, 0)
+            self.assertEqual(validate("--first-parent", "--range", f"{base}..{merge}").returncode, 0)
             self.assertEqual(
                 validate_merge_commits.invalid_merge_subjects(
                     f"{base}..{merge}", "owner/repo", "main", "token", lambda *_: [], lambda *_: [], lambda *_: {}, repo
@@ -94,6 +95,7 @@ class CommitValidationTests(unittest.TestCase):
             direct_result = validate("--range", f"{valid_merge}..{direct_head}")
             self.assertNotEqual(direct_result.returncode, 0)
             self.assertIn("style: invalid direct push", direct_result.stdout)
+            self.assertNotEqual(validate("--first-parent", "--range", f"{valid_merge}..{direct_head}").returncode, 0)
 
     def test_github_merge_wrapper_requires_matching_conventional_pr_evidence(self):
         sha = "a" * 40

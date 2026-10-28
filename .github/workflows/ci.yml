@@ -70,7 +70,7 @@ jobs:
 
       - name: Validate commit subjects
         if: github.event_name == 'push'
-        run: python3 scripts/conventional_commits.py --range "${{ github.event.before }}..${{ github.event.after }}"
+        run: python3 scripts/conventional_commits.py --first-parent --range "${{ github.event.before }}..${{ github.event.after }}"
 
       - name: Validate merge subjects
         if: github.event_name == 'push'
