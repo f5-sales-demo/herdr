@@ -9,16 +9,27 @@ Source version remains `0.19.4`; private client/server protocol is 28 and endpoi
 ## Validation receipts
 
 - Baseline `just check`: 3,750 Rust tests passed, plus maintenance, integration, documentation and Windows cross-lint checks.
-- Resolved `just check`: 4,224 Rust tests passed, plus 177 maintenance tests, integration/documentation contracts and Windows cross-lint.
-- Control Manager baseline: 268 tests completed successfully, with two explicitly gated real-binary cases skipped.
+- Resolved `just check`: 4,224 Rust tests passed, plus 179 maintenance tests, integration/documentation contracts and Windows cross-lint.
+- Control Manager baseline and candidate: 268 tests completed successfully, with two explicitly gated real-binary cases skipped. The candidate archive passed checksum/provenance verification and relocatable installer/bootstrap attestation.
 - Native xcsh resume precedence, generic configured arguments, closed-pane/group admission cleanup, replacement-process rejection and fallible queued waiters have focused coverage.
 - The paired xcsh fix is tracked in f5-sales-demo/xcsh#5091. Protocol-28 ordinary negotiation failed before the fix and passed afterward; protocol 29 remains rejected. All 83 focused Herdr tests and TypeScript checks passed. The broader package run had 10,332 passing tests and one unrelated host sandbox failure (`setpriv` permission denial), preserved privately.
 
 ## Remaining delivery gates
 
-Current-head hosted CI, matched five-sample benchmarks, native graphics/runtime UAT, release audit, immutable v0.20.0 publication, all 18 asset/provenance checks, and installed macOS/Linux/hosted-Windows acceptance remain to be recorded. No release or installed-artifact acceptance is implied by the source checks above.
+Current-head hosted CI, benchmark regression remediation, native graphics/runtime UAT, release audit, immutable v0.20.0 publication, all 18 asset/provenance checks, and installed macOS/Linux/hosted-Windows acceptance remain to be recorded. No release or installed-artifact acceptance is implied by the source checks above.
 
-Japanese and Chinese locale trees retain their fork baseline for the separate localization process. The prerelease parity checker still requires missing pages and heading reconciliation from that process.
+Japanese and Chinese locale trees retain their fork baseline for the separate localization process. English release checks pass. Localization parity is available separately through `just translation-docs-check` and does not gate fork releases.
+
+## Matched performance sample
+
+The five-sample baseline/candidate run alternated order and measured 100 updates per sample. All rendered terminal bodies were byte-equivalent and peak memory was 31.42%. It did not pass the no-p95-regression gate.
+
+| Metric | Baseline p95 | Candidate p95 | Change |
+| --- | --- | --- | --- |
+| Rendered marker | 18.008357 ms | 18.020122 ms | +0.065% |
+| API interaction | 0.421817 ms | 0.453226 ms | +7.446% |
+
+These measurements bind baseline `665f81f` and candidate `6f6338c4a`. The byte comparison covers the same two-row terminal body; UI chrome and intentionally optimized ANSI encoding are excluded. Raw captures and request timing samples remain private. Performance remains a release gate.
 
 ## Path dispositions
 

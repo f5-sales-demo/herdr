@@ -139,7 +139,7 @@ libghostty-bindings *clang_args:
 build-libghostty-vt:
     scripts/build_vendored_libghostty_vt.sh
 
-# Check that release docs and changelog have been finalized from docs/next before release
+# Check maintained English release docs and changelog from docs/next before release
 release-docs-check:
     python3 scripts/agent_detection_manifest_check.py --require-all-published
     python3 scripts/config_reference_check.py
@@ -147,7 +147,6 @@ release-docs-check:
     node scripts/docs/preview.mjs check
     just docs-contract-test
     @test -f docs/next/README.md
-    @test -f docs/next/README.zh-CN.md
     @if ! diff -u CHANGELOG.md docs/next/CHANGELOG.md; then \
         echo "error: CHANGELOG.md differs from docs/next/CHANGELOG.md; finalize release notes before releasing"; \
         exit 1; \
@@ -159,6 +158,9 @@ release-docs-check:
         fi; \
     done
     @test -d docs/next/website/src/content/docs
+
+# Localization belongs to a separate process and does not gate fork releases.
+translation-docs-check:
     @for file in docs/next/website/src/content/docs/*.mdx; do \
         for locale in ja zh-cn; do \
             translated="docs/next/website/src/content/docs/$locale/$(basename "$file")"; \
