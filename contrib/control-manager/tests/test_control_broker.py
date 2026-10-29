@@ -1437,6 +1437,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         await self.broker.continue_task({"task_id": task["id"], "text": "next"})
         current = self.broker.db.current_native_generation(task["id"])
         self.assertEqual(current["generation"], 1)
+        self.assertEqual(self.broker.status(task["id"])["tasks"][0]["native_event_revision"], 0)
         replay = await self.broker.continue_task({"task_id": task["id"], "text": "next"})
         self.assertTrue(replay["generation_replayed"])
         with self.assertRaisesRegex(ValueError, "conflicts"):
@@ -1446,11 +1447,14 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.broker.db.apply_native_turn({"revision": 3, "report": base | {"event_revision": 3, "state": "interrupted", "reason": "superseded"}}))
         self.assertEqual(self.broker.db.task(task["id"])["run_generation"], 1)
         self.assertEqual(self.broker.db.native_generation(task["id"], 0)["terminal_state"], "interrupted")
+        self.assertEqual(self.broker.status(task["id"])["tasks"][0]["native_event_revision"], 0)
         foreign = {"execution_id": task["id"], "pane_id": "foreign:pane", "producer": "xcsh", "session_id": current["session_id"], "turn_id": "turn-1", "generation": 1}
         with self.assertRaisesRegex(ValueError, "provenance"):
             self.broker.db.apply_native_turn({"revision": 4, "report": foreign | {"event_revision": 1, "state": "starting"}})
         current_report = {"execution_id": task["id"], "pane_id": current["pane_id"], "producer": "xcsh", "session_id": current["session_id"], "turn_id": "turn-1", "generation": 1}
         self.broker.db.apply_native_turn({"revision": 4, "report": current_report | {"event_revision": 1, "state": "starting"}})
+        observed = self.broker.status(task["id"])["tasks"][0]
+        self.assertEqual((observed["run_generation"], observed["native_turn_id"], observed["native_event_revision"]), (1, "turn-1", 1))
         await self.broker.request_stop({"task_id": task["id"]})
         cancelled = [call for call in self.broker.herdr.calls if call[0] == "execution.cancel"]
         self.assertEqual(cancelled[-1][1]["execution_id"], current["backend_execution_id"])

@@ -3129,6 +3129,14 @@ class Broker:
                 "Herdr cancelled turn is not yet backed by a settled native execution receipt"
             )
 
+    def _native_status_cursor(self, row: sqlite3.Row) -> dict[str, int]:
+        if row["work_kind"] != "xcsh":
+            return {}
+        binding = self.db.current_native_generation(row["id"])
+        if binding is None:
+            return {}
+        return {"native_event_revision": int(binding["last_event_revision"])}
+
     def status(self, task_id: str | None) -> dict[str, Any]:
         if task_id is not None:
             bounded(task_id, 80, "task_id", required=True)
@@ -3141,6 +3149,7 @@ class Broker:
         return {
             "tasks": [
                 public_task(row)
+                | self._native_status_cursor(row)
                 | {
                     "transitions": self.db.transitions(row["id"]),
                     "followups": self.db.followups(row["id"]),
