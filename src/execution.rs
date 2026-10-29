@@ -13,7 +13,9 @@ use crate::api::schema::{
 
 const MAX_RECORDS: usize = 256;
 const OUTPUT_TAIL_BYTES: usize = 4096;
-const MAX_NATIVE_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
+// Published xcsh bundles include native addons and documentation; v23.10.3
+// exceeds 512 MiB. Keep admission bounded while hashing through a 64 KiB buffer.
+const MAX_NATIVE_EXECUTABLE_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct ExecutionManager(Arc<Inner>);
@@ -1955,6 +1957,33 @@ mod tests {
         ] {
             assert!(!argv.iter().any(|argument| argument == forbidden));
         }
+    }
+
+    #[test]
+    fn native_executable_measurement_accepts_large_bundles_and_remains_bounded() {
+        let path = temp("native-large-bundle");
+        let file = std::fs::File::create(&path).expect("large fixture");
+        file.set_len(512 * 1024 * 1024 + 1).expect("sparse fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                .expect("executable permissions");
+        }
+        let binding = measure_xcsh_executable(path.to_str().expect("utf8 path"))
+            .expect("bundled executables above 512 MiB remain measurable");
+        // SHA-256 of 512 MiB plus one zero byte, independent of the file reader.
+        assert_eq!(
+            binding.sha256,
+            "7c40fe5ce847740d0f0d0cdde3949d6585804cdec3ae61a15b923165699c8137"
+        );
+        file.set_len(1024 * 1024 * 1024 + 1)
+            .expect("over-limit fixture");
+        assert!(measure_xcsh_executable(path.to_str().expect("utf8 path"))
+            .expect_err("oversized executable")
+            .contains("maximum measurable size"));
+        drop(file);
+        std::fs::remove_file(path).expect("fixture cleanup");
     }
 
     #[test]
