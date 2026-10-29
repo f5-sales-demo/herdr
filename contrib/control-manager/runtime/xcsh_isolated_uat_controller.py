@@ -230,8 +230,12 @@ class DisposableHerdrController(IsolatedController):
 
     def save_case_state(self, key: str, spec_sha256: str, state: dict[str, Any]) -> None:
         self.load_case_state(key, spec_sha256)
-        self.conn.execute("INSERT INTO uat_cases VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET state=excluded.state",
-                          (key, spec_sha256, json.dumps(state, sort_keys=True)))
+        written = self.conn.execute(
+            "INSERT INTO uat_cases VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET state=excluded.state "
+            "WHERE uat_cases.spec_sha256=excluded.spec_sha256",
+            (key, spec_sha256, json.dumps(state, sort_keys=True)))
+        if written.rowcount != 1:
+            raise ControllerError("case replay conflicts with immutable run specification")
 
     def session_for_run(self, key: str, xcsh_binary: Path, expected_sha256: str, cwd: Path,
                         session_dir: Path) -> dict[str, Any]:

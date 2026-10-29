@@ -599,7 +599,8 @@ class StateTests(unittest.TestCase):
             self.assertEqual(saved["app_server_remote"], f"unix://{appserver_socket}")
             self.assertEqual(saved["state_schema_version"], 12)
             self.assertTrue(config.exists())
-            self.assertNotIn(str(Path.home()), config.read_text())
+            # Explicit fixture paths may live under the home-volume TMPDIR.
+            self.assertNotIn(str(Path.home()), config.read_text().replace(raw, "<fixture-root>"))
 
     def test_portable_upgrade_does_not_replace_existing_manager_config(self):
         with tempfile.TemporaryDirectory() as raw:

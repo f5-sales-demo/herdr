@@ -3,6 +3,35 @@ from pathlib import Path
 from xcsh_isolated_uat_controller import ControllerError, DisposableHerdrController, IsolatedController
 
 class ControllerTests(unittest.TestCase):
+ def test_concurrent_case_specs_cannot_overwrite_the_winning_state(self):
+  from concurrent.futures import ThreadPoolExecutor
+  from threading import Barrier
+  with tempfile.TemporaryDirectory() as raw:
+   root=Path(raw); binary=root/'herdr'; binary.write_bytes(b'fixture')
+   own={'session_id':'xcsh-uat-a','service_id':'xcsh-uat-a','workspace_id':'w1','pane_ids':['p1']}
+   c=DisposableHerdrController(root/'actions.sqlite',own,'token',binary)
+   c.load_case_state('racing-run','setup'); c.close()
+   barrier=Barrier(2)
+   def writer(spec):
+    c=DisposableHerdrController(root/'actions.sqlite',own,'token',binary)
+    original=c.load_case_state
+    def checked(key, spec):
+     state=original(key,spec); barrier.wait(timeout=5); return state
+    c.load_case_state=checked
+    try:
+     c.save_case_state('racing-run',spec,{'winner':spec})
+     return spec,True
+    except ControllerError:
+     return spec,False
+    finally: c.close()
+   with ThreadPoolExecutor(max_workers=2) as pool:
+    results=list(pool.map(writer,['spec-a','spec-b']))
+   winners=[spec for spec,ok in results if ok]
+   self.assertEqual(len(winners),1)
+   c=DisposableHerdrController(root/'actions.sqlite',own,'token',binary)
+   self.assertEqual(c.load_case_state('racing-run',winners[0]),{'winner':winners[0]})
+   c.close()
+
  def test_case_state_survives_reopen_and_rejects_changed_specification(self):
   with tempfile.TemporaryDirectory() as raw:
    root=Path(raw); binary=root/'herdr'; binary.write_bytes(b'fixture')
