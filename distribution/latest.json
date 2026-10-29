@@ -1,8 +1,8 @@
 {
-  "version": "0.20.2",
+  "version": "0.20.3",
   "protocol": 28,
   "endpoint_generation": 1,
-  "notes": "## What's Changed\n* fix(ci): validate PR constituents and merge provenance by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/141\n\n\n**Full Changelog**: https://github.com/f5-sales-demo/herdr/compare/v0.20.1...v0.20.2",
+  "notes": "## What's Changed\n* fix(lifecycle): admit current xcsh builds and native acceptance modes by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/142\n\n\n**Full Changelog**: https://github.com/f5-sales-demo/herdr/compare/v0.20.2...v0.20.3",
   "assets": {
     "linux-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-x86_64",
     "linux-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-linux-aarch64",
@@ -11,15 +11,15 @@
     "windows-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-windows-x86_64.zip"
   },
   "sha256": {
-    "linux-x86_64": "2bfea122848d31e67c2ed3f8daf87c9c6594b835bd6aac111d58e8807df6e78c",
-    "linux-aarch64": "7abd64e742e2b29cbca33b6804bc0c0ca0a4fd62db1cde8b396cd8dbe1e3f1bc",
-    "macos-x86_64": "ca1db0bd8cb346144f0a08e2e7edc62902ead66180d13d01d8dafeb01bad4461",
-    "macos-aarch64": "1b4a5a201d8c8db2fe10f5af6f281f3708b2d069a57cb5674e029274537116e3",
-    "windows-x86_64": "6f75e3edba176f5d873f0536d2fee39d83f5f4297f2c425059adc3a1dfa35e43"
+    "linux-x86_64": "50bee1545033252ad2bec1718441bef97511b782767e308da654bf88bffb2436",
+    "linux-aarch64": "e19d278b128f046fcfc19ac9c3846f176dd1bf3ee12158aafd056807426bcfa3",
+    "macos-x86_64": "07803a0e196622a1c003221fc2aa9795ba3cb55dcc40b22d28a9fb6d8d07f34c",
+    "macos-aarch64": "2261cdb2025478bf65cdd4791ef5d8f19db2779e1b414d1fc796673dff1155c2",
+    "windows-x86_64": "63fd14b9a84263a33a326269af8cbedbecf7fa09ec095a5ba76fe5c177a4f5f1"
   },
   "releases": {
-    "0.20.2": {
-      "notes": "## What's Changed\n* fix(ci): validate PR constituents and merge provenance by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/141\n\n\n**Full Changelog**: https://github.com/f5-sales-demo/herdr/compare/v0.20.1...v0.20.2",
+    "0.20.3": {
+      "notes": "## What's Changed\n* fix(lifecycle): admit current xcsh builds and native acceptance modes by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/142\n\n\n**Full Changelog**: https://github.com/f5-sales-demo/herdr/compare/v0.20.2...v0.20.3",
       "protocol": 28,
       "endpoint_generation": 1,
       "assets": {
@@ -28,6 +28,25 @@
         "macos-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-macos-x86_64",
         "macos-aarch64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-macos-aarch64",
         "windows-x86_64": "https://github.com/f5-sales-demo/herdr/releases/latest/download/herdr-windows-x86_64.zip"
+      },
+      "sha256": {
+        "linux-x86_64": "50bee1545033252ad2bec1718441bef97511b782767e308da654bf88bffb2436",
+        "linux-aarch64": "e19d278b128f046fcfc19ac9c3846f176dd1bf3ee12158aafd056807426bcfa3",
+        "macos-x86_64": "07803a0e196622a1c003221fc2aa9795ba3cb55dcc40b22d28a9fb6d8d07f34c",
+        "macos-aarch64": "2261cdb2025478bf65cdd4791ef5d8f19db2779e1b414d1fc796673dff1155c2",
+        "windows-x86_64": "63fd14b9a84263a33a326269af8cbedbecf7fa09ec095a5ba76fe5c177a4f5f1"
+      }
+    },
+    "0.20.2": {
+      "notes": "## What's Changed\n* fix(ci): validate PR constituents and merge provenance by @robinmordasiewicz in https://github.com/f5-sales-demo/herdr/pull/141\n\n\n**Full Changelog**: https://github.com/f5-sales-demo/herdr/compare/v0.20.1...v0.20.2",
+      "protocol": 28,
+      "endpoint_generation": 1,
+      "assets": {
+        "linux-x86_64": "https://github.com/f5-sales-demo/herdr/releases/download/v0.20.2/herdr-linux-x86_64",
+        "linux-aarch64": "https://github.com/f5-sales-demo/herdr/releases/download/v0.20.2/herdr-linux-aarch64",
+        "macos-x86_64": "https://github.com/f5-sales-demo/herdr/releases/download/v0.20.2/herdr-macos-x86_64",
+        "macos-aarch64": "https://github.com/f5-sales-demo/herdr/releases/download/v0.20.2/herdr-macos-aarch64",
+        "windows-x86_64": "https://github.com/f5-sales-demo/herdr/releases/download/v0.20.2/herdr-windows-x86_64.zip"
       },
       "sha256": {
         "linux-x86_64": "2bfea122848d31e67c2ed3f8daf87c9c6594b835bd6aac111d58e8807df6e78c",
