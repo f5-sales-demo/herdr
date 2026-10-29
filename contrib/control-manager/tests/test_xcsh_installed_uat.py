@@ -229,6 +229,30 @@ class InstalledPromptUatTests(unittest.TestCase):
                 from xcsh_installed_uat import validate_fixture
                 validate_fixture(candidate["runtime"], verify_file=True)
 
+    def test_direct_asset_provenance_binds_published_and_installed_bytes(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw); asset=root/'xcsh-linux-x64'; installed=root/'xcsh'
+            asset.write_bytes(b'published executable'); installed.write_bytes(asset.read_bytes())
+            digest=hashlib.sha256(asset.read_bytes()).hexdigest()
+            runtime={'xcsh_artifact_path':str(asset),'xcsh_executable':str(installed),'xcsh_executable_sha256':digest}
+            validate_xcsh_archive_provenance(runtime,{'sha256':digest},verify_archive=True)
+            mixed=runtime | {'xcsh_archive_path':'old.tar.gz'}
+            with self.assertRaisesRegex(PreflightError,'cannot mix'):
+                validate_xcsh_archive_provenance(mixed,{'sha256':digest},verify_archive=False)
+            with self.assertRaisesRegex(PreflightError,'matching published/executable digest'):
+                validate_xcsh_archive_provenance(runtime,{'sha256':'0'*64},verify_archive=False)
+            candidate=self.prepared_manifest(root)
+            for key in ('xcsh_archive_path','xcsh_archive_member','xcsh_archive_member_sha256'):
+                candidate['runtime'].pop(key)
+            candidate['runtime'].update(runtime); candidate['artifacts']['xcsh']['sha256']=digest
+            self.assertEqual(preflight(candidate,json.loads(CATALOG.read_text()))['preflight'],'passed')
+            installed.write_bytes(b'changed installation')
+            with self.assertRaisesRegex(PreflightError,'published asset digest'):
+                validate_xcsh_archive_provenance(runtime,{'sha256':digest},verify_archive=True)
+            installed.write_bytes(asset.read_bytes()); asset.write_bytes(b'changed download')
+            with self.assertRaisesRegex(PreflightError,'published asset digest'):
+                validate_xcsh_archive_provenance(runtime,{'sha256':digest},verify_archive=True)
+
     def test_archive_member_provenance_rejects_wrong_member_and_changed_archive(self):
         with tempfile.TemporaryDirectory() as raw:
             root=Path(raw); payload=root/'payload'; payload.write_bytes(b'xcsh fixture')

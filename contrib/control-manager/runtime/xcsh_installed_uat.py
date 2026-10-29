@@ -136,7 +136,30 @@ def artifact_id(component: dict[str, Any], name: str) -> str:
 
 
 def validate_xcsh_archive_provenance(runtime: dict[str, Any], artifact: dict[str, Any], *, verify_archive: bool) -> None:
-    """Bind a launched executable to one regular member of the published asset."""
+    """Bind a direct executable asset or a historical published archive member."""
+    direct = runtime.get("xcsh_artifact_path")
+    if direct is not None:
+        if any(runtime.get(key) is not None for key in
+               ("xcsh_archive_path", "xcsh_archive_member", "xcsh_archive_member_sha256")):
+            raise PreflightError("xcsh provenance cannot mix direct asset and archive bindings")
+        executable, digest = runtime.get("xcsh_executable"), runtime.get("xcsh_executable_sha256")
+        if (not isinstance(direct, str) or not direct or not Path(direct).is_absolute()
+                or not isinstance(executable, str) or not executable
+                or not isinstance(digest, str) or digest.lower() != artifact["sha256"].lower()):
+            raise PreflightError("direct xcsh asset requires an absolute artifact path and matching published/executable digest")
+        if not verify_archive:
+            return
+        if Path(direct).is_symlink():
+            raise PreflightError("direct xcsh asset must be a regular file")
+        for path in {Path(direct), Path(executable)}:
+            if not path.is_file():
+                raise PreflightError("direct xcsh asset and installed executable must be regular files")
+            measured = hashlib.sha256()
+            with path.open("rb") as source:
+                while chunk := source.read(1024 * 1024): measured.update(chunk)
+            if measured.hexdigest().lower() != artifact["sha256"].lower():
+                raise PreflightError("direct xcsh asset/executable does not match the published asset digest")
+        return
     archive_path, member = runtime.get("xcsh_archive_path"), runtime.get("xcsh_archive_member")
     member_digest, executable_digest = runtime.get("xcsh_archive_member_sha256"), runtime.get("xcsh_executable_sha256")
     if (not isinstance(archive_path, str) or not archive_path or not isinstance(member, str) or
