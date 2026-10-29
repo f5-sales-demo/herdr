@@ -219,6 +219,54 @@ class DisposableHerdrController(IsolatedController):
                 "xcsh_executable": str(xcsh_binary.resolve()),
                 "xcsh_executable_sha256": hashlib.sha256(xcsh_binary.read_bytes()).hexdigest()}
 
+    def load_case_state(self, key: str, spec_sha256: str) -> dict[str, Any]:
+        self.conn.execute("CREATE TABLE IF NOT EXISTS uat_cases(key TEXT PRIMARY KEY, spec_sha256 TEXT NOT NULL, state TEXT NOT NULL)")
+        prior = self.conn.execute("SELECT spec_sha256, state FROM uat_cases WHERE key=?", (key,)).fetchone()
+        if prior is None:
+            return {}
+        if prior["spec_sha256"] != spec_sha256:
+            raise ControllerError("case replay conflicts with immutable run specification")
+        return json.loads(prior["state"])
+
+    def save_case_state(self, key: str, spec_sha256: str, state: dict[str, Any]) -> None:
+        self.load_case_state(key, spec_sha256)
+        written = self.conn.execute(
+            "INSERT INTO uat_cases VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET state=excluded.state "
+            "WHERE uat_cases.spec_sha256=excluded.spec_sha256",
+            (key, spec_sha256, json.dumps(state, sort_keys=True)))
+        if written.rowcount != 1:
+            raise ControllerError("case replay conflicts with immutable run specification")
+
+    def session_for_run(self, key: str, xcsh_binary: Path, expected_sha256: str, cwd: Path,
+                        session_dir: Path) -> dict[str, Any]:
+        """Persist a measured session before any execution claim can occur."""
+        if not xcsh_binary.is_file() or hashlib.sha256(xcsh_binary.read_bytes()).hexdigest() != expected_sha256:
+            raise ControllerError("session replay executable measurement changed")
+        spec = hashlib.sha256(json.dumps({"binary": str(xcsh_binary.resolve()), "sha256": expected_sha256,
+                                         "cwd": str(cwd.resolve())}, sort_keys=True).encode()).hexdigest()
+        self.conn.execute("CREATE TABLE IF NOT EXISTS uat_sessions(key TEXT PRIMARY KEY, spec_sha256 TEXT NOT NULL, receipt TEXT NOT NULL)")
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            prior = self.conn.execute("SELECT spec_sha256, receipt FROM uat_sessions WHERE key=?", (key,)).fetchone()
+            if prior:
+                if prior["spec_sha256"] != spec:
+                    raise ControllerError("session replay conflicts with immutable source binding")
+                receipt = json.loads(prior["receipt"])
+                with Path(receipt["session_path"]).open("rb") as stream:
+                    line = stream.readline()
+                header = json.loads(line)
+                if (not line.endswith(b"\n") or hashlib.sha256(line).hexdigest() != receipt["session_header"]["sha256"]
+                        or header.get("id") != receipt["session_id"] or header.get("cwd") != str(cwd.resolve())):
+                    raise ControllerError("session replay header binding changed")
+            else:
+                receipt = self.create_xcsh_session(xcsh_binary, expected_sha256, cwd, session_dir)
+                self.conn.execute("INSERT INTO uat_sessions VALUES(?,?,?)", (key, spec, json.dumps(receipt, sort_keys=True)))
+            self.conn.execute("COMMIT")
+            return receipt
+        except Exception:
+            self.conn.execute("ROLLBACK")
+            raise
+
     def create_xcsh_session(self, xcsh_binary: Path, expected_sha256: str, cwd: Path,
                             session_dir: Path) -> dict[str, str]:
         """Return a real, persisted producer session or fail closed."""

@@ -97,6 +97,10 @@ pub enum NativeToolsPolicy {
 #[serde(rename_all = "snake_case")]
 pub enum NativeLifecycleMode {
     ManagedTurnV1,
+    /// Acceptance control: enter the native interactive continuation prompt.
+    AwaitUserV1,
+    /// Acceptance control: fail an owned local operation in JSON mode.
+    LocalOperationFailureV1,
 }
 
 /// Immutable measurement of the xcsh program admitted for a native child.

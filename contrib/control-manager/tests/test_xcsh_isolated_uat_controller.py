@@ -3,6 +3,75 @@ from pathlib import Path
 from xcsh_isolated_uat_controller import ControllerError, DisposableHerdrController, IsolatedController
 
 class ControllerTests(unittest.TestCase):
+ def test_concurrent_case_specs_cannot_overwrite_the_winning_state(self):
+  from concurrent.futures import ThreadPoolExecutor
+  from threading import Barrier
+  with tempfile.TemporaryDirectory() as raw:
+   root=Path(raw); binary=root/'herdr'; binary.write_bytes(b'fixture')
+   own={'session_id':'xcsh-uat-a','service_id':'xcsh-uat-a','workspace_id':'w1','pane_ids':['p1']}
+   c=DisposableHerdrController(root/'actions.sqlite',own,'token',binary)
+   c.load_case_state('racing-run','setup'); c.close()
+   barrier=Barrier(2)
+   def writer(spec):
+    c=DisposableHerdrController(root/'actions.sqlite',own,'token',binary)
+    original=c.load_case_state
+    def checked(key, spec):
+     state=original(key,spec); barrier.wait(timeout=5); return state
+    c.load_case_state=checked
+    try:
+     c.save_case_state('racing-run',spec,{'winner':spec})
+     return spec,True
+    except ControllerError:
+     return spec,False
+    finally: c.close()
+   with ThreadPoolExecutor(max_workers=2) as pool:
+    results=list(pool.map(writer,['spec-a','spec-b']))
+   winners=[spec for spec,ok in results if ok]
+   self.assertEqual(len(winners),1)
+   c=DisposableHerdrController(root/'actions.sqlite',own,'token',binary)
+   self.assertEqual(c.load_case_state('racing-run',winners[0]),{'winner':winners[0]})
+   c.close()
+
+ def test_case_state_survives_reopen_and_rejects_changed_specification(self):
+  with tempfile.TemporaryDirectory() as raw:
+   root=Path(raw); binary=root/'herdr'; binary.write_bytes(b'fixture')
+   own={'session_id':'xcsh-uat-a','service_id':'xcsh-uat-a','workspace_id':'w1','pane_ids':['p1']}
+   state={'initial_task':{'id':'e1'},'bindings':{'0':{'pane_id':'p1'}},'cursor':7}
+   c=DisposableHerdrController(root/'actions.sqlite',own,'token',binary)
+   self.assertEqual(c.load_case_state('same-run','original-spec'),{})
+   c.save_case_state('same-run','original-spec',state); c.close()
+   c=DisposableHerdrController(root/'actions.sqlite',own,'token',binary)
+   self.assertEqual(c.load_case_state('same-run','original-spec'),state)
+   for operation in (lambda: c.load_case_state('same-run','changed-spec'),
+                     lambda: c.save_case_state('same-run','changed-spec',{})):
+    with self.assertRaisesRegex(ControllerError,'immutable run specification'): operation()
+   self.assertEqual(c.load_case_state('same-run','original-spec'),state)
+   c.close()
+
+ def test_session_replay_preserves_header_before_execution_admission(self):
+  import json
+  with tempfile.TemporaryDirectory() as raw:
+   root=Path(raw); binary=root/'xcsh'; binary.write_bytes(b'fixture')
+   own={'session_id':'xcsh-uat-a','service_id':'xcsh-uat-a','workspace_id':'w1','pane_ids':['p1']}
+   c=DisposableHerdrController(root/'actions.sqlite',own,'token',binary)
+   session=root/'session.jsonl'; line=json.dumps({'type':'session','id':'0123abcd4567ef89','cwd':str(root.resolve())}).encode()+b'\n'; session.write_bytes(line)
+   receipt={'session_id':'0123abcd4567ef89','session_path':str(session),'session_dir':str(root),
+            'session_header':{'id':'0123abcd4567ef89','sha256':hashlib.sha256(line).hexdigest()}}
+   calls=[]
+   def create(*args): calls.append(args); return receipt
+   c.create_xcsh_session=create
+   digest=hashlib.sha256(binary.read_bytes()).hexdigest()
+   first=c.session_for_run('run:case',binary,digest,root,root/'first')
+   c.close()
+   c=DisposableHerdrController(root/'actions.sqlite',own,'token',binary)
+   c.create_xcsh_session=lambda *_: self.fail('replayed run created another session')
+   self.assertEqual(c.session_for_run('run:case',binary,digest,root,root/'second'),first)
+   self.assertEqual(len(calls),1)
+   session.write_bytes(line.replace(b'0123abcd',b'ffffffff'))
+   with self.assertRaisesRegex(ControllerError,'header binding changed'):
+    c.session_for_run('run:case',binary,digest,root,root/'third')
+   c.close()
+
  def test_owned_actions_are_idempotent_and_refuse_default_targets(self):
   with tempfile.TemporaryDirectory() as raw:
    c=IsolatedController(Path(raw)/'actions.sqlite',{'session_id':'xcsh-uat-a','service_id':'xcsh-uat-a','workspace_id':'w1','pane_ids':['p1']},'token')

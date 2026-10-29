@@ -13,7 +13,9 @@ use crate::api::schema::{
 
 const MAX_RECORDS: usize = 256;
 const OUTPUT_TAIL_BYTES: usize = 4096;
-const MAX_NATIVE_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
+// Published xcsh bundles include native addons and documentation; v23.10.3
+// exceeds 512 MiB. Keep admission bounded while hashing through a 64 KiB buffer.
+const MAX_NATIVE_EXECUTABLE_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct ExecutionManager(Arc<Inner>);
@@ -1408,6 +1410,18 @@ fn validate_resume(p: &ExecutionResumeParams) -> Result<(), String> {
     if p.text.is_empty() || p.text.len() > 65_536 {
         return Err("invalid_execution_resume".into());
     }
+    match (&p.native_launch.lifecycle_mode, p.native_launch.interactive) {
+        (crate::api::schema::NativeLifecycleMode::AwaitUserV1, false) => {
+            return Err("invalid_native_launch: await_user_v1 requires interactive=true".into())
+        }
+        (crate::api::schema::NativeLifecycleMode::LocalOperationFailureV1, true) => {
+            return Err(
+                "invalid_native_launch: local_operation_failure_v1 requires interactive=false"
+                    .into(),
+            )
+        }
+        _ => {}
+    }
     if p.native_launch.version != 4 {
         return Err(
             "invalid_native_launch: execution.resume requires native_launch version 4".into(),
@@ -1641,6 +1655,16 @@ fn native_xcsh_argv(
     if !launch.interactive {
         argv.push("--print".into());
     }
+    match launch.lifecycle_mode {
+        crate::api::schema::NativeLifecycleMode::ManagedTurnV1 => {}
+        crate::api::schema::NativeLifecycleMode::AwaitUserV1 => {
+            argv.extend(["--native-lifecycle-control".into(), "await_user_v1".into()])
+        }
+        crate::api::schema::NativeLifecycleMode::LocalOperationFailureV1 => argv.extend([
+            "--native-lifecycle-control".into(),
+            "local_operation_failure_v1".into(),
+        ]),
+    }
     argv.push(text.into());
     Ok(argv)
 }
@@ -1680,6 +1704,85 @@ fn redact(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_lifecycle_modes_validate_interactivity_and_exact_argv() {
+        for (mode, interactive) in [
+            ("managed_turn_v1", false),
+            ("await_user_v1", true),
+            ("local_operation_failure_v1", false),
+        ] {
+            let mut params = resume_params(1);
+            params.native_launch.lifecycle_mode =
+                serde_json::from_value(serde_json::json!(mode)).unwrap();
+            params.native_launch.interactive = interactive;
+            assert!(validate_resume(&params).is_ok());
+            let binding = measure_xcsh_executable(&params.native_launch.xcsh_executable).unwrap();
+            let argv = native_xcsh_argv(&binding, &params.native_launch, &params.text).unwrap();
+            let control = argv
+                .iter()
+                .position(|arg| arg == "--native-lifecycle-control");
+            if mode == "managed_turn_v1" {
+                assert!(control.is_none());
+            } else {
+                let index = control.unwrap();
+                assert_eq!(
+                    &argv[index..],
+                    &["--native-lifecycle-control", mode, params.text.as_str()]
+                );
+                params.native_launch.interactive = !interactive;
+                assert!(validate_resume(&params)
+                    .unwrap_err()
+                    .contains("requires interactive"));
+            }
+            assert_eq!(argv.iter().any(|arg| arg == "--print"), !interactive);
+        }
+        assert!(
+            serde_json::from_value::<crate::api::schema::NativeLifecycleMode>(serde_json::json!(
+                "arbitrary-control"
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_lifecycle_modes_replay_exact_claim_after_reload_and_reject_changes() {
+        for (index, mode, interactive) in [
+            (1, "await_user_v1", true),
+            (2, "local_operation_failure_v1", false),
+        ] {
+            let path = temp(&format!("lifecycle-mode-{index}"));
+            let manager = ExecutionManager::load_at(path.clone());
+            let mut params = resume_params(index);
+            params.native_launch.lifecycle_mode =
+                serde_json::from_value(serde_json::json!(mode)).unwrap();
+            params.native_launch.interactive = interactive;
+            let (first, admitted, _) = manager.admit_xcsh_resume(&params).unwrap();
+            assert!(admitted);
+            assert!(!manager.admit_xcsh_resume(&params).unwrap().1);
+            drop(manager);
+            let reloaded = ExecutionManager::load_at(path.clone());
+            let (retry, admitted, _) = reloaded.admit_xcsh_resume(&params).unwrap();
+            assert!(!admitted);
+            assert_eq!(retry.execution_id, first.execution_id);
+            assert_eq!(retry.command, first.command);
+            assert_eq!(retry.native_launch, first.native_launch);
+            let mut changed = params.clone();
+            changed.native_launch.lifecycle_mode =
+                crate::api::schema::NativeLifecycleMode::ManagedTurnV1;
+            assert!(reloaded
+                .admit_xcsh_resume(&changed)
+                .unwrap_err()
+                .contains("generation_conflict"));
+            changed = params.clone();
+            changed.text.push_str(" changed");
+            assert!(reloaded
+                .admit_xcsh_resume(&changed)
+                .unwrap_err()
+                .contains("generation_conflict"));
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
     fn test_cwd() -> String {
         std::env::temp_dir().to_string_lossy().into_owned()
     }
@@ -1854,6 +1957,33 @@ mod tests {
         ] {
             assert!(!argv.iter().any(|argument| argument == forbidden));
         }
+    }
+
+    #[test]
+    fn native_executable_measurement_accepts_large_bundles_and_remains_bounded() {
+        let path = temp("native-large-bundle");
+        let file = std::fs::File::create(&path).expect("large fixture");
+        file.set_len(512 * 1024 * 1024 + 1).expect("sparse fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                .expect("executable permissions");
+        }
+        let binding = measure_xcsh_executable(path.to_str().expect("utf8 path"))
+            .expect("bundled executables above 512 MiB remain measurable");
+        // SHA-256 of 512 MiB plus one zero byte, independent of the file reader.
+        assert_eq!(
+            binding.sha256,
+            "7c40fe5ce847740d0f0d0cdde3949d6585804cdec3ae61a15b923165699c8137"
+        );
+        file.set_len(1024 * 1024 * 1024 + 1)
+            .expect("over-limit fixture");
+        assert!(measure_xcsh_executable(path.to_str().expect("utf8 path"))
+            .expect_err("oversized executable")
+            .contains("maximum measurable size"));
+        drop(file);
+        std::fs::remove_file(path).expect("fixture cleanup");
     }
 
     #[test]

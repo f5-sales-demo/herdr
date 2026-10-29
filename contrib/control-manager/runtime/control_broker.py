@@ -370,13 +370,18 @@ def measure_native_launch(raw: Any, *, expected_executable_sha256: str | None = 
         raise ValueError("native_launch supports only discovery=reduced-v1 and tools=read_interactions")
     if not isinstance(raw.get("interactive"), bool):
         raise ValueError("native_launch.interactive must be boolean")
-    if raw.get("lifecycle_mode") != "managed_turn_v1":
-        raise ValueError("native_launch.lifecycle_mode must be managed_turn_v1")
+    mode = raw.get("lifecycle_mode")
+    if not isinstance(mode, str) or mode not in {"managed_turn_v1", "await_user_v1", "local_operation_failure_v1"}:
+        raise ValueError("native_launch.lifecycle_mode is unsupported")
+    if mode == "await_user_v1" and not raw["interactive"]:
+        raise ValueError("await_user_v1 requires interactive=true")
+    if mode == "local_operation_failure_v1" and raw["interactive"]:
+        raise ValueError("local_operation_failure_v1 requires interactive=false")
     return {"version": 4, "xcsh_executable": executable["canonical_path"],
             "session_dir": str(canonical_dir), "session_path": str(canonical_path),
             "session_header": {"id": declared_header["id"], "sha256": declared_header["sha256"]},
             "model": model, "discovery": "reduced-v1", "tools": "read_interactions",
-            "interactive": raw["interactive"], "lifecycle_mode": "managed_turn_v1"}
+            "interactive": raw["interactive"], "lifecycle_mode": mode}
 
 
 def configured_codex_binary(config: dict[str, Any]) -> str:
@@ -1779,6 +1784,8 @@ class StateDB:
         ])
         if not launch.get("interactive"):
             expected_argv.append("--print")
+        if launch.get("lifecycle_mode") != "managed_turn_v1":
+            expected_argv.extend(["--native-lifecycle-control", launch.get("lifecycle_mode")])
         expected_argv.append(request.get("text"))
         command = execution.get("command")
         injected = execution.get("injected_env")
@@ -2728,7 +2735,14 @@ class Broker:
         existing = self._idempotent_admission("native_xcsh_admit", params)
         if existing is not None:
             await self._reconcile_native_xcsh_admissions(existing["id"])
-            return public_task(self.db.task(existing["id"])) | {"admitted": False, "idempotency_replayed": True}  # type: ignore[arg-type]
+            task = self.db.task(existing["id"])
+            binding = self.db.current_native_generation(existing["id"])
+            result = public_task(task) | {"admitted": False, "idempotency_replayed": True}
+            if binding is not None:
+                result |= self._native_xcsh_public_binding(binding)
+            if binding is None or binding["backend_execution_id"] is None:
+                result["admission_uncertain"] = True
+            return result
         target = bounded(params.get("target"), 64, "target", required=True)
         if not TARGET_RE.fullmatch(target or ""):
             raise ValueError("target must match task target rules")
@@ -2765,7 +2779,7 @@ class Broker:
         if len(identity_json) > 4000:
             raise ValueError("runtime_identity is too large")
         try:
-            await self._require_native_xcsh_resume_contract()
+            await self._require_native_xcsh_resume_contract(launch["lifecycle_mode"])
             await self.herdr.request("workspace.get", {"workspace_id": workspace_id}, timeout=10)
         except Exception as exc:
             raise ValueError(f"native xcsh workspace is not available: {exc}") from exc
@@ -2790,7 +2804,7 @@ class Broker:
         return await self._resume_xcsh_generation(row["id"], generation=0, session_id=session_id or "",
                                                    text=text or "", label="xcsh-native-uat")
 
-    async def _require_native_xcsh_resume_contract(self) -> None:
+    async def _require_native_xcsh_resume_contract(self, lifecycle_mode: str = "managed_turn_v1") -> None:
         """Require protocol-26's interaction-capable typed native-launch response contract.
 
         The authoritative compatibility boundary is protocol 26 plus the existing tracked execution and
@@ -2805,6 +2819,8 @@ class Broker:
                 or not caps.get("tracked_executions")
                 or not caps.get("agent_turn_journal")):
             raise ValueError("Herdr lacks the protocol-26 interaction-capable typed-native-launch, tracked-executions, and semantic-journal contract required for execution.resume")
+        if lifecycle_mode != "managed_turn_v1" and caps.get("native_lifecycle_controls") is not True:
+            raise ValueError("Herdr lacks native_lifecycle_controls required for this acceptance mode")
 
     @staticmethod
     def _native_xcsh_effect_request(request: dict[str, Any], label: str) -> dict[str, Any]:
@@ -2879,6 +2895,11 @@ class Broker:
                                        expected_executable_sha256=runtime_identity.get("xcsh_executable_sha256"))
         if session_id != launch["session_header"]["id"]:
             raise ValueError("native continuation session differs from immutable native_launch header")
+        # A continuation is a new immutable generation. The initial acceptance
+        # prompt must not run again; reconciliation reuses the stored claim.
+        if generation > 0 and launch["lifecycle_mode"] == "await_user_v1":
+            launch = launch | {"lifecycle_mode": "managed_turn_v1"}
+        await self._require_native_xcsh_resume_contract(launch["lifecycle_mode"])
         immutable = {"execution_id": task_id, "generation": generation, "native_launch": launch,
                      "cwd": row["cwd"], "workspace_id": row["workspace_id"], "text": text}
         immutable["xcsh_executable_sha256"] = runtime_identity["xcsh_executable_sha256"]
@@ -2905,7 +2926,7 @@ class Broker:
         # unknown response. Herdr's generation admission is idempotent, so
         # this neither duplicates child input nor allocates a new authority.
         try:
-            await self._require_native_xcsh_resume_contract()
+            await self._require_native_xcsh_resume_contract(immutable["native_launch"]["lifecycle_mode"])
             result = await self.herdr.request("execution.resume", self._native_xcsh_effect_request(immutable, label), timeout=30)
             execution = result.get("execution", result)
             binding = self.db.admit_native_generation(task_id, generation, execution)
@@ -2939,7 +2960,7 @@ class Broker:
                 continue
             request = json.loads(binding["request_json"])
             try:
-                await self._require_native_xcsh_resume_contract()
+                await self._require_native_xcsh_resume_contract(request["native_launch"]["lifecycle_mode"])
                 result = await self.herdr.request(
                     "execution.resume", self._native_xcsh_effect_request(request, "xcsh-native-uat"), timeout=30
                 )
@@ -3108,6 +3129,14 @@ class Broker:
                 "Herdr cancelled turn is not yet backed by a settled native execution receipt"
             )
 
+    def _native_status_cursor(self, row: sqlite3.Row) -> dict[str, int]:
+        if row["work_kind"] != "xcsh":
+            return {}
+        binding = self.db.current_native_generation(row["id"])
+        if binding is None:
+            return {}
+        return {"native_event_revision": int(binding["last_event_revision"])}
+
     def status(self, task_id: str | None) -> dict[str, Any]:
         if task_id is not None:
             bounded(task_id, 80, "task_id", required=True)
@@ -3120,6 +3149,7 @@ class Broker:
         return {
             "tasks": [
                 public_task(row)
+                | self._native_status_cursor(row)
                 | {
                     "transitions": self.db.transitions(row["id"]),
                     "followups": self.db.followups(row["id"]),

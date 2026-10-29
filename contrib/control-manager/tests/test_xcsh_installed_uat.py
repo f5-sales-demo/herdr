@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from xcsh_installed_uat import CATALOG, PreflightError, execute_case, preflight, validate_journal, validate_xcsh_archive_provenance
+from xcsh_installed_uat import native_case_lifecycle, CATALOG, PreflightError, execute_case, preflight, validate_journal, validate_xcsh_archive_provenance
 
 
 ROOT = Path(__file__).parent
@@ -22,6 +22,164 @@ def manifest():
 
 
 class InstalledPromptUatTests(unittest.TestCase):
+    def test_execute_case_recovers_lost_continuation_and_replays_completed_run(self):
+        self._check_case_recovery("continuation")
+
+    def test_execute_case_recovers_completed_supersession_without_another_effect(self):
+        self._check_case_recovery("generation_supersession")
+
+    def _check_case_recovery(self, case_id):
+        from unittest.mock import patch
+        import xcsh_installed_uat as driver
+        from xcsh_isolated_uat_controller import IsolatedController
+        case = next(case for case in json.loads(CATALOG.read_text())["scenarios"] if case["id"] == case_id)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); candidate = self.prepared_manifest(root)
+            counts = {"sessions": 0, "admissions": 0, "continuation_calls": 0, "continuation_effects": 0}
+            current_generation = 0
+            lose_response = True
+            session_id = "0123abcd4567ef89"
+            result = candidate["runtime"]["fixture"]["value"]
+            state_file = root / "case-state.json"
+            session_file = root / "session-receipt.json"
+            class Controller:
+                token = "synthetic"
+                def real_action(self, kind, pane, key, token, external):
+                    nonlocal lose_response
+                    controller = IsolatedController(root / "actions.sqlite", {
+                        "session_id": "xcsh-uat-synthetic", "service_id": "xcsh-uat-synthetic",
+                        "workspace_id": "w-isolated", "pane_ids": ["pane-0"]}, token)
+                    try:
+                        controller.register_execution(task(0))
+                        def hook(kind, target):
+                            nonlocal lose_response
+                            receipt = external()
+                            return {"kind": kind, "session_id": target["session_id"],
+                                    "pane_id": pane, "effect": {"broker_task_id": receipt["id"]}}
+                        receipt = controller.act(kind, pane, key, token, hook)
+                        if lose_response:
+                            lose_response = False
+                            raise RuntimeError("lost completed controller response after effect")
+                        return receipt
+                    finally:
+                        controller.close()
+                def load_case_state(self, key, spec):
+                    return json.loads(state_file.read_text()) if state_file.exists() else {}
+                def save_case_state(self, key, spec, state): state_file.write_text(json.dumps(state))
+                def session_for_run(self, key, *_):
+                    if session_file.exists(): return json.loads(session_file.read_text())
+                    counts["sessions"] += 1
+                    receipt = {"session_id": session_id, "session_dir": "/synthetic", "session_path": "/synthetic/session.jsonl",
+                               "session_header": {"id": session_id, "sha256": "a"*64},
+                               "xcsh_executable": "/isolated/xcsh", "xcsh_executable_sha256": "a"*64}
+                    session_file.write_text(json.dumps(receipt)); return receipt
+                def register_execution(self, task):
+                    self.assert_gen_zero = task["pane_id"] == "pane-0"
+                    if not self.assert_gen_zero: raise AssertionError("current pane mislabeled as generation zero")
+            task = lambda generation: {"id": "task-1", "pane_id": f"pane-{generation}", "tab_id": f"tab-{generation}",
+                "workspace_id": "w-isolated", "agent_session_id": session_id, "run_generation": generation, "state": "completed" if generation else "starting"}
+            records = []
+            ev = {0: 0, 1: 0}
+            for revision, (generation, state) in enumerate([(0,"starting"),(0,"working"),(0,"waiting_input"),
+                    (0,"working"),(0,"cancelled"),(1,"starting"),(1,"working"),(1,"working"),(1,"completed")], 1):
+                ev[generation] += 1
+                report = {"execution_id":"task-1","producer":"xcsh","session_id":session_id,"pane_id":f"pane-{generation}",
+                          "turn_id":f"turn-{generation}","generation":generation,"event_revision":ev[generation],"state":state}
+                if state=="cancelled": report["reason"]="superseded"
+                if state=="completed": report |= {"result":result,"result_digest":hashlib.sha256(result.encode()).hexdigest()}
+                records.append({"revision":revision,"report":report})
+            def broker(path, method, params):
+                nonlocal current_generation, lose_response
+                if method=="native_xcsh_admit":
+                    counts["admissions"] += 1
+                    return task(current_generation) | {"native_executable":{"canonical_path":"/isolated/xcsh","sha256":"a"*64},"native_launch":params["native_launch"]}
+                if method=="continue_task":
+                    counts["continuation_calls"] += 1
+                    if not current_generation:
+                        current_generation=1; counts["continuation_effects"] += 1
+                    if lose_response and case_id == "continuation":
+                        lose_response=False; raise RuntimeError("lost continuation response after effect")
+                    return task(1)
+                if method=="consume_native_turns": return {"applied":[{"task_id":"task-1","state":"completed" if current_generation else "waiting_human"}]}
+                if method=="status": return {"tasks":[task(current_generation)],"pending_completions":[{"task_id":"task-1","delivery_state":"consumed"}]}
+                raise AssertionError(method)
+            def herdr(path, method, params):
+                if method=="agent.turn.list": return {"turns":[r for r in records[:9 if current_generation else 3] if r["revision"]>params["since_revision"]]}
+                raise AssertionError(method)
+            with patch.object(driver,"unix_request",side_effect=broker), patch.object(driver,"herdr_request",side_effect=herdr):
+                with self.assertRaisesRegex(RuntimeError,"lost .* response"):
+                    execute_case(candidate,case,run_id="same-run",controller=Controller())
+                recovered = execute_case(candidate,case,run_id="same-run",controller=Controller())
+                replay = execute_case(candidate,case,run_id="same-run",controller=Controller())
+            self.assertEqual(recovered,replay)
+            self.assertTrue(recovered["pass"])
+            self.assertEqual(counts,{"sessions":1,"admissions":1,
+                "continuation_calls":2 if case_id == "continuation" else 1,"continuation_effects":1})
+
+    def test_generation_oracle_retains_binding_and_distinct_progress_events(self):
+        case = next(case for case in json.loads(CATALOG.read_text())["scenarios"] if case["id"] == "continuation")
+        states = [(0, "starting"), (0, "working"), (0, "waiting_input"), (0, "working"),
+                  (1, "starting"), (1, "working"), (0, "cancelled"), (1, "working"), (1, "completed")]
+        event_revisions = {0: 0, 1: 0}
+        records = []
+        result = manifest()["runtime"]["fixture"]["value"]
+        for revision, (generation, state) in enumerate(states, 1):
+            event_revisions[generation] += 1
+            report = {"execution_id": "task-1", "producer": "xcsh", "session_id": "0123abcd4567ef89",
+                "pane_id": f"pane-{generation}", "turn_id": f"turn-{generation}", "generation": generation,
+                "event_revision": event_revisions[generation], "state": state}
+            if state == "cancelled": report["reason"] = "superseded"
+            if state == "completed": report |= {"result": result, "result_digest": hashlib.sha256(result.encode()).hexdigest()}
+            records.append({"revision": revision, "report": report})
+        task = {"id": "task-1", "pane_id": "pane-1", "agent_session_id": "0123abcd4567ef89", "run_generation": 1}
+        bindings = {generation: {"execution_id": "task-1", "pane_id": f"pane-{generation}", "session_id": "0123abcd4567ef89"} for generation in (0, 1)}
+        validate_journal(case, records, task, None, fixture=manifest()["runtime"]["fixture"], bindings=bindings)
+        with self.assertRaisesRegex(AssertionError, "admission binding"):
+            validate_journal(case, records, task, None, fixture=manifest()["runtime"]["fixture"])
+        reason = records[6]["report"].pop("reason")
+        with self.assertRaisesRegex(AssertionError, "terminal semantic reason"):
+            validate_journal(case, records, task, None, fixture=manifest()["runtime"]["fixture"], bindings=bindings)
+        records[6]["report"]["reason"] = reason
+        early = [records[0], records[1], records[4], records[2], records[3], *records[5:]]
+        early = [dict(record, revision=index) for index, record in enumerate(early, 1)]
+        with self.assertRaisesRegex(AssertionError, "continuation boundary"):
+            validate_journal(case, early, task, None, fixture=manifest()["runtime"]["fixture"], bindings=bindings)
+        records[0]["report"]["pane_id"] = "pane-1"
+        with self.assertRaisesRegex(AssertionError, "provenance"):
+            validate_journal(case, records, task, None, fixture=manifest()["runtime"]["fixture"], bindings=bindings)
+        records[0]["report"]["pane_id"] = "pane-0"
+        records[7]["report"]["event_revision"] = records[5]["report"]["event_revision"]
+        with self.assertRaisesRegex(AssertionError, "logical producer event"):
+            validate_journal(case, records, task, None, fixture=manifest()["runtime"]["fixture"], bindings=bindings)
+
+    def test_execute_case_admits_exact_catalog_lifecycle_modes(self):
+        from unittest.mock import patch
+        import xcsh_installed_uat as driver
+        class Controller:
+            def create_xcsh_session(self, *_):
+                return {"session_id": "0123abcd4567ef89", "session_dir": "/synthetic",
+                    "session_path": "/synthetic/session.jsonl", "session_header": {"id": "0123abcd4567ef89", "sha256": "a"*64},
+                    "xcsh_executable": "/isolated/xcsh", "xcsh_executable_sha256": "a"*64}
+        catalog = json.loads(CATALOG.read_text())["scenarios"]
+        for case_id, mode, interactive in [("waiting_input", "await_user_v1", True),
+                ("continuation", "await_user_v1", True), ("generation_supersession", "await_user_v1", True),
+                ("failure", "local_operation_failure_v1", False), ("success", "managed_turn_v1", True)]:
+            case = next(case for case in catalog if case["id"] == case_id)
+            with tempfile.TemporaryDirectory() as raw:
+                with patch.object(driver, "unix_request", side_effect=RuntimeError("captured admission")) as request:
+                    with self.assertRaisesRegex(RuntimeError, "captured admission"):
+                        execute_case(self.prepared_manifest(Path(raw)), case, run_id="selection", controller=Controller())
+                    args = request.call_args.args
+                    self.assertEqual(args[1], "native_xcsh_admit")
+                    self.assertEqual(args[2]["native_launch"]["lifecycle_mode"], mode)
+                    self.assertEqual(args[2]["native_launch"]["interactive"], interactive)
+
+    def test_native_case_lifecycle_selection(self):
+        for case in ("waiting_input", "continuation", "generation_supersession"):
+            self.assertEqual(native_case_lifecycle(case), ("await_user_v1", True))
+        self.assertEqual(native_case_lifecycle("failure"), ("local_operation_failure_v1", False))
+        self.assertEqual(native_case_lifecycle("success"), ("managed_turn_v1", True))
+
     def test_catalog_requires_exact_generation_trace_for_every_case(self):
         catalog = json.loads(CATALOG.read_text())
         for case in catalog["scenarios"]:
@@ -71,6 +229,30 @@ class InstalledPromptUatTests(unittest.TestCase):
                 from xcsh_installed_uat import validate_fixture
                 validate_fixture(candidate["runtime"], verify_file=True)
 
+    def test_direct_asset_provenance_binds_published_and_installed_bytes(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw); asset=root/'xcsh-linux-x64'; installed=root/'xcsh'
+            asset.write_bytes(b'published executable'); installed.write_bytes(asset.read_bytes())
+            digest=hashlib.sha256(asset.read_bytes()).hexdigest()
+            runtime={'xcsh_artifact_path':str(asset),'xcsh_executable':str(installed),'xcsh_executable_sha256':digest}
+            validate_xcsh_archive_provenance(runtime,{'sha256':digest},verify_archive=True)
+            mixed=runtime | {'xcsh_archive_path':'old.tar.gz'}
+            with self.assertRaisesRegex(PreflightError,'cannot mix'):
+                validate_xcsh_archive_provenance(mixed,{'sha256':digest},verify_archive=False)
+            with self.assertRaisesRegex(PreflightError,'matching published/executable digest'):
+                validate_xcsh_archive_provenance(runtime,{'sha256':'0'*64},verify_archive=False)
+            candidate=self.prepared_manifest(root)
+            for key in ('xcsh_archive_path','xcsh_archive_member','xcsh_archive_member_sha256'):
+                candidate['runtime'].pop(key)
+            candidate['runtime'].update(runtime); candidate['artifacts']['xcsh']['sha256']=digest
+            self.assertEqual(preflight(candidate,json.loads(CATALOG.read_text()))['preflight'],'passed')
+            installed.write_bytes(b'changed installation')
+            with self.assertRaisesRegex(PreflightError,'published asset digest'):
+                validate_xcsh_archive_provenance(runtime,{'sha256':digest},verify_archive=True)
+            installed.write_bytes(asset.read_bytes()); asset.write_bytes(b'changed download')
+            with self.assertRaisesRegex(PreflightError,'published asset digest'):
+                validate_xcsh_archive_provenance(runtime,{'sha256':digest},verify_archive=True)
+
     def test_archive_member_provenance_rejects_wrong_member_and_changed_archive(self):
         with tempfile.TemporaryDirectory() as raw:
             root=Path(raw); payload=root/'payload'; payload.write_bytes(b'xcsh fixture')
@@ -92,12 +274,12 @@ class InstalledPromptUatTests(unittest.TestCase):
 
     def test_oracle_requires_real_provenance_not_a_sentinel_substring(self):
         case = next(item for item in json.loads(CATALOG.read_text())["scenarios"] if item["id"] == "success")
-        task = {"id": "task-1", "pane_id": "pane-1", "agent_session_id": "session-1"}
+        task = {"id": "task-1", "pane_id": "pane-1", "agent_session_id": "0123abcd4567ef89"}
         result = manifest()["runtime"]["fixture"]["value"]
         reports = [
-            {"revision": 1, "report": {"execution_id": "task-1", "pane_id": "pane-1", "producer": "xcsh", "turn_id": "turn-1", "event_revision": 1, "session_id": "session-1", "generation": 0, "state": "starting"}},
-            {"revision": 2, "report": {"execution_id": "task-1", "pane_id": "pane-1", "producer": "xcsh", "turn_id": "turn-1", "event_revision": 2, "session_id": "session-1", "generation": 0, "state": "working"}},
-            {"revision": 3, "report": {"execution_id": "task-1", "pane_id": "pane-1", "producer": "xcsh", "turn_id": "turn-1", "event_revision": 3, "session_id": "session-1", "generation": 0, "state": "completed", "result": result, "result_digest": hashlib.sha256(result.encode()).hexdigest()}},
+            {"revision": 1, "report": {"execution_id": "task-1", "pane_id": "pane-1", "producer": "xcsh", "turn_id": "turn-1", "event_revision": 1, "session_id": "0123abcd4567ef89", "generation": 0, "state": "starting"}},
+            {"revision": 2, "report": {"execution_id": "task-1", "pane_id": "pane-1", "producer": "xcsh", "turn_id": "turn-1", "event_revision": 2, "session_id": "0123abcd4567ef89", "generation": 0, "state": "working"}},
+            {"revision": 3, "report": {"execution_id": "task-1", "pane_id": "pane-1", "producer": "xcsh", "turn_id": "turn-1", "event_revision": 3, "session_id": "0123abcd4567ef89", "generation": 0, "state": "completed", "result": result, "result_digest": hashlib.sha256(result.encode()).hexdigest()}},
         ]
         validate_journal(case, reports, task, {"task_id": "task-1", "stage": "consumed"}, fixture=manifest()["runtime"]["fixture"])
         reports[-1]["report"]["result"] = "arbitrary completed text"
@@ -115,20 +297,26 @@ class InstalledPromptUatTests(unittest.TestCase):
             validate_journal(case, reports, task, {"task_id": "task-1", "stage": "consumed"}, fixture=manifest()["runtime"]["fixture"])
 
     def test_controlled_transport_driver_uses_adapter_and_observed_consumption(self):
+        self._check_controlled_transport_driver(True)
+
+    def test_controlled_transport_driver_accepts_durable_already_consumed_progress(self):
+        self._check_controlled_transport_driver(False)
+
+    def _check_controlled_transport_driver(self, fresh_applied):
         import xcsh_installed_uat as driver
         case = next(item for item in json.loads(CATALOG.read_text())["scenarios"] if item["id"] == "success")
         result = manifest()["runtime"]["fixture"]["value"]
         records = [
-            {"revision": 1, "report": {"execution_id": "task-1", "pane_id": "pane-1", "producer": "xcsh", "session_id": "session-1", "turn_id": "turn-1", "generation": 0, "event_revision": 1, "state": "starting"}},
-            {"revision": 2, "report": {"execution_id": "task-1", "pane_id": "pane-1", "producer": "xcsh", "session_id": "session-1", "turn_id": "turn-1", "generation": 0, "event_revision": 2, "state": "working"}},
-            {"revision": 3, "report": {"execution_id": "task-1", "pane_id": "pane-1", "producer": "xcsh", "session_id": "session-1", "turn_id": "turn-1", "generation": 0, "event_revision": 3, "state": "completed", "result": result, "result_digest": hashlib.sha256(result.encode()).hexdigest()}},
+            {"revision": 1, "report": {"execution_id": "task-1", "pane_id": "pane-1", "producer": "xcsh", "session_id": "0123abcd4567ef89", "turn_id": "turn-1", "generation": 0, "event_revision": 1, "state": "starting"}},
+            {"revision": 2, "report": {"execution_id": "task-1", "pane_id": "pane-1", "producer": "xcsh", "session_id": "0123abcd4567ef89", "turn_id": "turn-1", "generation": 0, "event_revision": 2, "state": "working"}},
+            {"revision": 3, "report": {"execution_id": "task-1", "pane_id": "pane-1", "producer": "xcsh", "session_id": "0123abcd4567ef89", "turn_id": "turn-1", "generation": 0, "event_revision": 3, "state": "completed", "result": result, "result_digest": hashlib.sha256(result.encode()).hexdigest()}},
         ]
         calls = []
         def fake_broker(path, method, params):
             calls.append((method, params))
             if method == "native_xcsh_admit": return {"id": "task-1", "state": "starting", "workspace_id":"w-isolated","tab_id":"tab-1", "pane_id": "pane-1", "agent_session_id": None, "native_executable": {"canonical_path": params["native_launch"]["xcsh_executable"], "sha256": params["xcsh_executable_sha256"]}, "native_launch": params["native_launch"]}
-            if method == "consume_native_turns": return {"applied": [{"task_id": "task-1", "state": "completed"}]}
-            if method == "status": return {"tasks": [{"id": "task-1", "pane_id": "pane-1", "agent_session_id": "session-1"}], "pending_completions": [{"task_id": "task-1", "delivery_state": "consumed"}]}
+            if method == "consume_native_turns": return {"applied": [{"task_id": "task-1", "state": "completed"}] if fresh_applied else []}
+            if method == "status": return {"tasks": [{"id": "task-1", "pane_id": "pane-1", "agent_session_id": "0123abcd4567ef89", "run_generation": 0, "native_turn_id": "turn-1", "native_event_revision": 3}], "pending_completions": [{"task_id": "task-1", "delivery_state": "consumed"}]}
             raise AssertionError(method)
         def fake_herdr(path, method, params):
             self.assertIn(method, driver.ALLOWED_HERDR_METHODS)
@@ -160,9 +348,9 @@ class InstalledPromptUatTests(unittest.TestCase):
             with self.assertRaisesRegex(PreflightError, "authenticated dedicated-runtime controller"):
                 execute_case(self.prepared_manifest(Path(raw)), case, run_id="stable")
         reports = [
-            {"revision": 1, "report": {"execution_id":"task-1","pane_id":"pane-1","producer":"xcsh","session_id":"session-1","turn_id":"turn-1","generation":0,"event_revision":1,"state":"starting"}},
-            {"revision": 2, "report": {"execution_id":"task-1","pane_id":"pane-1","producer":"xcsh","session_id":"session-1","turn_id":"turn-1","generation":0,"event_revision":2,"state":"working"}},
-            {"revision": 3, "report": {"execution_id":"task-1","pane_id":"pane-1","producer":"xcsh","session_id":"session-1","turn_id":"turn-1","generation":0,"event_revision":3,"state":"interrupted","reason":"owned runtime restarted"}},
+            {"revision": 1, "report": {"execution_id":"task-1","pane_id":"pane-1","producer":"xcsh","session_id":"0123abcd4567ef89","turn_id":"turn-1","generation":0,"event_revision":1,"state":"starting"}},
+            {"revision": 2, "report": {"execution_id":"task-1","pane_id":"pane-1","producer":"xcsh","session_id":"0123abcd4567ef89","turn_id":"turn-1","generation":0,"event_revision":2,"state":"working"}},
+            {"revision": 3, "report": {"execution_id":"task-1","pane_id":"pane-1","producer":"xcsh","session_id":"0123abcd4567ef89","turn_id":"turn-1","generation":0,"event_revision":3,"state":"interrupted","reason":"owned runtime restarted"}},
         ]
         class Controller:
             token="token"
@@ -170,12 +358,12 @@ class InstalledPromptUatTests(unittest.TestCase):
             def create_xcsh_session(self, *_): return {"session_id": "0123abcd4567ef89", "session_dir":"/synthetic", "session_path": "/synthetic/session.jsonl", "session_header":{"id":"0123abcd4567ef89","sha256":"a" * 64}, "xcsh_executable": "/isolated/xcsh", "xcsh_executable_sha256": "a" * 64}
             def register_execution(self, task): self.registered=task
             def real_action(self, kind, pane, key, token, external=None):
-                self.calls.append((kind,pane,key,token)); return {"kind":kind,"execution_id":"task-1","workspace_id":"w-isolated","tab_id":"tab-1","pane_id":pane,"session_id":"owned","effect":{"action":"producer_process_cutpoint","producer_session_id":"session-1","producer_pid":123,"execution_id":"task-1","before_revision":2,"process_exited":True,"stop_exit":0,"after_socket":"/isolated/herdr.sock"}}
+                self.calls.append((kind,pane,key,token)); return {"kind":kind,"execution_id":"task-1","workspace_id":"w-isolated","tab_id":"tab-1","pane_id":pane,"session_id":"owned","effect":{"action":"producer_process_cutpoint","producer_session_id":"0123abcd4567ef89","producer_pid":123,"execution_id":"task-1","before_revision":2,"process_exited":True,"stop_exit":0,"after_socket":"/isolated/herdr.sock"}}
         controller=Controller(); ticks=[0]
         def fake_broker(path, method, params):
-            if method == "native_xcsh_admit": return {"id":"task-1","state":"starting","workspace_id":"w-isolated","tab_id":"tab-1","pane_id":"pane-1","agent_session_id":"session-1", "native_executable": {"canonical_path": params["native_launch"]["xcsh_executable"], "sha256": params["xcsh_executable_sha256"]}, "native_launch":params["native_launch"]}
+            if method == "native_xcsh_admit": return {"id":"task-1","state":"starting","workspace_id":"w-isolated","tab_id":"tab-1","pane_id":"pane-1","agent_session_id":"0123abcd4567ef89", "native_executable": {"canonical_path": params["native_launch"]["xcsh_executable"], "sha256": params["xcsh_executable_sha256"]}, "native_launch":params["native_launch"]}
             if method == "consume_native_turns": return {"applied":[{"task_id":"task-1","state":reports[max(0,ticks[0]-1)]["report"]["state"]}]}
-            if method == "status": return {"tasks":[{"id":"task-1","pane_id":"pane-1","agent_session_id":"session-1"}],"pending_completions":[{"task_id":"task-1","delivery_state":"consumed"}]}
+            if method == "status": return {"tasks":[{"id":"task-1","pane_id":"pane-1","agent_session_id":"0123abcd4567ef89"}],"pending_completions":[{"task_id":"task-1","delivery_state":"consumed"}]}
             raise AssertionError(method)
         def fake_herdr(path, method, params):
             if method == "agent.turn.list":

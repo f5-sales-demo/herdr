@@ -55,6 +55,9 @@ pub struct ServerCapabilities {
     /// Whether durable execution lifecycle methods are available.
     #[serde(default)]
     pub tracked_executions: bool,
+    /// Typed native producer acceptance controls beyond managed_turn_v1.
+    #[serde(default)]
+    pub native_lifecycle_controls: bool,
     /// Whether semantic agent-turn reporting and replay are available.
     #[serde(default)]
     pub agent_turn_journal: bool,

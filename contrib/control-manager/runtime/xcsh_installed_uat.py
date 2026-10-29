@@ -136,7 +136,30 @@ def artifact_id(component: dict[str, Any], name: str) -> str:
 
 
 def validate_xcsh_archive_provenance(runtime: dict[str, Any], artifact: dict[str, Any], *, verify_archive: bool) -> None:
-    """Bind a launched executable to one regular member of the published asset."""
+    """Bind a direct executable asset or a historical published archive member."""
+    direct = runtime.get("xcsh_artifact_path")
+    if direct is not None:
+        if any(runtime.get(key) is not None for key in
+               ("xcsh_archive_path", "xcsh_archive_member", "xcsh_archive_member_sha256")):
+            raise PreflightError("xcsh provenance cannot mix direct asset and archive bindings")
+        executable, digest = runtime.get("xcsh_executable"), runtime.get("xcsh_executable_sha256")
+        if (not isinstance(direct, str) or not direct or not Path(direct).is_absolute()
+                or not isinstance(executable, str) or not executable
+                or not isinstance(digest, str) or digest.lower() != artifact["sha256"].lower()):
+            raise PreflightError("direct xcsh asset requires an absolute artifact path and matching published/executable digest")
+        if not verify_archive:
+            return
+        if Path(direct).is_symlink():
+            raise PreflightError("direct xcsh asset must be a regular file")
+        for path in {Path(direct), Path(executable)}:
+            if not path.is_file():
+                raise PreflightError("direct xcsh asset and installed executable must be regular files")
+            measured = hashlib.sha256()
+            with path.open("rb") as source:
+                while chunk := source.read(1024 * 1024): measured.update(chunk)
+            if measured.hexdigest().lower() != artifact["sha256"].lower():
+                raise PreflightError("direct xcsh asset/executable does not match the published asset digest")
+        return
     archive_path, member = runtime.get("xcsh_archive_path"), runtime.get("xcsh_archive_member")
     member_digest, executable_digest = runtime.get("xcsh_archive_member_sha256"), runtime.get("xcsh_executable_sha256")
     if (not isinstance(archive_path, str) or not archive_path or not isinstance(member, str) or
@@ -330,6 +353,46 @@ def assert_controller_identity(receipt: dict[str, Any], task: dict[str, Any]) ->
         raise PreflightError("controller receipt is not bound to the exact admitted execution")
 
 
+def native_case_lifecycle(case_id: str) -> tuple[str, bool]:
+    if case_id in {"waiting_input", "continuation", "generation_supersession"}:
+        return "await_user_v1", True
+    if case_id == "failure":
+        return "local_operation_failure_v1", False
+    return "managed_turn_v1", True
+
+
+def semantic_trace(records: list[dict[str, Any]]) -> list[tuple[int, str]]:
+    """Project status changes while retaining all distinct journal events."""
+    trace: list[tuple[int, str]] = []
+    for record in records:
+        report = record.get("report", record)
+        pair = (report.get("generation"), report.get("state"))
+        if not trace or trace[-1] != pair:
+            trace.append(pair)
+    return trace
+
+
+def trace_matches(case: dict[str, Any], records: list[dict[str, Any]]) -> bool:
+    expected = case.get("expected_generation_states")
+    if expected is not None:
+        actual: dict[str, list[str]] = {}
+        for generation, state in semantic_trace(records):
+            states = actual.setdefault(str(generation), [])
+            if not states or states[-1] != state:
+                states.append(state)
+        return actual == expected
+    trace = semantic_trace(records)
+    return ([state for _, state in trace] == case["expected_states"]
+            and (case.get("expected_generations") is None
+                 or [generation for generation, _ in trace] == case["expected_generations"]))
+
+
+def admission_binding(task: dict[str, Any], session_id: str) -> dict[str, Any]:
+    if not isinstance(task.get("id"), str) or not isinstance(task.get("pane_id"), str):
+        raise PreflightError("admission lacks authoritative execution/pane binding")
+    return {"execution_id": task["id"], "pane_id": task["pane_id"], "session_id": session_id}
+
+
 def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str, timeout: float = 90,
                  controller: Any | None = None) -> dict[str, Any]:
     """Drive one real installed xcsh prompt through the atomic broker adapter."""
@@ -342,12 +405,22 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
     prompt = case["prompt"].replace("{fixture_path}", fixture["path"])
     if controller is None:
         raise PreflightError("installed execution requires an authenticated controller-owned xcsh session")
+    case_key = f"installed-xcsh-uat:{run_id}:{case['id']}"
+    case_spec = hashlib.sha256(json.dumps({"runtime": runtime, "artifacts": manifest["artifacts"], "case": case}, sort_keys=True).encode()).hexdigest()
+    saved = controller.load_case_state(case_key, case_spec) if hasattr(controller, "load_case_state") else {}
+    if saved.get("final_receipt") is not None:
+        return saved["final_receipt"]
+    def persist() -> None:
+        if hasattr(controller, "save_case_state"):
+            controller.save_case_state(case_key, case_spec, saved)
     try:
-        session_receipt = controller.create_xcsh_session(
-            Path(runtime["xcsh_executable"]), runtime["xcsh_executable_sha256"],
-            Path(runtime.get("cwd", "/")),
-            Path(runtime["xcsh_session_dir"]) / f"{run_id}-{case['id']}-{uuid.uuid4().hex}",
-        )
+        session_args = (Path(runtime["xcsh_executable"]), runtime["xcsh_executable_sha256"],
+                        Path(runtime.get("cwd", "/")),
+                        Path(runtime["xcsh_session_dir"]) / f"{run_id}-{case['id']}-{uuid.uuid4().hex}")
+        if hasattr(controller, "session_for_run"):
+            session_receipt = controller.session_for_run(f"{run_id}:{case['id']}", *session_args)
+        else:
+            session_receipt = controller.create_xcsh_session(*session_args)
         session_id = session_receipt["session_id"]
         executable = session_receipt.get("xcsh_executable")
         executable_sha256 = session_receipt.get("xcsh_executable_sha256")
@@ -361,50 +434,103 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
         model = runtime.get("xcsh_model")
         if not isinstance(model, str) or not model or any(char in model for char in "\r\n\x00"):
             raise PreflightError("manifest must supply a configured nonsecret xcsh_model")
+        lifecycle_mode, interactive = native_case_lifecycle(case["id"])
         native_launch = {
             "version": 4, "xcsh_executable": executable,
             "session_dir": session_receipt.get("session_dir"), "session_path": session_receipt.get("session_path"),
             "session_header": session_receipt.get("session_header"), "model": model,
-            "discovery": "reduced-v1", "tools": "read_interactions", "interactive": True,
-            "lifecycle_mode": "managed_turn_v1",
+            "discovery": "reduced-v1", "tools": "read_interactions", "interactive": interactive,
+            "lifecycle_mode": lifecycle_mode,
         }
     except Exception as exc:
         raise PreflightError(f"controller could not create a measured xcsh session: {exc}") from exc
-    task = unix_request(broker_socket, "native_xcsh_admit", {
-        "target": "xcsh-native-uat", "cwd": runtime.get("cwd", "/isolated/xcsh-native-uat"),
-        "priority": "routine", "prompt": case["prompt"], "text": prompt,
-        "session_id": session_id, "workspace_id": runtime["workspace_id"], "native_launch": native_launch,
-        "xcsh_executable_sha256": executable_sha256,
-        "runtime_identity": ({f"{name}_artifact": artifact_id(manifest["artifacts"][name], name) for name in ("xcsh", "herdr", "manager")}
-                             | {"xcsh_model": model}),
-        "idempotency_key": f"installed-xcsh-uat:{run_id}:{case['id']}",
-    })
+    task = saved.get("initial_task")
+    if task is None:
+        task = unix_request(broker_socket, "native_xcsh_admit", {
+            "target": "xcsh-native-uat", "cwd": runtime.get("cwd", "/isolated/xcsh-native-uat"),
+            "priority": "routine", "prompt": case["prompt"], "text": prompt,
+            "session_id": session_id, "workspace_id": runtime["workspace_id"], "native_launch": native_launch,
+            "xcsh_executable_sha256": executable_sha256,
+            "runtime_identity": ({f"{name}_artifact": artifact_id(manifest["artifacts"][name], name) for name in ("xcsh", "herdr", "manager")}
+                                 | {"xcsh_model": model}),
+            "idempotency_key": f"installed-xcsh-uat:{run_id}:{case['id']}",
+        })
     if task.get("native_executable") != {"canonical_path": executable, "sha256": executable_sha256}:
         raise PreflightError("broker admission did not return the measured native executable binding")
-    if task.get("state") == "unknown":
+    if task.get("state") == "unknown" or task.get("admission_uncertain"):
         raise PreflightError("native_xcsh_admit returned uncertain launch; reuse the same run_id after reconciliation, never create another task")
+    if saved.get("initial_task") is None:
+        if task.get("run_generation", 0) != 0:
+            raise PreflightError("replayed run lacks its original generation-zero admission receipt")
+        saved["initial_task"] = task
+        persist()
     if controller is not None:
         try:
             controller.register_execution(task)
         except Exception as exc:
             raise PreflightError(f"controller could not bind exact broker execution admission: {exc}") from exc
-    records: list[dict[str, Any]] = []
-    cursor, continued, cancelled, controlled = 0, False, False, False
-    control_receipt: dict[str, Any] | None = None
-    causal_before: int | None = None
+    bindings = {int(g): b for g, b in saved.get("bindings", {0: admission_binding(task, session_id)}).items()}
+    records: list[dict[str, Any]] = saved.get("records", [])
+    cursor = saved.get("cursor", 0)
+    continued, cancelled, controlled = (saved.get(key, False) for key in ("continued", "cancelled", "controlled"))
+    control_receipt: dict[str, Any] | None = saved.get("control_receipt")
+    causal_before: int | None = saved.get("causal_before")
+    def checkpoint() -> None:
+        saved.update(bindings=bindings, records=records, cursor=cursor, continued=continued,
+                     cancelled=cancelled, controlled=controlled, control_receipt=control_receipt, causal_before=causal_before)
+        persist()
+    def continuation() -> dict[str, Any]:
+        nonlocal continued
+        saved["continuation_claimed"] = True
+        checkpoint()
+        receipt = unix_request(broker_socket, "continue_task", {"task_id": task["id"], "text": prompt})
+        generation = receipt.get("run_generation")
+        if (receipt.get("admission_uncertain") or not isinstance(generation, int)
+                or generation != max(bindings) + 1 or receipt.get("id") != task["id"]):
+            raise PreflightError("continuation lacks authoritative generation receipt; reconcile the same run")
+        bindings[generation] = admission_binding(receipt, session_id)
+        continued = True
+        saved["continuation_claimed"] = False
+        saved["continuation_receipt"] = receipt
+        checkpoint()
+        return receipt
+    if saved.get("continuation_claimed") and not continued:
+        if case["id"] != "continuation":
+            raise PreflightError("controlled action outcome requires authoritative controller reconciliation")
+        continuation()
+    if case["id"] == "generation_supersession" and continued and control_receipt is None:
+        control_receipt = controller.real_action("generation_supersession", task["pane_id"],
+            f"{run_id}:{case['id']}:continue", controller.token,
+            lambda: (_ for _ in ()).throw(AssertionError("recovery cannot create another continuation effect")))
+        assert_controller_identity(control_receipt, task)
+        if control_receipt.get("effect", {}).get("broker_task_id") != task["id"]:
+            raise PreflightError("recovered controller receipt is not bound to the admitted execution")
+    checkpoint()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         fresh, cursor = _journal_for_task(herdr_socket, task["id"], cursor)
         records.extend(fresh)
         if fresh:
             applied = unix_request(broker_socket, "consume_native_turns", {}).get("applied", [])
-            expected_state = fresh[-1].get("report", fresh[-1]).get("state")
-            if not any(item.get("task_id") == task["id"] and item.get("state") in {expected_state, "waiting_human", "unknown"} for item in applied):
-                raise PreflightError("native consumer did not apply the observed semantic transition")
-        states = [record.get("report", record).get("state") for record in records]
-        if states and states[-1] == "waiting_input" and case["id"] in {"continuation", "generation_supersession"} and not continued:
-            def continuation() -> dict[str, Any]:
-                return unix_request(broker_socket, "continue_task", {"task_id": task["id"], "text": "isolated UAT continuation label"})
+            current = [item for item in fresh if item.get("report", item).get("generation") == max(bindings)]
+            expected_state = current[-1].get("report", current[-1]).get("state") if current else None
+            if current and not any(item.get("task_id") == task["id"] and item.get("state") in {expected_state, "waiting_human", "unknown"} for item in applied):
+                # The background consumer may have committed this batch already.
+                # Prove its durable producer cursor instead of replaying effects.
+                status = unix_request(broker_socket, "status", {"task_id": task["id"]})
+                observed = next((item for item in status.get("tasks", []) if item.get("id") == task["id"]), {})
+                latest = current[-1].get("report", current[-1])
+                if (observed.get("run_generation") != latest.get("generation")
+                        or observed.get("native_turn_id") != latest.get("turn_id")
+                        or not isinstance(observed.get("native_event_revision"), int)
+                        or observed["native_event_revision"] < latest.get("event_revision", 0)):
+                    raise PreflightError("native consumer did not durably apply the observed semantic transition")
+        checkpoint()
+        states = [state for _, state in semantic_trace(records)]
+        current_reports = [item.get("report", item) for item in records
+                           if item.get("report", item).get("generation") == max(bindings)]
+        current_state = current_reports[-1].get("state") if current_reports else None
+        if current_state == "waiting_input" and case["id"] in {"continuation", "generation_supersession"} and not continued:
             if case["id"] == "generation_supersession":
                 control_receipt = controller.real_action("generation_supersession", task["pane_id"],
                     f"{run_id}:{case['id']}:continue", controller.token, continuation)
@@ -420,9 +546,11 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
             else:
                 continuation()
             continued = True
+            checkpoint()
         if states and states[-1] == "working" and case["id"] == "cancel" and not cancelled:
             unix_request(broker_socket, "request_stop", {"task_id": task["id"]})
             cancelled = True
+            checkpoint()
         if states and states[-1] == "working" and case["id"] == "reconnect_replay" and not controlled:
             causal_before = max([0] + [int(item.get("revision", 0)) for item in records])
             control_receipt = controller.real_action("reconnect_replay", task["pane_id"],
@@ -430,6 +558,7 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
             assert_controller_identity(control_receipt, task)
             require_causal_action(control_receipt, kind="reconnect_replay", task=task, records_before=records)
             controlled = True
+            checkpoint()
         if states and states[-1] == "working" and case["id"] == "restart_loss" and not controlled:
             causal_before = max([0] + [int(item.get("revision", 0)) for item in records])
             control_receipt = controller.real_action("restart_loss", task["pane_id"],
@@ -443,12 +572,16 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
             pong = herdr_request(herdr_socket, "ping", {})
             if int((pong or {}).get("protocol", 0)) < 24 or not ((pong or {}).get("capabilities") or {}).get("agent_turn_journal"):
                 raise PreflightError("restart controller receipt did not reconnect to protocol-26 interaction-capable native-launch journal runtime")
-        if states == case["expected_states"] and states[-1] == "waiting_input":
+        if trace_matches(case, records) and current_state == "waiting_input":
             observed = unix_request(broker_socket, "status", {"task_id": task["id"]})["tasks"][0]
-            validate_journal(case, records, observed, None, fixture=fixture)
-            return {"scenario_id": case["id"], "task_id": task["id"], "pass": True, "evidence_class": "installed_waiting_input"}
-        if states and states[-1] in {"completed", "failed", "cancelled", "lost", "interrupted"}:
-            break
+            validate_journal(case, records, observed, None, fixture=fixture, bindings=bindings)
+            receipt = {"scenario_id": case["id"], "task_id": task["id"], "pass": True, "evidence_class": "installed_waiting_input"}
+            saved["final_receipt"] = receipt
+            checkpoint()
+            return receipt
+        if current_state in {"completed", "failed", "cancelled", "lost", "interrupted"}:
+            if trace_matches(case, records) or current_state != case["expected_states"][-1]:
+                break
         # agent.turn.wait is an observation-only long poll; it must never be
         # confused with a report injection.
         herdr_request(herdr_socket, "agent.turn.wait", {"after_revision": cursor, "timeout_ms": 1000})
@@ -481,14 +614,17 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
         time.sleep(.2)
     if not consumed:
         raise PreflightError("manager consumption receipt was not observed; do not self-acknowledge it")
-    validate_journal(case, records, observed_task, consumed, fixture=fixture)
+    validate_journal(case, records, observed_task, consumed, fixture=fixture, bindings=bindings)
     if case["id"] == "cleanup":
         control_receipt = wait_for_manager_cleanup(broker_socket, herdr_socket, task, deadline)
     if case["id"] in controlled_cases and control_receipt is None:
         raise PreflightError("required isolated controller action produced no authoritative receipt")
-    return {"scenario_id": case["id"], "task_id": task["id"], "pass": True, "accepted": False,
+    receipt = {"scenario_id": case["id"], "task_id": task["id"], "pass": True, "accepted": False,
             "session_receipt": session_receipt, "controller_receipt": control_receipt,
             "evidence_class": "installed_runtime_pending_gate"}
+    saved["final_receipt"] = receipt
+    checkpoint()
+    return receipt
 
 
 def execute(manifest: dict[str, Any], catalog: dict[str, Any], *, run_id: str | None = None,
@@ -502,30 +638,50 @@ def execute(manifest: dict[str, Any], catalog: dict[str, Any], *, run_id: str | 
 
 
 def validate_journal(case: dict[str, Any], records: list[dict[str, Any]], task: dict[str, Any], consumed: dict[str, Any] | None,
-                     *, fixture: dict[str, str] | None = None) -> None:
+                     *, fixture: dict[str, str] | None = None,
+                     bindings: dict[int, dict[str, Any]] | None = None) -> None:
     """Oracle for real journal observations; no prose/sentinel inference."""
     if not records:
         raise AssertionError("no real semantic journal records")
-    expected_states = case["expected_states"]
     reports = [record.get("report", record) for record in records]
     if any(record.get("synthetic") is True for record in records):
         raise AssertionError("synthetic journal records are not installed-runtime evidence")
     revisions = [record.get("revision") for record in records]
     if revisions != sorted(set(revisions)):
         raise AssertionError("journal revisions are not strictly monotonic/deduplicated")
-    if [report.get("state") for report in reports] != expected_states:
-        raise AssertionError("semantic state trace differs from scenario oracle")
-    expected_generations = case.get("expected_generations")
-    if expected_generations is not None and [report.get("generation") for report in reports] != expected_generations:
-        raise AssertionError("semantic generation trace differs from scenario oracle")
+    if not trace_matches(case, records):
+        raise AssertionError("semantic state/generation trace differs from scenario oracle")
+    if bindings is None:
+        bindings = {int(task.get("run_generation", 0)): admission_binding(task, task.get("agent_session_id"))}
+    for generation in sorted(bindings):
+        if generation == min(bindings):
+            continue
+        previous_wait = [record["revision"] for record, report in zip(records, reports)
+                         if report.get("generation") == generation - 1 and report.get("state") == "waiting_input"]
+        successor_start = [record["revision"] for record, report in zip(records, reports)
+                           if report.get("generation") == generation and report.get("state") == "starting"]
+        if not previous_wait or not successor_start or min(successor_start) <= min(previous_wait):
+            raise AssertionError("successor started before its predecessor continuation boundary")
+    event_ids = [(report.get("generation"), report.get("turn_id"), report.get("event_revision")) for report in reports]
+    if len(event_ids) != len(set(event_ids)):
+        raise AssertionError("journal repeats a logical producer event")
     for report in reports:
         if report.get("producer") != "xcsh" or not report.get("turn_id") or not isinstance(report.get("event_revision"), int):
             raise AssertionError("journal producer/turn/event revision is invalid")
-        if report.get("execution_id") != task["id"] or report.get("pane_id") != task.get("pane_id"):
+        if report.get("state") in {"failed", "cancelled", "lost", "interrupted"} and not report.get("reason"):
+            raise AssertionError("non-completed terminal semantic reason is missing")
+        if report.get("state") == "completed":
+            result, digest = report.get("result"), report.get("result_digest")
+            if not isinstance(result, str) or hashlib.sha256(result.encode()).hexdigest() != digest:
+                raise AssertionError("completed result digest is invalid")
+        binding = bindings.get(report.get("generation"))
+        if binding is None:
+            raise AssertionError("journal generation lacks an authoritative admission binding")
+        if report.get("execution_id") != binding["execution_id"] or report.get("pane_id") != binding["pane_id"]:
             raise AssertionError("journal execution/pane provenance mismatch")
-        if report.get("session_id") != task.get("agent_session_id"):
+        if report.get("session_id") != binding["session_id"]:
             raise AssertionError("journal session provenance mismatch")
-    terminal = reports[-1]
+    terminal = next(report for report in reversed(reports) if report.get("generation") == max(bindings))
     if terminal["state"] == "completed":
         result, digest = terminal.get("result"), terminal.get("result_digest")
         if not isinstance(result, str) or hashlib.sha256(result.encode()).hexdigest() != digest:
