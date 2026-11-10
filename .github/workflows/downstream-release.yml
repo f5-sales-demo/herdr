@@ -169,11 +169,11 @@ jobs:
             os: ubuntu-latest
             artifact: herdr-linux-aarch64
           - target: x86_64-apple-darwin
-            os: macos-15-intel
+            os: macos-26-intel
             artifact: herdr-macos-x86_64
             macho_arch: x86_64
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-latest
             artifact: herdr-macos-aarch64
             macho_arch: arm64
     runs-on: ${{ matrix.os }}
@@ -790,7 +790,7 @@ jobs:
   verify-homebrew-install:
     needs: [prepare, publish-homebrew]
     if: needs.prepare.outputs.release == 'true'
-    runs-on: macos-14
+    runs-on: macos-latest
     permissions:
       contents: read
     steps:
