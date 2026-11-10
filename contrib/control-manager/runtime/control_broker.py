@@ -1395,7 +1395,7 @@ class StateDB:
             raise RuntimeError("native xcsh atomic admission disappeared")
         return row
 
-    def update(self, task_id: str, *, event: str | None = None, **values: Any) -> sqlite3.Row:
+    def update(self, task_id: str, *, event: str | None = None, _commit: bool = True, **values: Any) -> sqlite3.Row:
         if not values:
             row = self.task(task_id)
             if row is None:
@@ -1466,7 +1466,8 @@ class StateDB:
                 (event_id, values["updated_at"]),
             )
             self.conn.execute("UPDATE tasks SET terminal_event_id=? WHERE id=?", (event_id, task_id))
-        self.conn.commit()
+        if _commit:
+            self.conn.commit()
         row = self.task(task_id)
         if row is None:
             raise KeyError(task_id)
@@ -1836,7 +1837,7 @@ class StateDB:
         return admitted
 
     def settle_native_generation(self, task_id: str, generation: int, state: str,
-                                 turn_id: str, event_revision: int) -> sqlite3.Row:
+                                 turn_id: str, event_revision: int, *, _commit: bool = True) -> sqlite3.Row:
         row = self.native_generation(task_id, generation)
         if row is None:
             raise ValueError("native turn generation was not admitted")
@@ -1858,7 +1859,8 @@ class StateDB:
             (turn_id, event_revision, "settled" if terminal else "active", terminal, state,
              terminal, self.clock(), task_id, generation),
         )
-        self.conn.commit()
+        if _commit:
+            self.conn.commit()
         settled = self.native_generation(task_id, generation)
         if settled is None:
             raise RuntimeError("native generation settlement disappeared")
@@ -1904,6 +1906,18 @@ class StateDB:
         completed-result digest are checked before a broker task changes state.
         Process exit and pane idle are deliberately irrelevant here.
         """
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            result = self._apply_native_turn_in_transaction(record)
+            self.conn.commit()
+            return result
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def _apply_native_turn_in_transaction(self, record: dict[str, Any]) -> tuple[str, str] | None:
+        # Generation, projection/outbox and cursor must settle together. A
+        # failed projection must leave the same record available for replay.
         report = record.get("report") if isinstance(record.get("report"), dict) else record
         producer = str(report.get("producer", ""))
         revision = record.get("revision")
@@ -1940,17 +1954,15 @@ class StateDB:
             raise ValueError("unknown native semantic state")
         if generation > int(row["run_generation"]):
             raise ValueError("native turn generation has not become current")
-        self.settle_native_generation(task_id, generation, state, turn_id, event_revision)
+        self.settle_native_generation(task_id, generation, state, turn_id, event_revision, _commit=False)
         # Replayed records still advance the global cursor but cannot perturb
         # task state. Handoff progress and terminal evidence update only their
         # admitted historical generation, never the current task projection.
         if event_revision <= int(binding["last_event_revision"]):
             self.conn.execute("INSERT INTO native_turn_cursors(producer,last_revision,updated_at) VALUES(?,?,?) ON CONFLICT(producer) DO UPDATE SET last_revision=excluded.last_revision,updated_at=excluded.updated_at", (cursor_key, revision, self.clock()))
-            self.conn.commit()
             return None
         if generation != int(row["run_generation"]):
             self.conn.execute("INSERT INTO native_turn_cursors(producer,last_revision,updated_at) VALUES(?,?,?) ON CONFLICT(producer) DO UPDATE SET last_revision=excluded.last_revision,updated_at=excluded.updated_at", (cursor_key, revision, self.clock()))
-            self.conn.commit()
             return None
         if row["state"] in TERMINAL_STATES:
             raise ValueError("native turn attempted to change terminal task")
@@ -1962,9 +1974,8 @@ class StateDB:
         if state in {"completed", "failed", "cancelled", "interrupted", "lost"}:
             values["finished_at"] = self.clock()
             values["terminal_reported_at"] = self.clock()
-        self.update(task_id, event=f"xcsh_turn_{state}", **values)
+        self.update(task_id, event=f"xcsh_turn_{state}", _commit=False, **values)
         self.conn.execute("INSERT INTO native_turn_cursors(producer,last_revision,updated_at) VALUES(?,?,?) ON CONFLICT(producer) DO UPDATE SET last_revision=excluded.last_revision,updated_at=excluded.updated_at", (cursor_key, revision, self.clock()))
-        self.conn.commit()
         return task_id, mapped
 
     def running_count(self) -> int:
@@ -5665,6 +5676,13 @@ Requested task:
                     # A layout event can trigger reconciliation between the tab
                     # creation response and its appearance in a fresh snapshot.
                     continue
+                if row["work_kind"] == "xcsh":
+                    self.db.update(
+                        row["id"], herdr_state="closed" if row["state"] in TERMINAL_STATES else "missing",
+                        session_state="dormant", cleanup_deadline=None,
+                        event="native_pane_absent_on_reconcile",
+                    )
+                    continue
                 if row["state"] in TERMINAL_STATES:
                     self.db.update(
                         row["id"], herdr_state="closed",
@@ -6084,6 +6102,10 @@ Requested task:
             self.db.update(row["id"], **values)
             await self._apply_lifecycle(row["id"], status, binding_verified=True)
         elif event in {"pane.exited", "pane.closed"} and row["state"] not in TERMINAL_STATES:
+            if row["work_kind"] == "xcsh":
+                self.db.update(row["id"], herdr_state="exited", event="xcsh_pane_exit_observed")
+                self.scheduler_event.set()
+                return
             if row["work_kind"] == "command" and any(
                 item["event"] == "command_native_admitted" for item in self.db.transitions(row["id"])
             ):
@@ -6120,6 +6142,13 @@ Requested task:
             return
         if row["herdr_state"] != status:
             row = self.db.update(task_id, herdr_state=status)
+        if row["work_kind"] == "xcsh":
+            # The authenticated semantic journal owns native outcomes. Raw
+            # pane activity may update observations, never the task state.
+            if row["state"] in TERMINAL_STATES and status in {"idle", "done"}:
+                await self._verified_terminal(task_id)
+            self.scheduler_event.set()
+            return
         if row["work_kind"] == "command":
             # Only the wrapper's structural exit plus shell verification can
             # settle a command. An embedded interactive TUI becoming idle is

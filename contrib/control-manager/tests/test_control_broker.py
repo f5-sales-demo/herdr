@@ -1449,9 +1449,86 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
                 events = [item for item in self.broker.db.pending_completions() if item["task_id"] == task["id"]]
                 self.assertEqual(len(events), 1)
                 self.assertEqual(events[0]["payload"]["state"], "unknown")
+                event_id = row["terminal_event_id"]
+                await self.broker._apply_lifecycle(task["id"], "working", binding_verified=True)
+                await self.broker._handle_event("pane.exited", {"pane_id": row["pane_id"]})
+                row = self.broker.db.task(task["id"])
+                self.assertEqual(row["state"], "unknown")
+                self.assertEqual(row["terminal_event_id"], event_id)
+                self.assertIsNone(row["cleanup_deadline"])
                 await self.broker.consume_native_turns()
                 self.assertEqual([item for item in self.broker.db.pending_completions() if item["task_id"] == task["id"]], events)
                 self.assertNotIn(task["id"], self.broker.cleanup_timers)
+
+    async def test_missing_native_pane_preserves_journal_owned_projection(self):
+        workspace = await self.configure_control_workspace()
+        task = await self.admit_native_xcsh({
+            "target": "missing-native", "cwd": str(self.root), "priority": "routine", "prompt": "safe", "text": "safe",
+            "workspace_id": workspace["workspace"]["workspace_id"],
+            "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"},
+            "idempotency_key": "missing-native",
+        })
+        db = self.broker.db
+        binding = db.current_native_generation(task["id"])
+        base = {"execution_id": task["id"], "pane_id": binding["pane_id"], "producer": "xcsh",
+                "session_id": binding["session_id"], "turn_id": "missing-turn", "generation": 0}
+        for revision, state in enumerate(("starting", "working"), 1):
+            db.apply_native_turn({"revision": revision, "report": base | {"event_revision": revision, "state": state}})
+        fields = ("state", "summary", "question", "terminal_reported_at", "terminal_event_id")
+        before = {field: db.task(task["id"])[field] for field in fields}
+        self.broker.herdr.panes.pop(binding["pane_id"])
+        await self.broker.reconcile()
+        self.assertEqual({field: db.task(task["id"])[field] for field in fields}, before)
+        self.assertEqual(db.task(task["id"])["herdr_state"], "missing")
+        self.assertEqual(db.pending_completions(), [])
+        db.apply_native_turn({"revision": 3, "report": base | {"event_revision": 3, "state": "interrupted", "reason": "native causal interruption"}})
+        await self.broker.reconcile()
+        self.assertEqual(db.task(task["id"])["state"], "unknown")
+        self.assertEqual(db.task(task["id"])["summary"], "native causal interruption")
+        self.assertEqual(len(db.pending_completions()), 1)
+
+    async def test_native_settlement_rolls_back_and_replays_after_projection_failure(self):
+        workspace = await self.configure_control_workspace()
+        task = await self.admit_native_xcsh({
+            "target": "atomic-settlement", "cwd": str(self.root), "priority": "routine", "prompt": "safe", "text": "safe",
+            "workspace_id": workspace["workspace"]["workspace_id"],
+            "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"},
+            "idempotency_key": "atomic-settlement",
+        })
+        db = self.broker.db
+        binding = db.current_native_generation(task["id"])
+        base = {"execution_id": task["id"], "pane_id": binding["pane_id"], "producer": "xcsh",
+                "session_id": binding["session_id"], "turn_id": "atomic-turn", "generation": 0}
+        for revision, state in enumerate(("starting", "working"), 1):
+            db.apply_native_turn({"revision": revision, "report": base | {"event_revision": revision, "state": state}})
+        terminal = {"revision": 3, "report": base | {"event_revision": 3, "state": "interrupted"}}
+        with patch.object(db, "update", side_effect=RuntimeError("injected projection failure")):
+            with self.assertRaisesRegex(RuntimeError, "injected projection"):
+                db.apply_native_turn(terminal)
+        reopened = StateDB(db.path)
+        try:
+            self.assertEqual(reopened.current_native_generation(task["id"])["last_event_revision"], 2)
+            self.assertIsNone(reopened.current_native_generation(task["id"])["terminal_state"])
+            self.assertEqual(reopened.native_turn_cursor("__herdr_global__"), 2)
+            self.assertEqual(reopened.task(task["id"])["state"], "working")
+            self.assertIsNone(reopened.task(task["id"])["terminal_event_id"])
+            update = reopened.update
+            def fail_after_outbox(*args, **kwargs):
+                update(*args, **kwargs)
+                raise RuntimeError("injected after outbox write")
+            with patch.object(reopened, "update", side_effect=fail_after_outbox):
+                with self.assertRaisesRegex(RuntimeError, "after outbox"):
+                    reopened.apply_native_turn(terminal)
+            self.assertEqual(reopened.current_native_generation(task["id"])["last_event_revision"], 2)
+            self.assertIsNone(reopened.task(task["id"])["terminal_event_id"])
+            self.assertEqual(reopened.pending_completions(), [])
+            self.assertEqual(reopened.native_turn_cursor("__herdr_global__"), 2)
+            self.assertEqual(reopened.apply_native_turn(terminal), (task["id"], "unknown"))
+            self.assertIsNone(reopened.apply_native_turn(terminal))
+            self.assertEqual(len(reopened.pending_completions()), 1)
+            self.assertEqual(reopened.native_turn_cursor("__herdr_global__"), 3)
+        finally:
+            reopened.close()
 
     async def test_xcsh_handoff_keeps_predecessor_progress_without_overwriting_current_generation(self):
         """Synthetic ledger characterization; genuine runtime UAT remains separate."""
