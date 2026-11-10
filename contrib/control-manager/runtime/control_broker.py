@@ -1780,7 +1780,7 @@ class StateDB:
             "--resume", launch.get("session_path"),
             "--model", launch.get("model"),
             "--tools", "read,request_user_input,request_user_input_async",
-            "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty",
+            "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty", "--no-title",
         ])
         if not launch.get("interactive"):
             expected_argv.append("--print")
@@ -1835,6 +1835,8 @@ class StateDB:
             raise ValueError("native turn id conflicts with admitted generation")
         if event_revision <= int(row["last_event_revision"]):
             return row
+        if row["terminal_state"] is not None:
+            raise ValueError("native generation is already terminal")
         if event_revision != int(row["last_event_revision"]) + 1:
             raise ValueError("native turn event revision gap")
         terminal = state in {"completed", "failed", "cancelled", "interrupted", "lost"}
@@ -1927,11 +1929,12 @@ class StateDB:
         mapped = {"starting": "starting", "working": "working", "waiting_input": "waiting_human", "completed": "completed", "failed": "failed", "cancelled": "cancelled", "interrupted": "unknown", "lost": "unknown"}.get(state)
         if mapped is None:
             raise ValueError("unknown native semantic state")
-        if generation != int(row["run_generation"]) and state not in {"completed", "failed", "cancelled", "interrupted", "lost"}:
-            raise ValueError("stale native generation may only settle terminal evidence")
+        if generation > int(row["run_generation"]):
+            raise ValueError("native turn generation has not become current")
         self.settle_native_generation(task_id, generation, state, turn_id, event_revision)
         # Replayed records still advance the global cursor but cannot perturb
-        # task state. A late terminal settles only its historical generation.
+        # task state. Handoff progress and terminal evidence update only their
+        # admitted historical generation, never the current task projection.
         if event_revision <= int(binding["last_event_revision"]):
             self.conn.execute("INSERT INTO native_turn_cursors(producer,last_revision,updated_at) VALUES(?,?,?) ON CONFLICT(producer) DO UPDATE SET last_revision=excluded.last_revision,updated_at=excluded.updated_at", (cursor_key, revision, self.clock()))
             self.conn.commit()

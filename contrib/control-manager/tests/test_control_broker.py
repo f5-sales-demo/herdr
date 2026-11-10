@@ -46,7 +46,7 @@ class FakeHerdr:
             execution = {"execution_id": backend, "backend_execution_id": backend,
                          "semantic_execution_id": semantic, "generation": generation,
                          "native_producer": "xcsh", "producer_session_id": launch["session_header"]["id"], "workspace_id": wid,
-                         "cwd": params["cwd"], "command": {"mode": "argv", "argv": [launch["xcsh_executable"]] + ([] if launch["interactive"] else ["--mode", "json"]) + ["--session-dir", launch["session_dir"], "--resume", launch["session_path"], "--model", launch["model"], "--tools", "read,request_user_input,request_user_input_async", "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty"] + ([] if launch["interactive"] else ["--print"]) + ([] if launch["lifecycle_mode"] == "managed_turn_v1" else ["--native-lifecycle-control", launch["lifecycle_mode"]]) + [params["text"]]},
+                         "cwd": params["cwd"], "command": {"mode": "argv", "argv": [launch["xcsh_executable"]] + ([] if launch["interactive"] else ["--mode", "json"]) + ["--session-dir", launch["session_dir"], "--resume", launch["session_path"], "--model", launch["model"], "--tools", "read,request_user_input,request_user_input_async", "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty", "--no-title"] + ([] if launch["interactive"] else ["--print"]) + ([] if launch["lifecycle_mode"] == "managed_turn_v1" else ["--native-lifecycle-control", launch["lifecycle_mode"]]) + [params["text"]]},
                          "native_executable": {"canonical_path": launch["xcsh_executable"],
                                                "sha256": hashlib.sha256(Path(launch["xcsh_executable"]).read_bytes()).hexdigest()},
                          "native_launch": launch,
@@ -656,7 +656,7 @@ class StateTests(unittest.TestCase):
             request = {"execution_id": task["id"], "generation": 0, "native_launch": launch, "workspace_id": "w1", "cwd": raw, "text": "x", "xcsh_executable_sha256": executable_sha256}
             encoded = json.dumps(request, sort_keys=True, separators=(",", ":"))
             db.claim_native_generation(task["id"], generation=0, session_id=launch["session_header"]["id"], workspace_id="w1", request_sha256=hashlib.sha256(encoded.encode()).hexdigest(), request_json=encoded)
-            argv = [executable,"--mode","json","--session-dir",str(session_dir),"--resume",str(session_path),"--model","test/model","--tools","read,request_user_input,request_user_input_async","--no-mcp","--no-lsp","--no-memories","--no-skills","--no-rules","--no-pty","--print","x"]
+            argv = [executable,"--mode","json","--session-dir",str(session_dir),"--resume",str(session_path),"--model","test/model","--tools","read,request_user_input,request_user_input_async","--no-mcp","--no-lsp","--no-memories","--no-skills","--no-rules","--no-pty", "--no-title","--print","x"]
             receipt = {"execution_id": "backend-1", "backend_execution_id": "backend-1", "semantic_execution_id": task["id"], "generation": 0, "native_producer": "xcsh", "producer_session_id": launch["session_header"]["id"], "workspace_id": "w1", "cwd": raw, "native_launch": launch, "command": {"mode": "argv", "argv": argv}, "native_executable": {"canonical_path": executable, "sha256": executable_sha256}, "injected_env": {"HERDR_EXECUTION_ID": task["id"], "HERDR_EXECUTION_GENERATION": "0"}, "tab_id": "tab-1", "pane_id": "pane-1"}
             # Released protocol 22 omitted workspace_id even though the
             # manager had already claimed it. Keep that precise receipt shape
@@ -1221,7 +1221,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         execution = self.broker.herdr.executions[task["backend_execution_id"]]
         self.assertEqual(execution["command"]["argv"], [self.xcsh_executable, "--mode", "json", "--session-dir",
             self.native_launch["session_dir"], "--resume", self.native_launch["session_path"], "--model", "test/model",
-            "--tools", "read,request_user_input,request_user_input_async", "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty", "--print", "semantic text"])
+            "--tools", "read,request_user_input,request_user_input_async", "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty", "--no-title", "--print", "semantic text"])
         interactive_launch = self.native_launch | {"interactive": True}
         interactive = await self.broker.native_xcsh_admit({
             "target": "xcsh-v4-interactive", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
@@ -1234,7 +1234,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         interactive_argv = self.broker.herdr.executions[interactive["backend_execution_id"]]["command"]["argv"]
         self.assertEqual(interactive_argv, [self.xcsh_executable, "--session-dir", self.native_launch["session_dir"],
             "--resume", self.native_launch["session_path"], "--model", "test/model", "--tools", "read,request_user_input,request_user_input_async",
-            "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty",
+            "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty", "--no-title",
             "interactive semantic text"])
         self.assertNotIn("--mode", interactive_argv)
         self.assertNotIn("--print", interactive_argv)
@@ -1419,6 +1419,34 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         ).fetchall()
         self.assertEqual(len(bindings), 1)
         self.assertEqual(bindings[0]["generation"], 0)
+
+    async def test_xcsh_handoff_keeps_predecessor_progress_without_overwriting_current_generation(self):
+        """Synthetic ledger characterization; genuine runtime UAT remains separate."""
+        workspace = await self.configure_control_workspace()
+        task = await self.admit_native_xcsh({
+            "target": "xcsh-interleaving", "cwd": str(self.root), "priority": "routine", "prompt": "safe", "text": "safe",
+            "session_id": "session-interleaving", "workspace_id": workspace["workspace"]["workspace_id"],
+            "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"}, "idempotency_key": "interleaving",
+        })
+        old = self.broker.db.current_native_generation(task["id"])
+        base = {"execution_id": task["id"], "pane_id": old["pane_id"], "producer": "xcsh", "session_id": old["session_id"], "turn_id": "old-turn", "generation": 0}
+        self.broker.db.apply_native_turn({"revision": 1, "report": base | {"event_revision": 1, "state": "starting"}})
+        self.broker.db.apply_native_turn({"revision": 2, "report": base | {"event_revision": 2, "state": "waiting_input"}})
+        await self.broker.continue_task({"task_id": task["id"], "text": "next"})
+        current = self.broker.db.current_native_generation(task["id"])
+        current_pane = self.broker.db.task(task["id"])["pane_id"]
+        self.assertIsNone(self.broker.db.apply_native_turn({"revision": 3, "report": base | {"event_revision": 3, "state": "working"}}))
+        self.assertEqual(self.broker.db.native_generation(task["id"], 0)["last_event_revision"], 3)
+        self.assertEqual(self.broker.db.task(task["id"])["pane_id"], current_pane)
+        self.assertEqual(self.broker.db.current_native_generation(task["id"])["last_event_revision"], 0)
+        new = base | {"pane_id": current["pane_id"], "session_id": current["session_id"], "generation": 1, "turn_id": "new-turn"}
+        self.broker.db.apply_native_turn({"revision": 4, "report": new | {"event_revision": 1, "state": "starting"}})
+        self.assertIsNone(self.broker.db.apply_native_turn({"revision": 5, "report": base | {"event_revision": 4, "state": "cancelled"}}))
+        self.assertEqual(self.broker.db.native_generation(task["id"], 0)["terminal_state"], "cancelled")
+        self.assertEqual(self.broker.db.task(task["id"])["state"], "starting")
+        with self.assertRaisesRegex(ValueError, "terminal"):
+            self.broker.db.apply_native_turn({"revision": 6, "report": base | {"event_revision": 5, "state": "working"}})
+        self.assertEqual(self.broker.db.native_turn_cursor("__herdr_global__"), 5)
 
     async def test_xcsh_generation_history_rejects_foreign_panes_and_settles_old_child(self):
         """Synthetic component fixture for ledger rules; not UAT evidence."""
@@ -2467,7 +2495,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         request = {"execution_id": task["id"], "generation": 0, "native_launch": self.native_launch, "workspace_id": "w1", "cwd": str(self.root), "text": "native", "xcsh_executable_sha256": executable_sha256}
         encoded = json.dumps(request, sort_keys=True, separators=(",", ":"))
         self.broker.db.claim_native_generation(task["id"], generation=0, session_id=self.native_launch["session_header"]["id"], workspace_id="w1", request_sha256=hashlib.sha256(encoded.encode()).hexdigest(), request_json=encoded)
-        argv = [executable,"--mode","json","--session-dir",self.native_launch["session_dir"],"--resume",self.native_launch["session_path"],"--model",self.native_launch["model"],"--tools","read,request_user_input,request_user_input_async","--no-mcp","--no-lsp","--no-memories","--no-skills","--no-rules","--no-pty","--print","native"]
+        argv = [executable,"--mode","json","--session-dir",self.native_launch["session_dir"],"--resume",self.native_launch["session_path"],"--model",self.native_launch["model"],"--tools","read,request_user_input,request_user_input_async","--no-mcp","--no-lsp","--no-memories","--no-skills","--no-rules","--no-pty", "--no-title","--print","native"]
         self.broker.db.admit_native_generation(task["id"], 0, {"execution_id": "backend-journal", "backend_execution_id": "backend-journal", "semantic_execution_id": task["id"], "generation": 0, "native_producer": "xcsh", "producer_session_id": self.native_launch["session_header"]["id"], "workspace_id": "w1", "cwd": str(self.root), "native_launch": self.native_launch, "command": {"mode": "argv", "argv": argv}, "native_executable": {"canonical_path": executable, "sha256": executable_sha256}, "injected_env": {"HERDR_EXECUTION_ID": task["id"], "HERDR_EXECUTION_GENERATION": "0"}, "tab_id": "w1:t1", "pane_id": "w1:p1"})
         self.broker.db.create_feature({"feature_id": "journal-feature", "target": "journal-feature", "cwd": str(self.root),
                                        "title": "Journal", "scope": "end_to_end", "required_stages": ["implementation", "tests"],

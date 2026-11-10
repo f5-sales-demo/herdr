@@ -1651,6 +1651,9 @@ fn native_xcsh_argv(
         "--no-skills".into(),
         "--no-rules".into(),
         "--no-pty".into(),
+        // The full first JSONL header is the native resume provenance anchor.
+        // Automatic titles would rewrite it after an otherwise valid turn.
+        "--no-title".into(),
     ]);
     if !launch.interactive {
         argv.push("--print".into());

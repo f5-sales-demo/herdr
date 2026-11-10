@@ -41,6 +41,16 @@ class FakeRefreshServer:
 
 
 class ManagerRealtimeConfigTests(unittest.TestCase):
+    def test_optional_disabled_mcp_entries_require_an_existing_native_transport(self):
+        class NativeConfig:
+            def request(self, method, params):
+                self_method = method
+                assert self_method == "config/read"
+                return {"config": {"mcp_servers": {"computer-use-xvfb": {"command": "/existing/provider"}}}}
+        config = manager_config(NativeConfig())
+        self.assertEqual(config["mcp_servers"]["computer-use-xvfb"], {"enabled": False, "command": "/existing/provider"})
+        self.assertNotIn("playwright-headless", config["mcp_servers"])
+
     def test_appserver_manager_enables_realtime(self):
         config = manager_config()
 

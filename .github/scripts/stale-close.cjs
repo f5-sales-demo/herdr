@@ -196,7 +196,7 @@ async function main() {
     const index = args.indexOf(name);
     return index === -1 ? fallback : args[index + 1];
   };
-  const [owner, repo] = option('--repo', 'f5-sales-demo/herdr').split('/');
+  const [owner, repo] = option('--repo', 'herdrdev/herdr').split('/');
   const out = option('--out', null);
   const minAgeDays = Number(option('--min-age-days', '30'));
   const token = process.env.GITHUB_TOKEN ||
