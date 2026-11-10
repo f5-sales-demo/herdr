@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import socket
 import os
 import secrets
@@ -35,6 +36,12 @@ class PreflightError(RuntimeError):
     pass
 
 
+class HerdrRequestError(RuntimeError):
+    def __init__(self, error: dict[str, Any]):
+        super().__init__(error.get("message", "Herdr request failed"))
+        self.code = error.get("code")
+
+
 def prepare_fixture(directory: Path) -> dict[str, str]:
     """Create one owned, random, mode-0600 local oracle fixture.
 
@@ -43,7 +50,9 @@ def prepare_fixture(directory: Path) -> dict[str, str]:
     """
     directory = directory.resolve()
     directory.mkdir(parents=True, exist_ok=True)
-    value = f"xcsh-uat-{secrets.token_urlsafe(24)}"
+    # A public oracle must not resemble an access token: the configured model
+    # should exercise the read/result path rather than credential disclosure.
+    value = f"Public synthetic UAT data. Fixture number {secrets.randbelow(10**18):018d}."
     path = directory / f"fixture-{secrets.token_hex(12)}.txt"
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as output:
@@ -74,7 +83,9 @@ def validate_fixture(runtime: dict[str, Any], *, verify_file: bool) -> dict[str,
 
 def unix_request(path: Path, method: str, params: dict[str, Any]) -> Any:
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(15)
+    # Native admission includes a 30-second Herdr resume request plus contract
+    # verification. Keep the client alive for the broker's definitive receipt.
+    client.settimeout(65)
     try:
         client.connect(str(path))
         client.sendall(json.dumps({"method": method, "params": params}, separators=(",", ":")).encode() + b"\n")
@@ -107,7 +118,7 @@ def herdr_request(path: Path, method: str, params: dict[str, Any]) -> Any:
             if reply.get("id") != request_id:
                 continue
             if "error" in reply:
-                raise RuntimeError((reply["error"] or {}).get("message", "Herdr request failed"))
+                raise HerdrRequestError(reply["error"] or {})
             return reply.get("result")
     finally:
         client.close()
@@ -294,9 +305,26 @@ def require_causal_action(receipt: dict[str, Any], *, kind: str, task: dict[str,
     if kind == "reconnect_replay":
         if effect.get("action") != "producer_report_reply_loss" or effect.get("redelivered") is not True:
             raise PreflightError("reconnect replay requires a producer report reply-loss/redelivery receipt")
+        if receipt.get("producer_receipt_version") != 1:
+            raise PreflightError("reconnect replay requires the versioned released producer receipt")
+        acknowledgements = effect.get("acknowledgements")
+        if (not isinstance(acknowledgements, list) or len(acknowledgements) != 2
+                or acknowledgements[0].get("admitted") is not True or acknowledgements[1].get("admitted") is not False
+                or not isinstance(acknowledgements[0].get("revision"), int)
+                or acknowledgements[0]["revision"] <= before
+                or acknowledgements[0]["revision"] != acknowledgements[1].get("revision")
+                or effect.get("payload_sha256") != effect.get("replay_payload_sha256")
+                or not re.fullmatch(r"[0-9a-f]{64}", str(effect.get("payload_sha256")))
+                or effect.get("response_discarded") is not True):
+            raise PreflightError("reconnect replay lacks matching accepted/deduplicated producer transport acknowledgements")
     elif kind == "restart_loss":
         if effect.get("action") != "producer_process_cutpoint" or effect.get("process_exited") is not True:
             raise PreflightError("restart requires an observed producer process/session cutpoint receipt")
+        acknowledgement = effect.get("interrupted_acknowledgement", {})
+        if (receipt.get("producer_receipt_version") != 1 or effect.get("producer_exit_verified") is not True
+                or effect.get("shutdown_path") != "session_shutdown" or acknowledgement.get("state") != "interrupted"
+                or not isinstance(acknowledgement.get("revision"), int) or acknowledgement["revision"] <= before):
+            raise PreflightError("restart lacks a genuine shutdown journal acknowledgement and released-adapter exit verification")
 
 
 def wait_for_manager_cleanup(broker_socket: Path, herdr_socket: Path, task: dict[str, Any], deadline: float) -> dict[str, Any]:
@@ -305,14 +333,20 @@ def wait_for_manager_cleanup(broker_socket: Path, herdr_socket: Path, task: dict
     while time.monotonic() < deadline:
         status = unix_request(broker_socket, "status", {"task_id": task["id"]})
         current = (status.get("tasks") or [None])[0]
-        if isinstance(current, dict) and current.get("cleanup_deadline") is not None:
-            scheduled = True
-        if scheduled:
+        transitions = current.get("transitions", []) if isinstance(current, dict) else []
+        schedules = [(index, item) for index, item in enumerate(transitions) if item.get("event") == "cleanup_scheduled"]
+        cleanups = [(index, item) for index, item in enumerate(transitions) if item.get("event") == "owned_tab_cleaned"]
+        scheduled = scheduled or bool(schedules)
+        # Cleanup may finish before manager consumption. Its durable ordered
+        # transitions survive clearing the short-lived cleanup_deadline field.
+        if schedules and cleanups and schedules[-1][0] < cleanups[-1][0]:
             try:
                 herdr_request(herdr_socket, "tab.get", {"tab_id": task["tab_id"]})
-            except Exception:
-                return {"task_id": task["id"], "cleanup_deadline_observed": True,
-                        "owned_tab_absent": True}
+            except HerdrRequestError as exc:
+                if exc.code != "tab_not_found":
+                    raise
+                return {"task_id": task["id"], "cleanup_schedule": schedules[-1][1],
+                        "owned_tab_cleaned": cleanups[-1][1], "owned_tab_absent": True}
         time.sleep(.2)
     if not scheduled:
         raise PreflightError("terminal consumer did not produce a manager-owned cleanup schedule receipt")
@@ -435,6 +469,9 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
         if not isinstance(model, str) or not model or any(char in model for char in "\r\n\x00"):
             raise PreflightError("manifest must supply a configured nonsecret xcsh_model")
         lifecycle_mode, interactive = native_case_lifecycle(case["id"])
+        if case["id"] in {"reconnect_replay", "restart_loss"} and hasattr(controller, "approve_producer_session"):
+            controller.approve_producer_session(session_receipt,
+                ["reconnect_replay", "release"] if case["id"] == "reconnect_replay" else ["restart_loss"])
         native_launch = {
             "version": 4, "xcsh_executable": executable,
             "session_dir": session_receipt.get("session_dir"), "session_path": session_receipt.get("session_path"),
@@ -483,7 +520,10 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
         nonlocal continued
         saved["continuation_claimed"] = True
         checkpoint()
-        receipt = unix_request(broker_socket, "continue_task", {"task_id": task["id"], "text": prompt})
+        # The typed awaiting-user fixture has already run. The successor gets
+        # the actual continuation task, not an instruction to enter it again.
+        continuation_text = f"[isolated UAT] Read {fixture['path']} and return only its exact contents without the trailing newline."
+        receipt = unix_request(broker_socket, "continue_task", {"task_id": task["id"], "text": continuation_text})
         generation = receipt.get("run_generation")
         if (receipt.get("admission_uncertain") or not isinstance(generation, int)
                 or generation != max(bindings) + 1 or receipt.get("id") != task["id"]):
@@ -591,11 +631,16 @@ def execute_case(manifest: dict[str, Any], case: dict[str, Any], *, run_id: str,
         if causal_before is None:
             raise PreflightError(f"{case['id']} never reached its causal action boundary")
         causal_records = [item for item in records if int(item.get("revision", 0)) > causal_before]
-        if len(causal_records) != 1:
-            raise PreflightError(f"{case['id']} requires exactly one post-action server journal revision")
         expected_terminal = "completed" if case["id"] == "reconnect_replay" else "interrupted"
-        if causal_records[0].get("report", causal_records[0]).get("state") != expected_terminal:
+        terminal_records = [item for item in causal_records if item.get("report", item).get("state") in {"completed", "failed", "cancelled", "interrupted"}]
+        if len(terminal_records) != 1 or terminal_records[0].get("report", terminal_records[0]).get("state") != expected_terminal:
             raise PreflightError(f"{case['id']} post-action journal evidence is not {expected_terminal}")
+        effect = control_receipt["effect"]
+        causal_revision = (effect["acknowledgements"][0]["revision"] if case["id"] == "reconnect_replay"
+                           else effect["interrupted_acknowledgement"]["revision"])
+        causal = [item for item in causal_records if item.get("revision") == causal_revision]
+        if len(causal) != 1 or causal[0].get("report", causal[0]).get("state") != ("working" if case["id"] == "reconnect_replay" else "interrupted"):
+            raise PreflightError("producer causal acknowledgement does not identify the observed journal event")
     # Apply the real journal through the consumer, then wait for the manager's
     # own consumed receipt. The driver never acknowledges consumption itself.
     # No terminal state is inferred here: every journal record was applied

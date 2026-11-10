@@ -1,5 +1,41 @@
 # xcsh producer requirements for native lifecycle UAT
 
+## Current acceptance interface
+
+The coordinated xcsh adapter advertises interface version 1 through
+`xcsh lifecycle --json`. The disposable controller invokes the measured
+executable with `xcsh lifecycle acceptance-action --request <file> --json`.
+This interface currently requires Linux and an interactive producer.
+
+Only a disposable Herdr server receives `XCSH_HERDR_ACCEPTANCE_PLAN`. Its
+owner-private plan approves exact sessions, executable paths and SHA-256
+digests, and the permitted `release`, `reconnect_replay`, and `restart_loss`
+actions. Production launches do not receive this plan. Registration and a real
+working acknowledgement precede descriptor publication; the producer pauses
+at the awaited pre-agent-start boundary.
+
+Requests bind an action key, execution, session, generation, pane, PID,
+executable identity, and observed journal revision. Durable claims precede
+effects. Completed requests replay their receipt; uncertain claims stay
+fail-closed. The control descriptor uses a separate authentication token and
+never persists Herdr's native capability.
+
+Reply-loss acceptance discards a real accepted response at the producer
+transport boundary and resends the identical pending semantic event. The
+receipt records matching payload digests and admitted/deduplicated server
+acknowledgements. Restart-loss acceptance invokes genuine interruption and
+session shutdown; the adapter observes process exit before the controller
+restarts only its owned server.
+
+The nine-scenario catalog uses the configured real provider and an exact
+public synthetic local fixture. The driver requires durable consumption by
+the isolated manager through its configured tools. Cleanup requires ordered
+broker scheduling and closure transitions plus authoritative tab absence.
+The driver never acknowledges delivery or closes the successful cleanup tab.
+Source candidates and published immutable artifacts require separate runs;
+the historical dependency notes below are not current release acceptance.
+The current server contract remains protocol 28 and endpoint generation 1.
+
 The packaged installed-UAT driver is intentionally blocked until a released
 xcsh artifact provides these real execution boundaries. Declarations in a UAT
 manifest are configuration, not evidence; the producer worker must implement

@@ -108,7 +108,7 @@
     },
     {
       "id": "reconnect_replay",
-      "prompt": "[isolated UAT] Read {fixture_path} and return only its value while the producer transport is forcibly replayed.",
+      "prompt": "[isolated UAT] Read {fixture_path} and return only its exact contents without the trailing newline.",
       "expected_states": [
         "starting",
         "working",
@@ -162,7 +162,7 @@
     },
     {
       "id": "cleanup",
-      "prompt": "[isolated UAT] Read {fixture_path}, return only its value, then permit owned-tab cleanup after terminal journal evidence.",
+      "prompt": "[isolated UAT] Read {fixture_path} and return only its exact contents without the trailing newline.",
       "expected_states": [
         "starting",
         "working",

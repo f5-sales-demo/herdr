@@ -83,6 +83,62 @@ class DisposableHerdrController(IsolatedController):
         if not binary.is_file(): raise ControllerError("published Herdr executable is absent")
         super().__init__(db, ownership, token, clock=clock)
         self.binary=binary; self.binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest()
+        self.conn.execute("CREATE TABLE IF NOT EXISTS uat_native_bindings(execution_id TEXT PRIMARY KEY, binding TEXT NOT NULL)")
+
+    @staticmethod
+    def create_acceptance_plan(directory: Path) -> Path:
+        directory = directory.absolute()
+        directory.mkdir(mode=0o700, parents=True, exist_ok=False)
+        plan = directory / "plan.json"
+        fd = os.open(plan, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            json.dump({"version": 1, "control_directory": str(directory), "approvals": []}, stream)
+            stream.flush(); os.fsync(stream.fileno())
+        return plan
+
+    @staticmethod
+    def read_acceptance_plan(plan: Path) -> dict[str, Any]:
+        info = plan.lstat()
+        if plan.is_symlink() or not plan.is_file() or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ControllerError("producer acceptance plan must be owner-private and regular")
+        value = json.loads(plan.read_text())
+        if value.get("version") != 1 or not isinstance(value.get("approvals"), list):
+            raise ControllerError("producer acceptance plan version is invalid")
+        directory = Path(value.get("control_directory", ""))
+        info = directory.lstat()
+        if not directory.is_absolute() or directory.is_symlink() or not directory.is_dir() or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ControllerError("producer control directory must be owner-private")
+        return value
+
+    def approve_producer_session(self, session: dict[str, Any], actions: list[str]) -> None:
+        import fcntl
+        plan_file = self.ownership.get("acceptance_plan")
+        if not plan_file: raise ControllerError("producer-owned causal actions require an opt-in private plan")
+        plan = Path(plan_file)
+        executable = Path(session["xcsh_executable"]).resolve()
+        measured = hashlib.sha256(executable.read_bytes()).hexdigest()
+        if measured != session["xcsh_executable_sha256"] or not CANONICAL_XCSH_SESSION_ID.fullmatch(session["session_id"]):
+            raise ControllerError("producer approval measurement/session binding changed")
+        if not actions or set(actions) - {"release", "reconnect_replay", "restart_loss"}:
+            raise ControllerError("producer acceptance actions are not permitted")
+        approval = {"session_id": session["session_id"], "executable": str(executable), "executable_sha256": measured, "actions": actions}
+        fd = os.open(plan.with_suffix(".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            value = self.read_acceptance_plan(plan)
+            existing = next((item for item in value["approvals"] if item["session_id"] == approval["session_id"]), None)
+            if existing is not None and existing != approval: raise ControllerError("producer approval conflicts with its immutable session")
+            if existing is None:
+                value["approvals"].append(approval)
+                temporary = plan.with_name(f"plan-{uuid.uuid4().hex}.tmp")
+                out = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(out, "w") as stream:
+                    json.dump(value, stream); stream.flush(); os.fsync(stream.fileno())
+                os.replace(temporary, plan)
+                directory_fd = os.open(plan.parent, os.O_RDONLY)
+                try: os.fsync(directory_fd)
+                finally: os.close(directory_fd)
+        finally: os.close(fd)
 
     @staticmethod
     def _call(binary: Path, session: str, *args: str) -> dict[str, Any]:
@@ -98,11 +154,15 @@ class DisposableHerdrController(IsolatedController):
         return value["result"]
 
     @classmethod
-    def launch(cls, db: Path, binary: Path, cwd: Path, *, expected_sha256: str, expected_version: str|None=None, timeout: float=12) -> "DisposableHerdrController":
+    def launch(cls, db: Path, binary: Path, cwd: Path, *, expected_sha256: str, expected_version: str|None=None, timeout: float=12, acceptance_plan: Path|None=None) -> "DisposableHerdrController":
         actual=hashlib.sha256(binary.read_bytes()).hexdigest() if binary.is_file() else ""
         if actual != expected_sha256: raise ControllerError("refusing unmeasured Herdr executable")
         session=service=f"xcsh-uat-{uuid.uuid4().hex[:12]}"
-        subprocess.run(["systemd-run","--user","--unit",service,"--collect",str(binary),"--session",session,"server"],check=True,capture_output=True,text=True)
+        plan_env = []
+        if acceptance_plan is not None:
+            cls.read_acceptance_plan(acceptance_plan)
+            plan_env = [f"--setenv=XCSH_HERDR_ACCEPTANCE_PLAN={acceptance_plan.absolute()}"]
+        subprocess.run(["systemd-run","--user","--unit",service,"--collect",*plan_env,str(binary),"--session",session,"server"],check=True,capture_output=True,text=True)
         deadline=time.monotonic()+timeout; status=None
         while time.monotonic()<deadline:
             try:
@@ -117,6 +177,7 @@ class DisposableHerdrController(IsolatedController):
         pane,workspace_id=root.get("pane_id"),workspace.get("workspace_id")
         if not isinstance(pane,str) or not isinstance(workspace_id,str): raise ControllerError("owned workspace creation returned no pane identity")
         ownership={"session_id":session,"service_id":service,"workspace_id":workspace_id,"pane_ids":[pane],"created_pane_ids":[pane],"server_socket":status.get("socket"),"binary_sha256":actual,"herdr_version":status.get("version")}
+        if acceptance_plan is not None: ownership["acceptance_plan"] = str(acceptance_plan.absolute())
         return cls(db,ownership,secrets.token_urlsafe(32),binary)
 
     def save_receipt(self, path: Path) -> dict[str,Any]:
@@ -146,6 +207,94 @@ class DisposableHerdrController(IsolatedController):
         tab=self._owned_call("tab","get",receipt["tab_id"]).get("tab",{})
         if pane.get("tab_id") != receipt["tab_id"] or pane.get("workspace_id") != receipt["workspace_id"] or tab.get("workspace_id") != receipt["workspace_id"]:
             raise ControllerError("admitted execution provenance does not match live Herdr pane/tab")
+        if isinstance(admission.get("native_executable"), dict):
+            binding = {"execution_id": admission["id"], "pane_id": admission["pane_id"],
+                       "session_id": admission.get("agent_session_id") or admission.get("native_launch", {}).get("session_header", {}).get("id"),
+                       "generation": admission.get("run_generation", 0), "native_executable": admission["native_executable"]}
+            encoded = json.dumps(binding, sort_keys=True)
+            prior = self.conn.execute("SELECT binding FROM uat_native_bindings WHERE execution_id=?", (admission["id"],)).fetchone()
+            if prior is not None and prior["binding"] != encoded: raise ControllerError("native producer admission changed")
+            if prior is None: self.conn.execute("INSERT INTO uat_native_bindings VALUES(?,?)", (admission["id"], encoded))
+        return receipt
+
+    def wait_for_producer_descriptor(self, pane_id: str, *, timeout: float = 15) -> None:
+        """Await publication before claiming an effect; readiness has no effects."""
+        plan = self.read_acceptance_plan(Path(self.ownership["acceptance_plan"]))
+        execution = self._registered(pane_id)
+        row = self.conn.execute("SELECT binding FROM uat_native_bindings WHERE execution_id=?", (execution["execution_id"],)).fetchone()
+        if row is None: raise ControllerError("producer readiness has no measured native admission")
+        binding = json.loads(row["binding"])
+        directory = Path(plan["control_directory"])
+        deadline = time.monotonic() + timeout
+        while True:
+            matches = list(directory.glob(f"{binding['session_id']}.{binding['generation']}.*.json"))
+            if len(matches) == 1: return
+            if len(matches) > 1: raise ControllerError("registered producer has conflicting control descriptors")
+            if time.monotonic() >= deadline: raise ControllerError("registered producer did not publish its working descriptor")
+            time.sleep(.05)
+
+    def producer_action(self, kind: str, pane_id: str, key: str) -> dict[str, Any]:
+        """Invoke the measured released adapter; never fabricate producer effects."""
+        from xcsh_installed_uat import herdr_request
+        plan_file = self.ownership.get("acceptance_plan")
+        if not plan_file: raise ControllerError("action requires a producer-owned causal adapter and private plan")
+        plan = self.read_acceptance_plan(Path(plan_file))
+        execution = self._registered(pane_id)
+        row = self.conn.execute("SELECT binding FROM uat_native_bindings WHERE execution_id=?", (execution["execution_id"],)).fetchone()
+        if row is None: raise ControllerError("producer action has no measured native admission")
+        admitted = json.loads(row["binding"])
+        directory = Path(plan["control_directory"])
+        request_file = directory / f"request-{hashlib.sha256(key.encode()).hexdigest()}.json"
+        if request_file.exists():
+            if request_file.is_symlink() or request_file.stat().st_mode & 0o077: raise ControllerError("producer request must be owner-private")
+            request = json.loads(request_file.read_text())
+            descriptor_file = Path(request["descriptor_file"])
+        else:
+            matches = list(directory.glob(f"{admitted['session_id']}.{admitted['generation']}.*.json"))
+            if len(matches) != 1: raise ControllerError("registered producer has no unique working descriptor")
+            descriptor_file = matches[0]
+            if descriptor_file.is_symlink() or descriptor_file.stat().st_mode & 0o077: raise ControllerError("producer descriptor must be owner-private")
+            descriptor = json.loads(descriptor_file.read_text())
+            binding = descriptor.get("binding", {})
+            if any(binding.get(field) != admitted[field] for field in ("execution_id", "pane_id", "session_id", "generation")):
+                raise ControllerError("producer descriptor disagrees with native admission")
+            if {"canonical_path": binding.get("executable"), "sha256": binding.get("executable_sha256")} != admitted["native_executable"]:
+                raise ControllerError("producer descriptor executable identity changed")
+            records = herdr_request(Path(self.ownership["server_socket"]), "agent.turn.list", {"since_revision": 0}).get("turns", [])
+            own_records = [item for item in records if item.get("report", item).get("execution_id") == admitted["execution_id"]
+                           and item.get("report", item).get("generation") == admitted["generation"]]
+            latest = max(own_records, key=lambda item: item.get("revision", 0), default={})
+            report = latest.get("report", latest)
+            if latest.get("revision") != binding.get("journal_revision") or report.get("state") != "working" or report.get("turn_id") != binding.get("turn_id"):
+                raise ControllerError("producer descriptor does not bind the current working journal")
+            request = {"version": 1, "action": kind, "action_key": key, "binding": binding,
+                       "descriptor_file": str(descriptor_file), "control_token": descriptor["control_token"]}
+            fd = os.open(request_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as stream:
+                json.dump(request, stream); stream.flush(); os.fsync(stream.fileno())
+        executable = Path(admitted["native_executable"]["canonical_path"])
+        if hashlib.sha256(executable.read_bytes()).hexdigest() != admitted["native_executable"]["sha256"]:
+            raise ControllerError("producer adapter executable measurement changed")
+        call = subprocess.run([str(executable), "lifecycle", "acceptance-action", "--request", str(request_file), "--json"], capture_output=True, text=True, timeout=45)
+        if call.returncode: raise ControllerError(f"released producer adapter failed: {call.stderr.strip()[:500]}")
+        receipt = json.loads(call.stdout)
+        if receipt.get("action") != kind or receipt.get("binding") != request["binding"] or not isinstance(receipt.get("effect"), dict):
+            raise ControllerError("producer adapter returned a conflicting causal receipt")
+        if kind == "reconnect_replay":
+            self.producer_action("release", pane_id, f"{key}:release")
+        elif kind == "restart_loss":
+            if receipt["effect"].get("producer_exit_verified") is not True: raise ControllerError("producer exit was not verified by the released adapter")
+            switched = subprocess.run(["systemctl", "--user", "restart", self.ownership["service_id"]], capture_output=True, text=True)
+            if switched.returncode: raise ControllerError("owned Herdr restart failed after producer cutpoint")
+            deadline = time.monotonic() + 12
+            while time.monotonic() < deadline:
+                try:
+                    status = self._owned_call("status", "server", "--json")
+                    if status.get("running") and status.get("session") == self.ownership["session_id"]: break
+                except ControllerError: pass
+                time.sleep(.15)
+            else: raise ControllerError("owned Herdr did not return after restart")
+            receipt["effect"]["after_socket"] = status.get("socket")
         return receipt
 
     def verify_live_ownership(self) -> None:
@@ -292,15 +441,17 @@ class DisposableHerdrController(IsolatedController):
         RPC, CLI flag, or capability transport before that adapter exists.
         """
         self.verify_live_ownership()
-        if kind in {"reconnect_replay", "restart_loss"} and external is None:
+        if kind in {"reconnect_replay", "restart_loss"} and external is None and self.ownership.get("acceptance_plan"):
+            if self.conn.execute("SELECT state FROM uat_actions WHERE key=?", (key,)).fetchone() is None:
+                self.wait_for_producer_descriptor(pane_id)
+        if kind in {"reconnect_replay", "restart_loss"} and external is None and not self.ownership.get("acceptance_plan"):
             raise ControllerError(
                 f"{kind} requires a real producer-owned causal action receipt; "
                 "socket observation and server restart are not evidence"
             )
         def hook(_: str,target: dict[str,Any]) -> dict[str,Any]:
             if kind in {"reconnect_replay", "restart_loss"}:
-                assert external is not None
-                producer_receipt = external()
+                producer_receipt = external() if external is not None else self.producer_action(kind, pane_id, key)
                 if not isinstance(producer_receipt, dict) or not isinstance(producer_receipt.get("effect"), dict):
                     raise ControllerError("producer action adapter returned no causal receipt")
                 effect = producer_receipt["effect"]
@@ -309,7 +460,8 @@ class DisposableHerdrController(IsolatedController):
                 broker_receipt=external()
                 if not isinstance(broker_receipt,dict) or not broker_receipt.get("id"): raise ControllerError("broker continuation returned no task receipt")
                 effect={"broker_task_id":broker_receipt["id"],"broker_state":broker_receipt.get("state")}
-            return {"kind":kind,"session_id":target["session_id"],"pane_id":target["pane_id"],"effect":effect,"binary_sha256":self.binary_sha256}
+            return {"kind":kind,"session_id":target["session_id"],"pane_id":target["pane_id"],"effect":effect,"binary_sha256":self.binary_sha256,
+                    "producer_receipt_version": producer_receipt.get("version") if kind in {"reconnect_replay", "restart_loss"} else None}
         return self.act(kind,pane_id,key,token,hook)
 
 
@@ -322,9 +474,11 @@ def main() -> int:
     parser.add_argument("--cwd",type=Path,required=True)
     parser.add_argument("--state-db",type=Path,required=True)
     parser.add_argument("--receipt",type=Path,required=True)
+    parser.add_argument("--producer-control-dir",type=Path,help="create an owner-private opt-in producer plan for this disposable server")
     args=parser.parse_args()
     if not args.prepare: parser.error("--prepare is required")
-    controller=DisposableHerdrController.launch(args.state_db,args.binary,args.cwd,expected_sha256=args.sha256,expected_version=args.version)
+    plan = DisposableHerdrController.create_acceptance_plan(args.producer_control_dir) if args.producer_control_dir else None
+    controller=DisposableHerdrController.launch(args.state_db,args.binary,args.cwd,expected_sha256=args.sha256,expected_version=args.version,acceptance_plan=plan)
     try: print(json.dumps(controller.save_receipt(args.receipt),sort_keys=True))
     finally: controller.close()
     return 0

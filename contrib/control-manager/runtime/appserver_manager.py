@@ -51,7 +51,7 @@ class AppServerResponseError(RuntimeError):
     """A definite JSON-RPC rejection, distinct from transport uncertainty."""
 
 
-def manager_config() -> dict[str, Any]:
+def manager_config(server: AppServer | None = None) -> dict[str, Any]:
     config: dict[str, Any] = {
         "default_permissions": ":danger-full-access",
         "model": MANAGER_MODEL,
@@ -74,8 +74,6 @@ def manager_config() -> dict[str, Any]:
             "unified_exec": False,
         },
         "mcp_servers": {
-            "computer-use-xvfb": {"enabled": False},
-            "playwright-headless": {"enabled": False},
             "control_broker": {
                 "command": "/usr/bin/python3",
                 "args": [str(RUNTIME_ROOT / "control_mcp.py")],
@@ -94,6 +92,15 @@ def manager_config() -> dict[str, Any]:
             },
         },
     }
+    if server is not None:
+        # A disabled entry still needs a valid native transport. Do not invent
+        # absent providers or overwrite the transport of a configured one.
+        native = server.request("config/read", {"includeLayers": False}).get("config", {}).get("mcp_servers", {})
+        for name in ("computer-use-xvfb", "playwright-headless"):
+            transport = native.get(name, {})
+            key = "command" if transport.get("command") else "url" if transport.get("url") else None
+            if key is not None:
+                config["mcp_servers"][name] = {"enabled": False, key: transport[key]}
     try:
         binding = json.loads(CONFIG_PATH.read_text())
     except (OSError, json.JSONDecodeError):
@@ -582,7 +589,7 @@ def ensure(server: AppServer) -> dict[str, Any]:
                 "cwd": MANAGER_CWD,
                 "approvalPolicy": "never",
                 "model": MANAGER_MODEL,
-                "config": manager_config(),
+                "config": manager_config(server),
                 "serviceName": "control_manager",
                 "threadSource": "appServer",
             },
@@ -630,7 +637,7 @@ def create_verified_candidate(server: AppServer) -> dict[str, Any]:
             "cwd": MANAGER_CWD,
             "approvalPolicy": "never",
             "model": MANAGER_MODEL,
-            "config": manager_config(),
+            "config": manager_config(server),
             "serviceName": "control_manager",
             "threadSource": "appServer",
         },
@@ -717,7 +724,7 @@ def refresh_tools(server: AppServer, thread_id: str) -> dict[str, Any]:
             "cwd": MANAGER_CWD,
             "approvalPolicy": "never",
             "model": MANAGER_MODEL,
-            "config": manager_config(),
+            "config": manager_config(server),
             "excludeTurns": False,
             "copyGoal": False,
             "deferGoalContinuation": False,
@@ -763,7 +770,7 @@ def refresh_tools_in_place(server: AppServer, thread_id: str) -> dict[str, Any]:
             "cwd": MANAGER_CWD,
             "approvalPolicy": "never",
             "model": MANAGER_MODEL,
-            "config": manager_config(),
+            "config": manager_config(server),
             "excludeTurns": True,
         },
     )["thread"]
@@ -983,7 +990,7 @@ def resume_once(server: AppServer, thread_id: str, expected_failed_turn_id: str)
         raise RuntimeError("authoritative failed turn changed before recovery continuation")
     thread = server.request("thread/resume", {
         "threadId": thread_id, "cwd": MANAGER_CWD, "approvalPolicy": "never",
-        "model": MANAGER_MODEL, "config": manager_config(), "excludeTurns": True,
+        "model": MANAGER_MODEL, "config": manager_config(server), "excludeTurns": True,
     })["thread"]
     if thread.get("id") != thread_id or thread.get("cwd") != MANAGER_CWD:
         raise RuntimeError("manager resume did not preserve canonical identity")
@@ -1006,7 +1013,7 @@ def hold(server: AppServer, thread_id: str) -> None:
             "cwd": MANAGER_CWD,
             "approvalPolicy": "never",
             "model": MANAGER_MODEL,
-            "config": manager_config(),
+            "config": manager_config(server),
             "excludeTurns": True,
         },
     )

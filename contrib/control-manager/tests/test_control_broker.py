@@ -46,7 +46,7 @@ class FakeHerdr:
             execution = {"execution_id": backend, "backend_execution_id": backend,
                          "semantic_execution_id": semantic, "generation": generation,
                          "native_producer": "xcsh", "producer_session_id": launch["session_header"]["id"], "workspace_id": wid,
-                         "cwd": params["cwd"], "command": {"mode": "argv", "argv": [launch["xcsh_executable"]] + ([] if launch["interactive"] else ["--mode", "json"]) + ["--session-dir", launch["session_dir"], "--resume", launch["session_path"], "--model", launch["model"], "--tools", "read,request_user_input,request_user_input_async", "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty"] + ([] if launch["interactive"] else ["--print"]) + ([] if launch["lifecycle_mode"] == "managed_turn_v1" else ["--native-lifecycle-control", launch["lifecycle_mode"]]) + [params["text"]]},
+                         "cwd": params["cwd"], "command": {"mode": "argv", "argv": [launch["xcsh_executable"]] + ([] if launch["interactive"] else ["--mode", "json"]) + ["--session-dir", launch["session_dir"], "--resume", launch["session_path"], "--model", launch["model"], "--tools", "read,request_user_input,request_user_input_async", "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty", "--no-title"] + ([] if launch["interactive"] else ["--print"]) + ([] if launch["lifecycle_mode"] == "managed_turn_v1" else ["--native-lifecycle-control", launch["lifecycle_mode"]]) + [params["text"]]},
                          "native_executable": {"canonical_path": launch["xcsh_executable"],
                                                "sha256": hashlib.sha256(Path(launch["xcsh_executable"]).read_bytes()).hexdigest()},
                          "native_launch": launch,
@@ -656,7 +656,7 @@ class StateTests(unittest.TestCase):
             request = {"execution_id": task["id"], "generation": 0, "native_launch": launch, "workspace_id": "w1", "cwd": raw, "text": "x", "xcsh_executable_sha256": executable_sha256}
             encoded = json.dumps(request, sort_keys=True, separators=(",", ":"))
             db.claim_native_generation(task["id"], generation=0, session_id=launch["session_header"]["id"], workspace_id="w1", request_sha256=hashlib.sha256(encoded.encode()).hexdigest(), request_json=encoded)
-            argv = [executable,"--mode","json","--session-dir",str(session_dir),"--resume",str(session_path),"--model","test/model","--tools","read,request_user_input,request_user_input_async","--no-mcp","--no-lsp","--no-memories","--no-skills","--no-rules","--no-pty","--print","x"]
+            argv = [executable,"--mode","json","--session-dir",str(session_dir),"--resume",str(session_path),"--model","test/model","--tools","read,request_user_input,request_user_input_async","--no-mcp","--no-lsp","--no-memories","--no-skills","--no-rules","--no-pty", "--no-title","--print","x"]
             receipt = {"execution_id": "backend-1", "backend_execution_id": "backend-1", "semantic_execution_id": task["id"], "generation": 0, "native_producer": "xcsh", "producer_session_id": launch["session_header"]["id"], "workspace_id": "w1", "cwd": raw, "native_launch": launch, "command": {"mode": "argv", "argv": argv}, "native_executable": {"canonical_path": executable, "sha256": executable_sha256}, "injected_env": {"HERDR_EXECUTION_ID": task["id"], "HERDR_EXECUTION_GENERATION": "0"}, "tab_id": "tab-1", "pane_id": "pane-1"}
             # Released protocol 22 omitted workspace_id even though the
             # manager had already claimed it. Keep that precise receipt shape
@@ -1221,7 +1221,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         execution = self.broker.herdr.executions[task["backend_execution_id"]]
         self.assertEqual(execution["command"]["argv"], [self.xcsh_executable, "--mode", "json", "--session-dir",
             self.native_launch["session_dir"], "--resume", self.native_launch["session_path"], "--model", "test/model",
-            "--tools", "read,request_user_input,request_user_input_async", "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty", "--print", "semantic text"])
+            "--tools", "read,request_user_input,request_user_input_async", "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty", "--no-title", "--print", "semantic text"])
         interactive_launch = self.native_launch | {"interactive": True}
         interactive = await self.broker.native_xcsh_admit({
             "target": "xcsh-v4-interactive", "cwd": str(self.root), "priority": "routine", "prompt": "safe",
@@ -1234,7 +1234,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         interactive_argv = self.broker.herdr.executions[interactive["backend_execution_id"]]["command"]["argv"]
         self.assertEqual(interactive_argv, [self.xcsh_executable, "--session-dir", self.native_launch["session_dir"],
             "--resume", self.native_launch["session_path"], "--model", "test/model", "--tools", "read,request_user_input,request_user_input_async",
-            "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty",
+            "--no-mcp", "--no-lsp", "--no-memories", "--no-skills", "--no-rules", "--no-pty", "--no-title",
             "interactive semantic text"])
         self.assertNotIn("--mode", interactive_argv)
         self.assertNotIn("--print", interactive_argv)
@@ -1419,6 +1419,144 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         ).fetchall()
         self.assertEqual(len(bindings), 1)
         self.assertEqual(bindings[0]["generation"], 0)
+
+    async def test_native_interruption_is_deliverable_without_claiming_success_or_cleanup(self):
+        """Native consumer/outbox contract; genuine manager consumption is UAT."""
+        workspace = await self.configure_control_workspace()
+        config = self.broker.config()
+        config.update(agent_turn_consumer_enabled=True, agent_turn_producer="xcsh")
+        self.broker.config_path.write_text(json.dumps(config))
+        for terminal in ("interrupted", "lost"):
+            with self.subTest(terminal=terminal):
+                task = await self.admit_native_xcsh({
+                    "target": terminal, "cwd": str(self.root), "priority": "routine", "prompt": "safe", "text": "safe",
+                    "workspace_id": workspace["workspace"]["workspace_id"],
+                    "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"},
+                    "idempotency_key": terminal,
+                })
+                binding = self.broker.db.current_native_generation(task["id"])
+                base = {"execution_id": task["id"], "pane_id": binding["pane_id"], "producer": "xcsh",
+                        "session_id": binding["session_id"], "turn_id": terminal, "generation": 0}
+                for event_revision, state in enumerate(("starting", "working", terminal), 1):
+                    self.broker.herdr.agent_turns.append({"revision": len(self.broker.herdr.agent_turns) + 1,
+                        "report": base | {"event_revision": event_revision, "state": state, "reason": "producer unavailable"}})
+                await self.broker.consume_native_turns()
+                row = self.broker.db.task(task["id"])
+                self.assertEqual(row["state"], "unknown")
+                self.assertIsNotNone(row["terminal_reported_at"])
+                self.assertIsNone(row["cleanup_deadline"])
+                self.assertEqual(self.broker.db.current_native_generation(task["id"])["terminal_state"], terminal)
+                events = [item for item in self.broker.db.pending_completions() if item["task_id"] == task["id"]]
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0]["payload"]["state"], "unknown")
+                event_id = row["terminal_event_id"]
+                await self.broker._apply_lifecycle(task["id"], "working", binding_verified=True)
+                await self.broker._handle_event("pane.exited", {"pane_id": row["pane_id"]})
+                row = self.broker.db.task(task["id"])
+                self.assertEqual(row["state"], "unknown")
+                self.assertEqual(row["terminal_event_id"], event_id)
+                self.assertIsNone(row["cleanup_deadline"])
+                await self.broker.consume_native_turns()
+                self.assertEqual([item for item in self.broker.db.pending_completions() if item["task_id"] == task["id"]], events)
+                self.assertNotIn(task["id"], self.broker.cleanup_timers)
+
+    async def test_missing_native_pane_preserves_journal_owned_projection(self):
+        workspace = await self.configure_control_workspace()
+        task = await self.admit_native_xcsh({
+            "target": "missing-native", "cwd": str(self.root), "priority": "routine", "prompt": "safe", "text": "safe",
+            "workspace_id": workspace["workspace"]["workspace_id"],
+            "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"},
+            "idempotency_key": "missing-native",
+        })
+        db = self.broker.db
+        binding = db.current_native_generation(task["id"])
+        base = {"execution_id": task["id"], "pane_id": binding["pane_id"], "producer": "xcsh",
+                "session_id": binding["session_id"], "turn_id": "missing-turn", "generation": 0}
+        for revision, state in enumerate(("starting", "working"), 1):
+            db.apply_native_turn({"revision": revision, "report": base | {"event_revision": revision, "state": state}})
+        fields = ("state", "summary", "question", "terminal_reported_at", "terminal_event_id")
+        before = {field: db.task(task["id"])[field] for field in fields}
+        self.broker.herdr.panes.pop(binding["pane_id"])
+        await self.broker.reconcile()
+        self.assertEqual({field: db.task(task["id"])[field] for field in fields}, before)
+        self.assertEqual(db.task(task["id"])["herdr_state"], "missing")
+        self.assertEqual(db.pending_completions(), [])
+        db.apply_native_turn({"revision": 3, "report": base | {"event_revision": 3, "state": "interrupted", "reason": "native causal interruption"}})
+        await self.broker.reconcile()
+        self.assertEqual(db.task(task["id"])["state"], "unknown")
+        self.assertEqual(db.task(task["id"])["summary"], "native causal interruption")
+        self.assertEqual(len(db.pending_completions()), 1)
+
+    async def test_native_settlement_rolls_back_and_replays_after_projection_failure(self):
+        workspace = await self.configure_control_workspace()
+        task = await self.admit_native_xcsh({
+            "target": "atomic-settlement", "cwd": str(self.root), "priority": "routine", "prompt": "safe", "text": "safe",
+            "workspace_id": workspace["workspace"]["workspace_id"],
+            "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"},
+            "idempotency_key": "atomic-settlement",
+        })
+        db = self.broker.db
+        binding = db.current_native_generation(task["id"])
+        base = {"execution_id": task["id"], "pane_id": binding["pane_id"], "producer": "xcsh",
+                "session_id": binding["session_id"], "turn_id": "atomic-turn", "generation": 0}
+        for revision, state in enumerate(("starting", "working"), 1):
+            db.apply_native_turn({"revision": revision, "report": base | {"event_revision": revision, "state": state}})
+        terminal = {"revision": 3, "report": base | {"event_revision": 3, "state": "interrupted"}}
+        with patch.object(db, "update", side_effect=RuntimeError("injected projection failure")):
+            with self.assertRaisesRegex(RuntimeError, "injected projection"):
+                db.apply_native_turn(terminal)
+        reopened = StateDB(db.path)
+        try:
+            self.assertEqual(reopened.current_native_generation(task["id"])["last_event_revision"], 2)
+            self.assertIsNone(reopened.current_native_generation(task["id"])["terminal_state"])
+            self.assertEqual(reopened.native_turn_cursor("__herdr_global__"), 2)
+            self.assertEqual(reopened.task(task["id"])["state"], "working")
+            self.assertIsNone(reopened.task(task["id"])["terminal_event_id"])
+            update = reopened.update
+            def fail_after_outbox(*args, **kwargs):
+                update(*args, **kwargs)
+                raise RuntimeError("injected after outbox write")
+            with patch.object(reopened, "update", side_effect=fail_after_outbox):
+                with self.assertRaisesRegex(RuntimeError, "after outbox"):
+                    reopened.apply_native_turn(terminal)
+            self.assertEqual(reopened.current_native_generation(task["id"])["last_event_revision"], 2)
+            self.assertIsNone(reopened.task(task["id"])["terminal_event_id"])
+            self.assertEqual(reopened.pending_completions(), [])
+            self.assertEqual(reopened.native_turn_cursor("__herdr_global__"), 2)
+            self.assertEqual(reopened.apply_native_turn(terminal), (task["id"], "unknown"))
+            self.assertIsNone(reopened.apply_native_turn(terminal))
+            self.assertEqual(len(reopened.pending_completions()), 1)
+            self.assertEqual(reopened.native_turn_cursor("__herdr_global__"), 3)
+        finally:
+            reopened.close()
+
+    async def test_xcsh_handoff_keeps_predecessor_progress_without_overwriting_current_generation(self):
+        """Synthetic ledger characterization; genuine runtime UAT remains separate."""
+        workspace = await self.configure_control_workspace()
+        task = await self.admit_native_xcsh({
+            "target": "xcsh-interleaving", "cwd": str(self.root), "priority": "routine", "prompt": "safe", "text": "safe",
+            "session_id": "session-interleaving", "workspace_id": workspace["workspace"]["workspace_id"],
+            "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"}, "idempotency_key": "interleaving",
+        })
+        old = self.broker.db.current_native_generation(task["id"])
+        base = {"execution_id": task["id"], "pane_id": old["pane_id"], "producer": "xcsh", "session_id": old["session_id"], "turn_id": "old-turn", "generation": 0}
+        self.broker.db.apply_native_turn({"revision": 1, "report": base | {"event_revision": 1, "state": "starting"}})
+        self.broker.db.apply_native_turn({"revision": 2, "report": base | {"event_revision": 2, "state": "waiting_input"}})
+        await self.broker.continue_task({"task_id": task["id"], "text": "next"})
+        current = self.broker.db.current_native_generation(task["id"])
+        current_pane = self.broker.db.task(task["id"])["pane_id"]
+        self.assertIsNone(self.broker.db.apply_native_turn({"revision": 3, "report": base | {"event_revision": 3, "state": "working"}}))
+        self.assertEqual(self.broker.db.native_generation(task["id"], 0)["last_event_revision"], 3)
+        self.assertEqual(self.broker.db.task(task["id"])["pane_id"], current_pane)
+        self.assertEqual(self.broker.db.current_native_generation(task["id"])["last_event_revision"], 0)
+        new = base | {"pane_id": current["pane_id"], "session_id": current["session_id"], "generation": 1, "turn_id": "new-turn"}
+        self.broker.db.apply_native_turn({"revision": 4, "report": new | {"event_revision": 1, "state": "starting"}})
+        self.assertIsNone(self.broker.db.apply_native_turn({"revision": 5, "report": base | {"event_revision": 4, "state": "cancelled"}}))
+        self.assertEqual(self.broker.db.native_generation(task["id"], 0)["terminal_state"], "cancelled")
+        self.assertEqual(self.broker.db.task(task["id"])["state"], "starting")
+        with self.assertRaisesRegex(ValueError, "terminal"):
+            self.broker.db.apply_native_turn({"revision": 6, "report": base | {"event_revision": 5, "state": "working"}})
+        self.assertEqual(self.broker.db.native_turn_cursor("__herdr_global__"), 5)
 
     async def test_xcsh_generation_history_rejects_foreign_panes_and_settles_old_child(self):
         """Synthetic component fixture for ledger rules; not UAT evidence."""
@@ -2467,7 +2605,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         request = {"execution_id": task["id"], "generation": 0, "native_launch": self.native_launch, "workspace_id": "w1", "cwd": str(self.root), "text": "native", "xcsh_executable_sha256": executable_sha256}
         encoded = json.dumps(request, sort_keys=True, separators=(",", ":"))
         self.broker.db.claim_native_generation(task["id"], generation=0, session_id=self.native_launch["session_header"]["id"], workspace_id="w1", request_sha256=hashlib.sha256(encoded.encode()).hexdigest(), request_json=encoded)
-        argv = [executable,"--mode","json","--session-dir",self.native_launch["session_dir"],"--resume",self.native_launch["session_path"],"--model",self.native_launch["model"],"--tools","read,request_user_input,request_user_input_async","--no-mcp","--no-lsp","--no-memories","--no-skills","--no-rules","--no-pty","--print","native"]
+        argv = [executable,"--mode","json","--session-dir",self.native_launch["session_dir"],"--resume",self.native_launch["session_path"],"--model",self.native_launch["model"],"--tools","read,request_user_input,request_user_input_async","--no-mcp","--no-lsp","--no-memories","--no-skills","--no-rules","--no-pty", "--no-title","--print","native"]
         self.broker.db.admit_native_generation(task["id"], 0, {"execution_id": "backend-journal", "backend_execution_id": "backend-journal", "semantic_execution_id": task["id"], "generation": 0, "native_producer": "xcsh", "producer_session_id": self.native_launch["session_header"]["id"], "workspace_id": "w1", "cwd": str(self.root), "native_launch": self.native_launch, "command": {"mode": "argv", "argv": argv}, "native_executable": {"canonical_path": executable, "sha256": executable_sha256}, "injected_env": {"HERDR_EXECUTION_ID": task["id"], "HERDR_EXECUTION_GENERATION": "0"}, "tab_id": "w1:t1", "pane_id": "w1:p1"})
         self.broker.db.create_feature({"feature_id": "journal-feature", "target": "journal-feature", "cwd": str(self.root),
                                        "title": "Journal", "scope": "end_to_end", "required_stages": ["implementation", "tests"],

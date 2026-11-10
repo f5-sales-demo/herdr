@@ -220,6 +220,8 @@ class HoldSemanticsTests(unittest.TestCase):
             def __init__(self, status, error=None):
                 self.status, self.error, self.reads = status, error, 0
             def request(self, method, params=None):
+                if method == "config/read":
+                    return {"config": {"mcp_servers": {}}}
                 if method == "thread/resume":
                     return {"thread": {"id": "canonical", "cwd": manager.MANAGER_CWD}}
                 if method == "thread/settings/update":

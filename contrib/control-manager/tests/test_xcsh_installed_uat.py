@@ -22,6 +22,38 @@ def manifest():
 
 
 class InstalledPromptUatTests(unittest.TestCase):
+    def test_cleanup_uses_durable_ordered_receipts_after_deadline_clears(self):
+        from unittest.mock import patch
+        import xcsh_installed_uat as driver
+        import time
+        from control_broker import StateDB
+        task = {"id": "task-1", "tab_id": "tab-1"}
+        with tempfile.TemporaryDirectory() as raw:
+            db = StateDB(Path(raw) / "tasks.sqlite")
+            try:
+                db.record_transition(task["id"], "completed", "completed", "cleanup_scheduled", at=10)
+                db.record_transition(task["id"], "completed", "completed", "owned_tab_cleaned", at=11)
+                current = {"cleanup_deadline": None, "transitions": db.transitions(task["id"])}
+            finally:
+                db.conn.close()
+        self.assertNotIn("seq", current["transitions"][0])
+        with patch.object(driver, "unix_request", return_value={"tasks": [current]}), \
+                patch.object(driver, "herdr_request", side_effect=driver.HerdrRequestError(
+                    {"code": "tab_not_found", "message": "absent"})):
+            receipt = driver.wait_for_manager_cleanup(Path("broker"), Path("herdr"), task, time.monotonic() + 1)
+        self.assertEqual(receipt, {"task_id": "task-1", "cleanup_schedule": current["transitions"][0],
+                                  "owned_tab_cleaned": current["transitions"][1], "owned_tab_absent": True})
+        with patch.object(driver, "unix_request", return_value={"tasks": [current]}), \
+                patch.object(driver, "herdr_request", side_effect=TimeoutError("offline")):
+            with self.assertRaises(TimeoutError):
+                driver.wait_for_manager_cleanup(Path("broker"), Path("herdr"), task, time.monotonic() + 1)
+        for transitions in ([current["transitions"][1]], list(reversed(current["transitions"]))):
+            with patch.object(driver, "unix_request", return_value={"tasks": [{"transitions": transitions}]}), \
+                    patch.object(driver, "herdr_request") as request, patch.object(driver.time, "sleep"):
+                with self.assertRaises(driver.PreflightError):
+                    driver.wait_for_manager_cleanup(Path("broker"), Path("herdr"), task, time.monotonic() + .001)
+                request.assert_not_called()
+
     def test_execute_case_recovers_lost_continuation_and_replays_completed_run(self):
         self._check_case_recovery("continuation")
 
@@ -94,6 +126,8 @@ class InstalledPromptUatTests(unittest.TestCase):
                     counts["admissions"] += 1
                     return task(current_generation) | {"native_executable":{"canonical_path":"/isolated/xcsh","sha256":"a"*64},"native_launch":params["native_launch"]}
                 if method=="continue_task":
+                    self.assertIn("exact contents without the trailing newline", params["text"])
+                    self.assertNotIn("awaiting-user", params["text"])
                     counts["continuation_calls"] += 1
                     if not current_generation:
                         current_generation=1; counts["continuation_effects"] += 1
@@ -358,7 +392,7 @@ class InstalledPromptUatTests(unittest.TestCase):
             def create_xcsh_session(self, *_): return {"session_id": "0123abcd4567ef89", "session_dir":"/synthetic", "session_path": "/synthetic/session.jsonl", "session_header":{"id":"0123abcd4567ef89","sha256":"a" * 64}, "xcsh_executable": "/isolated/xcsh", "xcsh_executable_sha256": "a" * 64}
             def register_execution(self, task): self.registered=task
             def real_action(self, kind, pane, key, token, external=None):
-                self.calls.append((kind,pane,key,token)); return {"kind":kind,"execution_id":"task-1","workspace_id":"w-isolated","tab_id":"tab-1","pane_id":pane,"session_id":"owned","effect":{"action":"producer_process_cutpoint","producer_session_id":"0123abcd4567ef89","producer_pid":123,"execution_id":"task-1","before_revision":2,"process_exited":True,"stop_exit":0,"after_socket":"/isolated/herdr.sock"}}
+                self.calls.append((kind,pane,key,token)); return {"producer_receipt_version":1,"kind":kind,"execution_id":"task-1","workspace_id":"w-isolated","tab_id":"tab-1","pane_id":pane,"session_id":"owned","effect":{"action":"producer_process_cutpoint","producer_session_id":"0123abcd4567ef89","producer_pid":123,"execution_id":"task-1","before_revision":2,"process_exited":True,"producer_exit_verified":True,"shutdown_path":"session_shutdown","interrupted_acknowledgement":{"state":"interrupted","revision":3,"admitted":True},"stop_exit":0,"after_socket":"/isolated/herdr.sock"}}
         controller=Controller(); ticks=[0]
         def fake_broker(path, method, params):
             if method == "native_xcsh_admit": return {"id":"task-1","state":"starting","workspace_id":"w-isolated","tab_id":"tab-1","pane_id":"pane-1","agent_session_id":"0123abcd4567ef89", "native_executable": {"canonical_path": params["native_launch"]["xcsh_executable"], "sha256": params["xcsh_executable_sha256"]}, "native_launch":params["native_launch"]}
