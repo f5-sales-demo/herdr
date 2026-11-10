@@ -1420,6 +1420,39 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(bindings), 1)
         self.assertEqual(bindings[0]["generation"], 0)
 
+    async def test_native_interruption_is_deliverable_without_claiming_success_or_cleanup(self):
+        """Native consumer/outbox contract; genuine manager consumption is UAT."""
+        workspace = await self.configure_control_workspace()
+        config = self.broker.config()
+        config.update(agent_turn_consumer_enabled=True, agent_turn_producer="xcsh")
+        self.broker.config_path.write_text(json.dumps(config))
+        for terminal in ("interrupted", "lost"):
+            with self.subTest(terminal=terminal):
+                task = await self.admit_native_xcsh({
+                    "target": terminal, "cwd": str(self.root), "priority": "routine", "prompt": "safe", "text": "safe",
+                    "workspace_id": workspace["workspace"]["workspace_id"],
+                    "runtime_identity": {"xcsh_artifact": "x", "herdr_artifact": "h", "manager_artifact": "m"},
+                    "idempotency_key": terminal,
+                })
+                binding = self.broker.db.current_native_generation(task["id"])
+                base = {"execution_id": task["id"], "pane_id": binding["pane_id"], "producer": "xcsh",
+                        "session_id": binding["session_id"], "turn_id": terminal, "generation": 0}
+                for event_revision, state in enumerate(("starting", "working", terminal), 1):
+                    self.broker.herdr.agent_turns.append({"revision": len(self.broker.herdr.agent_turns) + 1,
+                        "report": base | {"event_revision": event_revision, "state": state, "reason": "producer unavailable"}})
+                await self.broker.consume_native_turns()
+                row = self.broker.db.task(task["id"])
+                self.assertEqual(row["state"], "unknown")
+                self.assertIsNotNone(row["terminal_reported_at"])
+                self.assertIsNone(row["cleanup_deadline"])
+                self.assertEqual(self.broker.db.current_native_generation(task["id"])["terminal_state"], terminal)
+                events = [item for item in self.broker.db.pending_completions() if item["task_id"] == task["id"]]
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0]["payload"]["state"], "unknown")
+                await self.broker.consume_native_turns()
+                self.assertEqual([item for item in self.broker.db.pending_completions() if item["task_id"] == task["id"]], events)
+                self.assertNotIn(task["id"], self.broker.cleanup_timers)
+
     async def test_xcsh_handoff_keeps_predecessor_progress_without_overwriting_current_generation(self):
         """Synthetic ledger characterization; genuine runtime UAT remains separate."""
         workspace = await self.configure_control_workspace()

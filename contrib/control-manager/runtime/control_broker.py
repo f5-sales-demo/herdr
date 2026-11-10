@@ -1426,7 +1426,16 @@ class StateDB:
                 at=values["updated_at"],
             )
         new_state = values.get("state", previous["state"])
-        if previous["state"] not in TERMINAL_STATES and new_state in TERMINAL_STATES:
+        # A verified native interruption ends the producer generation while
+        # leaving its outcome unknown. Deliver that observation durably; it
+        # must not imply success or make the task eligible for cleanup.
+        native_unknown_settlement = (
+            previous["work_kind"] == "xcsh" and new_state == "unknown"
+            and event in {"xcsh_turn_interrupted", "xcsh_turn_lost"}
+            and values.get("terminal_reported_at") is not None
+            and previous["terminal_event_id"] is None
+        )
+        if previous["state"] not in TERMINAL_STATES and (new_state in TERMINAL_STATES or native_unknown_settlement):
             event_id = f"evt-{uuid.uuid4().hex}"
             payload = json.dumps(
                 {
@@ -1950,7 +1959,9 @@ class StateDB:
         if row["agent_session_id"] != session_id or row["native_turn_id"] != turn_id:
             values.update(agent_session_id=session_id, native_turn_id=turn_id)
         if mapped == "waiting_human": values["question"] = summary
-        if mapped in TERMINAL_STATES: values["finished_at"] = self.clock(); values["terminal_reported_at"] = self.clock()
+        if state in {"completed", "failed", "cancelled", "interrupted", "lost"}:
+            values["finished_at"] = self.clock()
+            values["terminal_reported_at"] = self.clock()
         self.update(task_id, event=f"xcsh_turn_{state}", **values)
         self.conn.execute("INSERT INTO native_turn_cursors(producer,last_revision,updated_at) VALUES(?,?,?) ON CONFLICT(producer) DO UPDATE SET last_revision=excluded.last_revision,updated_at=excluded.updated_at", (cursor_key, revision, self.clock()))
         self.conn.commit()
