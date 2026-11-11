@@ -111,6 +111,9 @@ jobs:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_INSTALLER_CERTIFICATE_BASE64: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_BASE64 }}
           APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -123,14 +126,25 @@ jobs:
             APPLE_CERTIFICATE_PASSWORD \
             APPLE_INSTALLER_CERTIFICATE_BASE64 \
             APPLE_INSTALLER_CERTIFICATE_PASSWORD \
-            APPLE_ID \
-            APPLE_PASSWORD \
             APPLE_TEAM_ID \
             HOMEBREW_TAP_TOKEN; do
             if [ -z "${!name:-}" ]; then
               missing+=("$name")
             fi
           done
+          if [ -n "${APPLE_NOTARY_KEY_BASE64:-}${APPLE_NOTARY_KEY_ID:-}${APPLE_NOTARY_ISSUER:-}" ]; then
+            for name in APPLE_NOTARY_KEY_BASE64 APPLE_NOTARY_KEY_ID; do
+              if [ -z "${!name:-}" ]; then
+                missing+=("$name")
+              fi
+            done
+          else
+            for name in APPLE_ID APPLE_PASSWORD; do
+              if [ -z "${!name:-}" ]; then
+                missing+=("$name")
+              fi
+            done
+          fi
           if [ "${#missing[@]}" -ne 0 ]; then
             printf 'Missing required downstream release secret: %s\n' "${missing[@]}" >&2
             exit 1
@@ -185,6 +199,20 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.release_sha }}
           persist-credentials: false
+
+      - name: Checkout reviewed release authentication tooling
+        if: runner.os == 'macOS'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.tooling_sha }}
+          path: .release-tooling
+          persist-credentials: false
+
+      - name: Verify authentication tooling identity
+        if: runner.os == 'macOS'
+        env:
+          TOOLING_SHA: ${{ needs.prepare.outputs.tooling_sha }}
+        run: test "$(git -C .release-tooling rev-parse HEAD)" = "$TOOLING_SHA"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1
@@ -247,6 +275,9 @@ jobs:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_INSTALLER_CERTIFICATE_BASE64: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_BASE64 }}
           APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -318,6 +349,8 @@ jobs:
             exit 1
           fi
 
+          bash .release-tooling/scripts/ci-notary-auth.sh "$application_keychain" herdr-ci-notary
+
           codesign --force --options runtime --timestamp --keychain "$application_keychain" \
             --sign "$application_identity" "${{ matrix.artifact }}"
           codesign --verify --strict --verbose=4 "${{ matrix.artifact }}"
@@ -326,10 +359,9 @@ jobs:
           for attempt in 1 2 3; do
             notary_exit=0
             notary_output="$(xcrun notarytool submit "$notarization_archive" \
-              --apple-id "$APPLE_ID" \
-              --password "$APPLE_PASSWORD" \
-              --team-id "$APPLE_TEAM_ID" \
-              --wait --verbose 2>&1)" || notary_exit=$?
+              --keychain-profile herdr-ci-notary \
+              --keychain "$application_keychain" \
+              --wait 2>&1)" || notary_exit=$?
             printf '%s\n' "$notary_output"
             if [ "$notary_exit" -eq 0 ] && grep -q 'status: Accepted' <<< "$notary_output"; then
               notarization_accepted=true
@@ -370,10 +402,9 @@ jobs:
           for attempt in 1 2 3; do
             notary_exit=0
             notary_output="$(xcrun notarytool submit "$package" \
-              --apple-id "$APPLE_ID" \
-              --password "$APPLE_PASSWORD" \
-              --team-id "$APPLE_TEAM_ID" \
-              --wait --verbose 2>&1)" || notary_exit=$?
+              --keychain-profile herdr-ci-notary \
+              --keychain "$application_keychain" \
+              --wait 2>&1)" || notary_exit=$?
             printf '%s\n' "$notary_output"
             if [ "$notary_exit" -eq 0 ] && grep -q 'status: Accepted' <<< "$notary_output"; then
               package_accepted=true
