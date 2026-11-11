@@ -71,6 +71,16 @@ class DownstreamReleaseWorkflowTests(unittest.TestCase):
             self.workflow,
         )
 
+    def test_recovery_authentication_uses_reviewed_tooling_and_validated_profile(self) -> None:
+        self.assertIn('path: .release-tooling', self.workflow)
+        self.assertIn('git -C .release-tooling rev-parse HEAD', self.workflow)
+        self.assertIn('bash .release-tooling/scripts/ci-notary-auth.sh "$application_keychain" herdr-ci-notary', self.workflow)
+        self.assertEqual(self.workflow.count('--keychain-profile herdr-ci-notary'), 2)
+        self.assertNotIn('--apple-id "$APPLE_ID"', self.workflow)
+        self.assertNotIn('--password "$APPLE_PASSWORD"', self.workflow)
+        self.assertNotIn('--wait --verbose', self.workflow)
+        self.assertIn('security delete-keychain "$application_keychain"', self.workflow)
+
     def test_gatekeeper_assessment_uses_stapled_installer_packages(self) -> None:
         self.assertNotIn("spctl --assess --type execute", self.workflow)
         self.assertIn('spctl --assess --type install --verbose=4 "$package"', self.workflow)

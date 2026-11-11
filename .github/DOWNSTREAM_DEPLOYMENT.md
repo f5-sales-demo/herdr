@@ -40,9 +40,22 @@ Configure these repository secrets before merging a releasable change:
 | `APPLE_INSTALLER_CERTIFICATE_BASE64` | Base64-encoded Developer ID Installer certificate and private key |
 | `APPLE_INSTALLER_CERTIFICATE_PASSWORD` | Password protecting the Installer PKCS#12 export |
 | `APPLE_TEAM_ID` | Team ID in the Developer ID Application identity |
-| `APPLE_ID` | Apple account used by `notarytool` |
-| `APPLE_PASSWORD` | App-specific password used by `notarytool` |
+| `APPLE_NOTARY_KEY_BASE64` | Base64-encoded notarization API private key; preferred when configured |
+| `APPLE_NOTARY_KEY_ID` | API key ID; required with the API private key |
+| `APPLE_NOTARY_ISSUER` | Issuer ID for team API keys; omitted for individual keys |
+| `APPLE_ID` | Apple account used when API credentials are absent |
+| `APPLE_PASSWORD` | App-specific password used when API credentials are absent |
 | `HOMEBREW_TAP_TOKEN` | Fine-grained token with Contents write access to `f5-sales-demo/homebrew-tap` |
+
+Configure either the API key and key ID (with an issuer for a team key), or
+the legacy Apple account and app-specific password. Any configured API field
+selects the API method; incomplete API credentials fail without falling back.
+The macOS job validates the selected credentials once through `notarytool
+store-credentials` in its ephemeral signing keychain before submitting any
+payload. Both submissions use that profile. Decoded keys are private and removed
+on every helper exit; the job removes the keychain on exit. Existing-tag recovery
+loads the helper from the reviewed tooling commit while building the runtime
+from the immutable tag.
 
 The credential gate runs before the release commit and tag are created. A
 missing credential therefore cannot leave behind a new tag with incomplete or
