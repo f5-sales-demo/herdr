@@ -81,6 +81,12 @@ class DownstreamReleaseWorkflowTests(unittest.TestCase):
         self.assertNotIn('--wait --verbose', self.workflow)
         self.assertIn('security delete-keychain "$application_keychain"', self.workflow)
 
+    def test_legacy_certificate_reader_uses_reviewed_tooling_and_password_environment(self) -> None:
+        self.assertEqual(self.workflow.count('sh .release-tooling/scripts/verify-pkcs12.sh'), 2)
+        self.assertIn('APPLE_CERTIFICATE_PASSWORD >/dev/null', self.workflow)
+        self.assertIn('APPLE_INSTALLER_CERTIFICATE_PASSWORD >/dev/null', self.workflow)
+        self.assertNotIn('-passin pass:', self.workflow)
+
     def test_gatekeeper_assessment_uses_stapled_installer_packages(self) -> None:
         self.assertNotIn("spctl --assess --type execute", self.workflow)
         self.assertIn('spctl --assess --type install --verbose=4 "$package"', self.workflow)

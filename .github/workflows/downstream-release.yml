@@ -306,10 +306,10 @@ jobs:
           # Match the proven xcsh import sequence: validate each decoded bundle
           # before mutating a keychain, and let Security.framework resolve the
           # certificate chain instead of preloading duplicate intermediates.
-          openssl pkcs12 -info -in "$application_certificate" -noout \
-            -passin pass:"$APPLE_CERTIFICATE_PASSWORD" >/dev/null
-          openssl pkcs12 -info -in "$installer_certificate" -noout \
-            -passin pass:"$APPLE_INSTALLER_CERTIFICATE_PASSWORD" >/dev/null
+          sh .release-tooling/scripts/verify-pkcs12.sh "$application_certificate" \
+            APPLE_CERTIFICATE_PASSWORD >/dev/null
+          sh .release-tooling/scripts/verify-pkcs12.sh "$installer_certificate" \
+            APPLE_INSTALLER_CERTIFICATE_PASSWORD >/dev/null
 
           for keychain in "$application_keychain" "$installer_keychain"; do
             security create-keychain -p "$keychain_password" "$keychain"
